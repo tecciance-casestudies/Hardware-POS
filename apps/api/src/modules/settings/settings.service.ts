@@ -13,6 +13,7 @@ export class SettingsService {
   getSettings(_tenantId: string): AppSettings {
     return {
       currency: DEFAULT_CURRENCY,
+      taxRatePercent: 0,
       taxInclusive: false,
       highDiscountThresholdPercent: 10,
       receiptFooter: 'Thank you for your purchase!',

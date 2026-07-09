@@ -1,11 +1,14 @@
-import { Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
-import { Sale } from '@hardware-pos/database';
+import { Body, Controller, Get, HttpCode, HttpStatus, Param, Post, Query } from '@nestjs/common';
+import { Receipt, Sale } from '@hardware-pos/database';
 import type { Paginated } from '@hardware-pos/shared';
 
+import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { RequirePermissions } from '../../common/decorators/permissions.decorator';
 import { TenantId } from '../../common/decorators/tenant-id.decorator';
+import { AuthenticatedUser } from '../auth/auth.types';
 import { Permission } from '../auth/permissions';
-import { CreateSaleDto } from './dto/create-sale.dto';
+import { CreateDraftDto } from './dto/create-draft.dto';
+import { CompleteSaleDto } from './dto/complete-sale.dto';
 import { QuerySalesDto } from './dto/query-sales.dto';
 import { SaleWithRelations } from './sales.repository';
 import { SalesService } from './sales.service';
@@ -13,6 +16,27 @@ import { SalesService } from './sales.service';
 @Controller('sales')
 export class SalesController {
   constructor(private readonly salesService: SalesService) {}
+
+  @Post('draft')
+  @RequirePermissions(Permission.SALE_CREATE)
+  createDraft(
+    @TenantId() tenantId: string,
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() dto: CreateDraftDto,
+  ): Promise<SaleWithRelations> {
+    return this.salesService.createDraft(tenantId, user.id, dto);
+  }
+
+  @Post('complete')
+  @HttpCode(HttpStatus.CREATED)
+  @RequirePermissions(Permission.SALE_CREATE)
+  complete(
+    @TenantId() tenantId: string,
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() dto: CompleteSaleDto,
+  ): Promise<SaleWithRelations> {
+    return this.salesService.complete(tenantId, user.id, dto);
+  }
 
   @Get()
   @RequirePermissions(Permission.SALE_READ)
@@ -26,9 +50,15 @@ export class SalesController {
     return this.salesService.getById(tenantId, id);
   }
 
-  @Post()
+  @Post(':id/sync')
   @RequirePermissions(Permission.SALE_CREATE)
-  create(@TenantId() tenantId: string, @Body() dto: CreateSaleDto): Promise<SaleWithRelations> {
-    return this.salesService.create(tenantId, dto);
+  sync(@TenantId() tenantId: string, @Param('id') id: string): Promise<SaleWithRelations> {
+    return this.salesService.syncToQuickBooks(tenantId, id);
+  }
+
+  @Post(':id/receipt')
+  @RequirePermissions(Permission.SALE_CREATE)
+  receipt(@TenantId() tenantId: string, @Param('id') id: string): Promise<Receipt> {
+    return this.salesService.generateReceipt(tenantId, id);
   }
 }

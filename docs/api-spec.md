@@ -105,34 +105,44 @@ GET /v1/customers?query=acme
 
 ## Sales
 
+All sale routes derive tenant + cashier from the JWT. Create routes require `sale:create`,
+reads require `sale:read`. The POS never reduces inventory — QuickBooks is the master; local
+stock is refreshed by product sync after a QuickBooks push succeeds.
+
 ```
-POST /v1/sales                        # create + complete a sale
-body: {
-  "customerId": "<id|null>",
-  "items": [
-    { "productId": "...", "quantity": "2", "discount": { "type": "PERCENT", "value": "10" }, "discountApprovedBy": "<userId|null>" }
-  ],
-  "payments": [ { "method": "CASH", "amount": "40.00" } ]
-}
-201 → { "data": {
-  "id", "number", "type": "RECEIPT|INVOICE", "status": "COMPLETED",
-  "subtotal", "discountTotal", "taxTotal", "total", "amountPaid",
-  "syncStatus": "PENDING",
-  "receipt": { ... }                  # data used to render/print the receipt
-} }
-400 → validation error (e.g. INVOICE without customer, unapproved high discount)
+POST /v1/sales/draft                   # build a DRAFT sale (totals computed, nothing charged)
+body: { "branchId", "registerId?", "customerId?",
+        "items": [ { "productId", "quantity", "unitPrice?",
+                     "discountType?": "PERCENTAGE|FIXED", "discountValue?",
+                     "discountReason?", "approvedByUserId?" } ] }
+200 → { "data": <sale with items, status DRAFT, syncStatus NOT_SYNCED> }
 
-# The API derives type from amountPaid vs total:
-#   amountPaid >= total → RECEIPT   |   amountPaid < total → INVOICE
+POST /v1/sales/complete                # complete a draft (saleId) OR a full cart in one shot
+body (draft):    { "saleId", "customerId?", "payments": [ { "method", "amount", "reference?" } ] }
+body (one-shot): { "branchId", "registerId?", "customerId?", "items": [ ... ], "payments": [ ... ] }
+201 → { "data": <sale status COMPLETED, paymentStatus, quickbooksDocumentType, syncStatus PENDING> }
+400 → validation error (empty cart, price changed, insufficient stock,
+       unapproved high discount, or credit/partial sale without a customer)
 
-GET /v1/sales?page=1&pageSize=25&syncStatus=FAILED
-200 → paginated sales for the history screen (includes syncStatus per sale)
+# Completion pipeline: validate items → validate prices vs cache → check stock →
+#   subtotal → product-wise discounts → tax (if rate > 0) → total → save sale,
+#   items, payments → enqueue an outbound QuickBooks sync job.
+# Transaction type: paidAmount >= total → SALES_RECEIPT; otherwise INVOICE (customer required).
+# Payments: full, partial, or none (full credit) are all supported.
 
-GET /v1/sales/{id}
-200 → full sale with items, payments, syncStatus, qboId
+GET  /v1/sales?page=1&pageSize=25&syncStatus=FAILED
+200 → paginated sales history (syncStatus per sale)
 
-GET /v1/sales/{id}/receipt
-200 → receipt payload for reprint
+GET  /v1/sales/{id}
+200 → full sale with items, payments, customer
+
+POST /v1/sales/{id}/sync               # push the sale to QuickBooks (mock for now)
+200 → sale marked SYNCED with a mock quickbooksDocumentId; payments get mock ids;
+      the sync job closes and a SyncLog entry is written
+400 → sale is not COMPLETED
+
+POST /v1/sales/{id}/receipt            # generate / reprint the receipt (increments printCount)
+200 → { "data": { "receiptNumber", "printCount", "printedAt", "content": { ... } } }
 ```
 
 ## Sync

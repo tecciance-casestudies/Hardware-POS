@@ -5,6 +5,12 @@ export class UpdateSettingsDto {
   @IsOptional()
   currency?: string;
 
+  @IsNumber()
+  @Min(0)
+  @Max(100)
+  @IsOptional()
+  taxRatePercent?: number;
+
   @IsBoolean()
   @IsOptional()
   taxInclusive?: boolean;
