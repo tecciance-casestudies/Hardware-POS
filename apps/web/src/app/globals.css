@@ -1,0 +1,23 @@
+@import 'tailwindcss';
+
+/*
+ * Clean white SaaS POS theme.
+ * Blue is reserved for primary actions; the canvas stays white/neutral.
+ */
+@theme {
+  --color-brand-50: #eff6ff;
+  --color-brand-100: #dbeafe;
+  --color-brand-500: #3b82f6;
+  --color-brand-600: #2563eb;
+  --color-brand-700: #1d4ed8;
+
+  --color-surface: #ffffff;
+  --color-canvas: #f8fafc;
+}
+
+html,
+body {
+  background-color: var(--color-canvas);
+  color: #0f172a;
+  -webkit-font-smoothing: antialiased;
+}

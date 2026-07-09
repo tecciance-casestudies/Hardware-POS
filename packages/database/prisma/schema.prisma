@@ -1,0 +1,23 @@
+// Hardware POS — Prisma schema
+//
+// QuickBooks Online is the inventory and accounting source of truth. This
+// database holds the POS's local operational data and a product cache for fast
+// checkout. Models are intentionally NOT defined yet — this is the project
+// foundation only.
+//
+// Planned models (to be added alongside features):
+//   - User            PIN login, roles (cashier / manager / admin)
+//   - Product         local cache of QuickBooks items, prices, stock
+//   - Customer        local cache of QuickBooks customers
+//   - Sale / SaleItem completed sales, product-wise discounts
+//   - Payment         payments against sales
+//   - SyncLog         QuickBooks sync status, errors, and retries
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
