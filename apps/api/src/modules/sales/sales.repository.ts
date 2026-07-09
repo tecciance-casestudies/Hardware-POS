@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { Prisma, Product, Sale, SyncStatus } from '@hardware-pos/database';
 
 import { PrismaService } from '../../prisma/prisma.service';
+import { SyncQueueService } from '../sync/queue/sync-queue.service';
 import { ComputedLine, PersistSaleInput } from './sales.types';
 
 export type SaleWithRelations = Prisma.SaleGetPayload<{
@@ -12,7 +13,10 @@ const saleInclude = { items: true, payments: true, customer: true } as const;
 
 @Injectable()
 export class SalesRepository {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly syncQueue: SyncQueueService,
+  ) {}
 
   // ── reads ────────────────────────────────────────────────────────────────
 
@@ -134,7 +138,7 @@ export class SalesRepository {
         },
         include: saleInclude,
       });
-      await this.enqueueSaleSync(tx, input.tenantId, sale.id);
+      await this.syncQueue.enqueueSaleSync(tx, input.tenantId, sale.id);
       return sale;
     });
   }
@@ -175,7 +179,7 @@ export class SalesRepository {
         },
         include: saleInclude,
       });
-      await this.enqueueSaleSync(tx, tenantId, sale.id);
+      await this.syncQueue.enqueueSaleSync(tx, tenantId, sale.id);
       return sale;
     });
   }
@@ -233,33 +237,6 @@ export class SalesRepository {
   ): Promise<string> {
     const count = await client.sale.count({ where: { tenantId } });
     return `S-${String(count + 1).padStart(6, '0')}`;
-  }
-
-  private async enqueueSaleSync(
-    tx: Prisma.TransactionClient,
-    tenantId: string,
-    saleId: string,
-  ): Promise<void> {
-    await tx.syncJob.create({
-      data: {
-        tenantId,
-        type: 'SALE_PUSH',
-        direction: 'OUTBOUND',
-        entityType: 'SALE',
-        entityId: saleId,
-        status: 'PENDING',
-      },
-    });
-    await tx.syncLog.create({
-      data: {
-        tenantId,
-        entityType: 'SALE',
-        entityId: saleId,
-        direction: 'OUTBOUND',
-        status: 'PENDING',
-        message: 'Sale queued for QuickBooks sync',
-      },
-    });
   }
 }
 

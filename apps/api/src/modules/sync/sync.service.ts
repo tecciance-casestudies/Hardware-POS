@@ -6,10 +6,14 @@ import { paginate } from '../../common/pagination';
 import { QuerySyncLogsDto } from './dto/query-sync-logs.dto';
 import { RefreshResult, RetryResult } from './sync.interfaces';
 import { SyncRepository } from './sync.repository';
+import { SyncQueueService } from './queue/sync-queue.service';
 
 @Injectable()
 export class SyncService {
-  constructor(private readonly syncRepository: SyncRepository) {}
+  constructor(
+    private readonly syncRepository: SyncRepository,
+    private readonly syncQueue: SyncQueueService,
+  ) {}
 
   async listLogs(tenantId: string, query: QuerySyncLogsDto): Promise<Paginated<SyncLog>> {
     const [items, total] = await this.syncRepository.findLogs(
@@ -21,9 +25,12 @@ export class SyncService {
     return paginate(items, total, query.page, query.pageSize);
   }
 
-  /** TODO: reset the sale's sync job to PENDING and re-enqueue it. */
-  retrySale(_tenantId: string, _saleId: string): Promise<RetryResult> {
-    throw new NotImplementedException('Sync retry is not implemented yet');
+  /**
+   * Manual "Retry Sync": re-queue a sale's failed sync job so the worker retries
+   * it on the next poll (with a fresh attempt budget).
+   */
+  retrySale(tenantId: string, saleId: string): Promise<RetryResult> {
+    return this.syncQueue.requeueSale(tenantId, saleId);
   }
 
   /** TODO: enqueue an inbound catalog pull from QuickBooks. */

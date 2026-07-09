@@ -205,12 +205,29 @@ Generating receipts / marking printed requires `sale:create`; listing/reading re
 
 ## Sync
 
+### Sync queue & worker
+
+Completing a sale writes a `SyncJob` row (`type = SALES_SYNC`, `status = PENDING`) **in the same
+transaction** as the sale — a transactional outbox, so a sale is never lost even if QuickBooks is
+down. A background **worker** polls the queue and drains it:
+
+1. recovers jobs stuck in `SYNCING` (crash recovery) back to `PENDING`,
+2. atomically **claims** due `PENDING` jobs (→ `SYNCING`, `attempts++`) — safe for concurrent workers,
+3. dispatches each to a handler by `type` (`SALES_SYNC` → QuickBooks sales sync),
+4. on success marks `SYNCED`; on failure **reschedules with linear backoff** until `maxAttempts`,
+   then leaves it `FAILED` for a manual retry. The error message is stored on the job and logged.
+
+The worker is a thin, swappable layer: the queue service, handler registry, and producers are the
+seams to move to **BullMQ/Redis** later without touching sale completion or the handlers. Configure
+via `SYNC_WORKER_ENABLED` (`false` to disable, e.g. when BullMQ takes over), `SYNC_WORKER_INTERVAL_MS`,
+`SYNC_WORKER_BATCH_SIZE`, `SYNC_RETRY_BACKOFF_MS`, `SYNC_STALE_MS`.
+
 ```
 GET /v1/sync/logs?entityType=SALE&status=FAILED&page=1
 200 → { "data": { "items": [ { "id", "entityType", "entityId", "direction", "status", "attempt", "error", "createdAt" } ], ... } }
 
-POST /v1/sync/sales/{id}/retry        # manual retry of a failed outbound sale sync
-202 → { "data": { "id", "syncStatus": "PENDING" } }
+POST /v1/sync/sales/{id}/retry        # manual "Retry Sync": re-queue a sale's job (attempts reset,
+202 → { "data": { "id", "syncStatus": "PENDING" } }   #   status → PENDING); the worker retries it
 
 POST /v1/sync/products/refresh        # on-demand inbound catalog pull (admin)
 202 → { "data": { "started": true } }

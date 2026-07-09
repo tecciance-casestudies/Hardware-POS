@@ -37,6 +37,37 @@ export class EnvironmentVariables {
   @IsOptional()
   JWT_EXPIRES_IN = '12h';
 
+  // ── Sync queue worker ──
+  // The background worker drains SyncJob rows. Disable ('false') in tests or when
+  // a BullMQ/Redis worker takes over.
+  @IsString()
+  @IsOptional()
+  SYNC_WORKER_ENABLED = 'true';
+
+  @Type(() => Number)
+  @IsInt()
+  @Min(250)
+  @IsOptional()
+  SYNC_WORKER_INTERVAL_MS = 5_000;
+
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @IsOptional()
+  SYNC_WORKER_BATCH_SIZE = 10;
+
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @IsOptional()
+  SYNC_RETRY_BACKOFF_MS = 30_000;
+
+  @Type(() => Number)
+  @IsInt()
+  @Min(1_000)
+  @IsOptional()
+  SYNC_STALE_MS = 120_000;
+
   // ── QuickBooks Online OAuth 2.0 ──
   // Optional so the app boots without QBO configured; the endpoints validate
   // presence when a connection is initiated.
