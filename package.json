@@ -21,8 +21,13 @@
     "clean": "turbo run clean && rm -rf node_modules",
     "db:generate": "pnpm --filter @hardware-pos/database db:generate",
     "db:migrate": "pnpm --filter @hardware-pos/database db:migrate",
+    "db:deploy": "pnpm --filter @hardware-pos/database db:deploy",
     "db:seed": "pnpm --filter @hardware-pos/database db:seed",
-    "db:studio": "pnpm --filter @hardware-pos/database db:studio"
+    "db:studio": "pnpm --filter @hardware-pos/database db:studio",
+    "db:up": "docker compose up -d --wait db",
+    "db:down": "docker compose down",
+    "db:reset": "docker compose down -v && pnpm db:up && pnpm db:deploy && pnpm db:seed",
+    "setup": "pnpm db:up && pnpm db:generate && pnpm db:deploy && pnpm db:seed"
   },
   "devDependencies": {
     "prettier": "^3.3.3",

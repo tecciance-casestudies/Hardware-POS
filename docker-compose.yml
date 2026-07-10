@@ -1,0 +1,33 @@
+# Local development dependencies for Hardware POS.
+#
+# Runs only PostgreSQL — the app itself runs on the host via `pnpm dev`. The
+# credentials/port/database below match the defaults in the `.env.example`
+# files (postgres:postgres @ localhost:5432/hardware_pos), so no env editing is
+# needed for local development.
+#
+#   pnpm db:up      # start postgres in the background
+#   pnpm setup      # start db + generate client + migrate + seed
+#   pnpm dev        # run web + api
+#   pnpm db:down    # stop postgres (keeps data)
+
+services:
+  db:
+    image: postgres:16
+    container_name: hardware-pos-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: hardware_pos
+    ports:
+      - '5432:5432'
+    volumes:
+      - hardware-pos-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d hardware_pos']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  hardware-pos-db-data:
