@@ -2,13 +2,18 @@
 
 This folder holds design and reference documentation for the Hardware POS project.
 
-| Document                                             | Description                                            |
-| ---------------------------------------------------- | ------------------------------------------------------ |
-| [getting-started.md](./getting-started.md)           | How to set up and run the monorepo locally.            |
-| [architecture.md](./architecture.md)                 | System architecture and how the packages fit together. |
-| [pos-features.md](./pos-features.md)                 | Planned cashier front-end features.                    |
-| [quickbooks-integration.md](./quickbooks-integration.md) | QuickBooks Online sync design (not yet implemented).   |
-| [database.md](./database.md)                         | Data model notes and the local operational schema.     |
+| Document                                                 | Description                                                    |
+| -------------------------------------------------------- | ------------------------------------------------------------- |
+| [requirements.md](./requirements.md)                     | Product scope, roles, functional/non-functional requirements. |
+| [architecture.md](./architecture.md)                     | System architecture and how the packages fit together.        |
+| [database-model.md](./database-model.md)                 | Local PostgreSQL / Prisma data model.                         |
+| [quickbooks-integration.md](./quickbooks-integration.md) | QuickBooks Online sync design (OAuth, mapping, retry).        |
+| [api-spec.md](./api-spec.md)                             | REST API contract (`/v1`).                                     |
+| [deployment-plan.md](./deployment-plan.md)               | Environments, config, migrations, release flow.               |
+| [getting-started.md](./getting-started.md)               | How to set up and run the monorepo locally.                   |
+| [pos-features.md](./pos-features.md)                     | Cashier front-end feature list.                               |
+| [testing/](./testing/README.md)                          | Test strategy: unit/integration plans, manual QA & UAT checklists. |
 
-> These are living placeholder documents created with the project foundation.
-> They will be expanded as features are built.
+> QuickBooks Online remains the source of truth for products, inventory, prices, accounting,
+> and reports. The POS is the cashier sales front-end. These documents describe the target
+> design; features are still being built.

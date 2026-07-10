@@ -11,6 +11,7 @@
     "experimentalDecorators": true,
     "declaration": false,
     "declarationMap": false,
+    "incremental": false,
     "noUncheckedIndexedAccess": false
   },
   "include": ["src"],

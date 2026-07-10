@@ -1,0 +1,309 @@
+# API Specification
+
+REST API served by `apps/api` (NestJS). All routes are versioned under **`/v1`**.
+
+> Draft contract — endpoints are not implemented yet. Shapes align with the models in
+> [database-model.md](./database-model.md) and the shared enums in `packages/shared`.
+
+## Conventions
+
+- Base URL: `http://localhost:4000/v1` (dev). Configurable via `API_PORT` / `NEXT_PUBLIC_API_URL`.
+- JSON request/response bodies. Money as string decimals (e.g. `"12.50"`).
+- Success envelope: `{ "data": ... }`. Error envelope: `{ "statusCode", "message", "error" }`.
+- Auth: cashier logs in with a PIN and receives a session token (JWT/bearer) sent as
+  `Authorization: Bearer <token>` on subsequent calls.
+- Tenant context: until auth is wired, tenant-scoped endpoints require an `x-tenant-id`
+  header (a temporary placeholder; the tenant will later be derived from the session token).
+- Not-yet-implemented write/QuickBooks flows return `501 Not Implemented` in the standard
+  error envelope.
+- Pagination: `?page=1&pageSize=25` → `{ "data": { "items": [], "total", "page", "pageSize" } }`.
+
+## Health
+
+```
+GET /v1/health
+200 → { "status": "ok", "service": "hardware-pos-api", "timestamp": "..." }
+```
+
+## Auth
+
+Two login methods issue the same bearer JWT (payload: `sub`, `tenantId`, `role`). Send it as
+`Authorization: Bearer <token>` on all other calls; the tenant is taken from the token.
+
+```
+POST /v1/auth/login                   # email + password (owner / admin / accountant)
+body:  { "email": "owner@hardwarepos.test", "password": "password123" }
+200 →  { "data": { "token": "...", "user": { "id", "tenantId", "name", "email", "role" } } }
+401 →  invalid email or password
+
+POST /v1/auth/pin-login               # PIN (cashier / manager); requires x-tenant-id header
+headers: x-tenant-id: <tenantId>
+body:  { "pin": "1111" }
+200 →  { "data": { "token": "...", "user": { ... } } }
+401 →  invalid PIN
+
+GET  /v1/auth/me                      # current user + effective permissions
+200 →  { "data": { "id", "tenantId", "name", "email", "role", "branchId", "permissions": [] } }
+```
+
+## Discounts (manual, product-wise)
+
+Each sale line may carry a manual discount (`PERCENTAGE` or `FIXED`), a `discountReason`, and —
+when it exceeds the operator's limit — an approver. Per-role limits (percentage of the line):
+
+| Role              | Max discount without approval |
+| ----------------- | ----------------------------- |
+| Cashier / Accountant | 0%                         |
+| Manager           | 15%                           |
+| Owner / Admin     | unlimited                     |
+
+If a line's discount exceeds the acting user's limit, sale create returns **403** with a
+machine-readable body so the front-end can pop a manager-PIN modal:
+
+```
+403 → { "statusCode": 403, "error": "DiscountApprovalRequired", "requiresApproval": true,
+        "productId": "...", "requiredPercent": 20, "message": "..." }
+```
+
+The cashier then gets an approval token and retries with it on that line:
+
+```
+POST /v1/discounts/approve            # cashier submits a manager's PIN
+body:  { "managerPin": "2222", "productId": "...", "discountType": "PERCENTAGE",
+         "discountValue": 15, "reason": "loyal customer" }
+200 →  { "data": { "approved": true,  "approvedByUserId": "...", "approvalToken": "<jwt, 15m>" } }
+200 →  { "data": { "approved": false, "approvedByUserId": "...|null", "approvalToken": null,
+                   "reason": "Discount exceeds this approver’s limit" } }
+401 →  invalid manager PIN
+```
+
+The token binds tenant + product + discount type/value; attach it as `approvalToken` on the
+sale item. The approver's own limit is re-checked against the real line at completion (so a
+manager token cannot cover a discount beyond 15%). Completing a draft reuses the approver
+already recorded on the draft line — no re-approval needed.
+
+### Roles & permissions
+
+Roles: `OWNER`, `ADMIN`, `MANAGER`, `CASHIER`, `ACCOUNTANT`. Routes are protected by a global
+JWT guard plus role/permission guards. Summary of enforced access:
+
+| Capability                         | Roles                          |
+| ---------------------------------- | ------------------------------ |
+| Create sales / take payments       | Cashier, Manager, Owner, Admin |
+| Approve high discounts             | Manager, Owner, Admin          |
+| View sync logs & QuickBooks status | Accountant, Owner, Admin       |
+| Connect QuickBooks / manage users / settings | Owner, Admin         |
+| Everything                         | Owner, Admin                   |
+
+Unauthenticated → `401`; authenticated but not permitted → `403`.
+
+## Products (read-only cache)
+
+QuickBooks Online is the inventory master; products are a **read-only local cache**. There are
+no create/update/delete product endpoints — the POS never edits stock. The cache is refreshed
+only via sync (mock sync below, real QuickBooks sync later).
+
+```
+GET /v1/products?search=hammer&page=1&pageSize=25          # free-text (name/sku/barcode)
+200 → { "data": { "items": [ { "id", "quickbooksItemId", "sku", "barcode", "name", "unitType", "unitPrice", "quantityOnHand", "syncStatus" } ], "total", "page", "pageSize" } }
+
+GET /v1/products/search?name=&sku=&barcode=&categoryId=&isActive=true   # structured filters (AND)
+200 → paginated products
+
+GET /v1/products/barcode/{barcode}
+200 → { "data": { "id", "name", "unitPrice", "quantityOnHand", ... } }
+404 → unknown barcode
+
+GET /v1/products/{id}
+200 → single product   |   404 → not found
+
+POST /v1/products/sync/mock            # simulate a QuickBooks catalog pull (owner/admin only)
+200 → { "data": { "created", "updated", "total", "categories" } }
+403 → lacks quickbooks:manage
+
+GET /v1/categories                     # product categories with product counts
+200 → { "data": [ { "id", "name", "parentId", "isActive", "_count": { "products" } } ] }
+```
+
+All product/category read routes require `product:read`; every role has it.
+
+## Customers (read-only cache)
+
+```
+GET /v1/customers?query=acme
+200 → { "data": { "items": [ { "id", "qboId", "name", "email", "phone" } ], ... } }
+```
+
+## Sales
+
+All sale routes derive tenant + cashier from the JWT. Create routes require `sale:create`,
+reads require `sale:read`. The POS never reduces inventory — QuickBooks is the master; local
+stock is refreshed by product sync after a QuickBooks push succeeds.
+
+```
+POST /v1/sales/draft                   # build a DRAFT sale (totals computed, nothing charged)
+body: { "branchId", "registerId?", "customerId?",
+        "items": [ { "productId", "quantity", "unitPrice?",
+                     "discountType?": "PERCENTAGE|FIXED", "discountValue?",
+                     "discountReason?", "approvalToken?" } ] }
+200 → { "data": <sale with items, status DRAFT, syncStatus NOT_SYNCED> }
+
+POST /v1/sales/complete                # complete a draft (saleId) OR a full cart in one shot
+body (draft):    { "saleId", "customerId?", "payments": [ { "method", "amount", "reference?" } ] }
+body (one-shot): { "branchId", "registerId?", "customerId?", "items": [ ... ], "payments": [ ... ] }
+201 → { "data": <sale status COMPLETED, paymentStatus, quickbooksDocumentType, syncStatus PENDING> }
+400 → validation error (empty cart, price changed, insufficient stock,
+       unapproved high discount, or credit/partial sale without a customer)
+
+# Completion pipeline: validate items → validate prices vs cache → check stock →
+#   subtotal → product-wise discounts → tax (if rate > 0) → total → save sale,
+#   items, payments → enqueue an outbound QuickBooks sync job.
+# Transaction type: paidAmount >= total → SALES_RECEIPT; otherwise INVOICE (customer required).
+# Payments: full, partial, or none (full credit) are all supported.
+
+GET  /v1/sales?page=1&pageSize=25&syncStatus=FAILED
+200 → paginated sales history (syncStatus per sale)
+
+GET  /v1/sales/{id}
+200 → full sale with items, payments, customer
+
+POST /v1/sales/{id}/sync               # push the sale to QuickBooks (mock for now)
+200 → sale marked SYNCED with a mock quickbooksDocumentId; payments get mock ids;
+      the sync job closes and a SyncLog entry is written
+400 → sale is not COMPLETED
+```
+
+## Receipts & print jobs
+
+Printing is browser-based for v1: each endpoint returns a self-contained printable HTML
+document (with a Print button) inside a `PrintJob`. A hardware sale prints the **customer
+receipt** by default; if any line's product has `requiresWarehousePickup = true`, a
+**warehouse picking copy** (listing only the pickup items) is created alongside it.
+
+```
+POST /v1/receipts/{saleId}/customer    # customer receipt (+ auto warehouse copy if needed)
+201 → { "data": { "receiptNumber", "warehousePickupRequired": bool,
+                   "printJob": { "id", "type": "CUSTOMER_RECEIPT", "status", "html" },
+                   "warehousePrintJob": { ... } | null } }
+400 → sale not completed   |   404 → sale not found
+
+POST /v1/receipts/{saleId}/warehouse   # (re)generate the warehouse picking copy
+201 → { "data": { "id", "type": "WAREHOUSE_PICKING", "status": "PENDING", "html" } }
+400 → no items on the sale require warehouse pickup
+
+GET  /v1/receipts/sale/{saleId}        # stored customer-receipt record
+GET  /v1/receipts/{id}
+
+GET  /v1/print-jobs?saleId=&type=CUSTOMER_RECEIPT|WAREHOUSE_PICKING&status=PENDING|PRINTED|FAILED
+200 → paginated print jobs (each includes its printable html)
+
+POST /v1/print-jobs/{id}/mark-printed  # mark a job PRINTED after the browser prints it
+200 → { "data": { "id", "status": "PRINTED", "printedAt" } }
+```
+
+Generating receipts / marking printed requires `sale:create`; listing/reading requires `sale:read`.
+
+## Sync
+
+### Sync queue & worker
+
+Completing a sale writes a `SyncJob` row (`type = SALES_SYNC`, `status = PENDING`) **in the same
+transaction** as the sale — a transactional outbox, so a sale is never lost even if QuickBooks is
+down. A background **worker** polls the queue and drains it:
+
+1. recovers jobs stuck in `SYNCING` (crash recovery) back to `PENDING`,
+2. atomically **claims** due `PENDING` jobs (→ `SYNCING`, `attempts++`) — safe for concurrent workers,
+3. dispatches each to a handler by `type` (`SALES_SYNC` → QuickBooks sales sync),
+4. on success marks `SYNCED`; on failure **reschedules with linear backoff** until `maxAttempts`,
+   then leaves it `FAILED` for a manual retry. The error message is stored on the job and logged.
+
+The worker is a thin, swappable layer: the queue service, handler registry, and producers are the
+seams to move to **BullMQ/Redis** later without touching sale completion or the handlers. Configure
+via `SYNC_WORKER_ENABLED` (`false` to disable, e.g. when BullMQ takes over), `SYNC_WORKER_INTERVAL_MS`,
+`SYNC_WORKER_BATCH_SIZE`, `SYNC_RETRY_BACKOFF_MS`, `SYNC_STALE_MS`.
+
+```
+GET /v1/sync/logs?entityType=SALE&status=FAILED&page=1
+200 → { "data": { "items": [ { "id", "entityType", "entityId", "direction", "status", "attempt", "error", "createdAt" } ], ... } }
+
+POST /v1/sync/sales/{id}/retry        # manual "Retry Sync": re-queue a sale's job (attempts reset,
+202 → { "data": { "id", "syncStatus": "PENDING" } }   #   status → PENDING); the worker retries it
+
+POST /v1/sync/products/refresh        # on-demand inbound catalog pull (admin)
+202 → { "data": { "started": true } }
+```
+
+## QuickBooks connection (OAuth 2.0)
+
+Real Intuit OAuth 2.0. Configure `QUICKBOOKS_CLIENT_ID`, `QUICKBOOKS_CLIENT_SECRET`,
+`QUICKBOOKS_REDIRECT_URI`, `QUICKBOOKS_ENVIRONMENT`, and `TOKEN_ENCRYPTION_KEY`. Access and
+refresh tokens are stored **encrypted at rest** (AES-256-GCM) and never returned to the client.
+
+```
+GET  /v1/quickbooks/connect            # owner/admin — 302 → Intuit authorization screen
+                                       # state is a signed, short-lived JWT carrying the tenant
+
+GET  /v1/quickbooks/callback           # public redirect target from Intuit
+                                       # verifies state, exchanges the code for tokens, stores
+                                       # them (encrypted) + realmId + expiry, then
+                                       # 302 → {WEB_ORIGIN}/quickbooks?connected=1
+                                       # on failure → …/quickbooks?error=<message>
+
+POST /v1/quickbooks/disconnect         # owner/admin — revokes the token and removes the connection
+200 → { "data": { "disconnected": true } }
+
+GET  /v1/quickbooks/status             # quickbooks:read — never exposes tokens
+200 → { "data": { "connected": true, "realmId": "...", "environment": "sandbox", "tokenExpiresAt": "..." } }
+```
+
+Access tokens are auto-refreshed (using the stored refresh token) when expired; refresh happens
+server-side only and is used by the sync worker.
+
+## QuickBooks product sync
+
+Pulls the item catalogue from QuickBooks into the local product cache. Uses the stored access
+token (refreshing it first if expired), queries `Item` records, imports **Inventory** and
+**NonInventory** items (other types such as `Service` are skipped), and upserts them by
+`(tenantId, quickbooksItemId)`. Mapped fields: `name`, `sku`, `description`, `unitPrice`,
+`quantityOnHand`, `type`, `isActive`. Each run records an inbound `SyncLog` entry.
+
+```
+POST /v1/quickbooks/sync-products      # quickbooks:manage — requires an active connection
+200 → { "data": { "created": 4, "updated": 0, "skipped": 2, "failed": 0, "total": 6 } }
+404 → QuickBooks is not connected
+```
+
+## QuickBooks sales sync
+
+Pushes a completed sale to QuickBooks. A **fully paid** sale becomes a **Sales Receipt**; a
+**credit / partial** sale becomes an **Invoice**, and when any amount was paid a **Payment** is
+created and linked to that invoice. Sale line items reference their `quickbooksItemId` when the
+product has been synced. Product-wise discounts are baked into each line's net amount (QuickBooks
+has no per-line discount field) and noted in the line description — see the `TODO(accountant)`
+comments where an itemised discount line or document-level discount would need confirmation.
+
+The QuickBooks document id is stored on the sale, the QuickBooks payment id on the sale's
+payments, and every attempt records a `SyncLog`. If the push fails, the sale is **kept in the POS**
+and marked `FAILED` (with `syncError`) — never rolled back.
+
+```
+POST /v1/quickbooks/sync-sale/{saleId} # quickbooks:manage — sale must be COMPLETED
+200 → { "data": { "saleId", "saleNumber", "status": "SYNCED"|"FAILED",
+                  "quickbooksDocumentType": "SALES_RECEIPT"|"INVOICE",
+                  "quickbooksDocumentId", "quickbooksPaymentId", "message" } }
+404 → QuickBooks not connected / sale not found
+
+POST /v1/quickbooks/retry/{syncLogId}  # quickbooks:manage — re-run the sale sync for a failed log
+200 → same shape as sync-sale (attempt count incremented)
+```
+
+## Error codes
+
+| Status | Meaning                                             |
+| ------ | --------------------------------------------------- |
+| 400    | Validation error (bad body, business-rule violation)|
+| 401    | Missing/invalid session or PIN                      |
+| 403    | Authenticated but not permitted (e.g. non-manager)  |
+| 404    | Resource not found                                  |
+| 409    | Conflict (e.g. duplicate sale number)               |
+| 502    | Upstream QBO error surfaced to the caller           |

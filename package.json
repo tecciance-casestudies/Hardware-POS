@@ -21,6 +21,7 @@
     "clean": "turbo run clean && rm -rf node_modules",
     "db:generate": "pnpm --filter @hardware-pos/database db:generate",
     "db:migrate": "pnpm --filter @hardware-pos/database db:migrate",
+    "db:seed": "pnpm --filter @hardware-pos/database db:seed",
     "db:studio": "pnpm --filter @hardware-pos/database db:studio"
   },
   "devDependencies": {

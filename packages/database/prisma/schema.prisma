@@ -1,17 +1,12 @@
 // Hardware POS — Prisma schema
 //
-// QuickBooks Online is the inventory and accounting source of truth. This
-// database holds the POS's local operational data and a product cache for fast
-// checkout. Models are intentionally NOT defined yet — this is the project
-// foundation only.
+// QuickBooks Online is the product / inventory / accounting master. This
+// database holds the POS's local operational data plus a cached copy of
+// QuickBooks products for fast checkout. The POS never edits stock or prices
+// in QuickBooks directly — inventory changes as a side effect of the Sales
+// Receipts / Invoices it pushes.
 //
-// Planned models (to be added alongside features):
-//   - User            PIN login, roles (cashier / manager / admin)
-//   - Product         local cache of QuickBooks items, prices, stock
-//   - Customer        local cache of QuickBooks customers
-//   - Sale / SaleItem completed sales, product-wise discounts
-//   - Payment         payments against sales
-//   - SyncLog         QuickBooks sync status, errors, and retries
+// Money is stored as Decimal(12, 2); quantities as Decimal(12, 3).
 
 generator client {
   provider = "prisma-client-js"
@@ -20,4 +15,544 @@ generator client {
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────────────────────
+// Enums
+// ─────────────────────────────────────────────────────────────
+
+enum UserRole {
+  CASHIER
+  MANAGER
+  ADMIN
+  OWNER
+  ACCOUNTANT
+}
+
+enum PaymentMethod {
+  CASH
+  CARD
+  BANK_TRANSFER
+  QR_PAYMENT
+  CHECK
+  STORE_CREDIT
+  OTHER
+}
+
+enum PaymentStatus {
+  UNPAID
+  PARTIAL
+  PAID
+  REFUNDED
+}
+
+enum SyncStatus {
+  NOT_SYNCED
+  PENDING
+  SYNCING
+  SYNCED
+  FAILED
+}
+
+enum DiscountType {
+  PERCENTAGE
+  FIXED
+}
+
+enum QuickBooksDocumentType {
+  SALES_RECEIPT
+  INVOICE
+}
+
+enum SaleStatus {
+  DRAFT
+  COMPLETED
+  VOIDED
+  REFUNDED
+}
+
+enum PrintJobType {
+  CUSTOMER_RECEIPT
+  WAREHOUSE_PICKING
+}
+
+enum PrintJobStatus {
+  PENDING
+  PRINTED
+  FAILED
+}
+
+// ─────────────────────────────────────────────────────────────
+// Tenancy & locations
+// ─────────────────────────────────────────────────────────────
+
+model Tenant {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  branches             Branch[]
+  registers            Register[]
+  users                User[]
+  roles                Role[]
+  categories           ProductCategory[]
+  products             Product[]
+  customers            Customer[]
+  sales                Sale[]
+  payments             Payment[]
+  discounts            Discount[]
+  syncJobs             SyncJob[]
+  syncLogs             SyncLog[]
+  quickbooksConnection QuickBooksConnection?
+  quickbooksMappings   QuickBooksMapping[]
+  auditLogs            AuditLog[]
+  printJobs            PrintJob[]
+}
+
+model Branch {
+  id        String   @id @default(cuid())
+  tenantId  String
+  name      String
+  code      String
+  address   String?
+  phone     String?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant    Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  registers Register[]
+  users     User[]
+  sales     Sale[]
+
+  @@unique([tenantId, code])
+  @@index([tenantId])
+}
+
+model Register {
+  id        String   @id @default(cuid())
+  tenantId  String
+  branchId  String
+  name      String
+  code      String
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  branch Branch @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  sales  Sale[]
+
+  @@unique([branchId, code])
+  @@index([tenantId])
+  @@index([branchId])
+}
+
+// ─────────────────────────────────────────────────────────────
+// Access control
+// ─────────────────────────────────────────────────────────────
+
+model User {
+  id           String    @id @default(cuid())
+  tenantId     String
+  branchId     String?
+  roleId       String?
+  role         UserRole  @default(CASHIER)
+  name         String
+  email        String?
+  passwordHash String?
+  pinHash      String?
+  isActive     Boolean   @default(true)
+  lastLoginAt  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  tenant            Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  branch            Branch?    @relation(fields: [branchId], references: [id])
+  customRole        Role?      @relation(fields: [roleId], references: [id])
+  sales             Sale[]
+  payments          Payment[]
+  approvedDiscounts SaleItem[] @relation("DiscountApprover")
+  auditLogs         AuditLog[]
+
+  @@unique([tenantId, email])
+  @@index([tenantId])
+  @@index([branchId])
+}
+
+model Role {
+  id          String   @id @default(cuid())
+  tenantId    String
+  name        String
+  description String?
+  isSystem    Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  tenant      Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  users       User[]
+  permissions Permission[] @relation("RolePermissions")
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+}
+
+model Permission {
+  id          String   @id @default(cuid())
+  key         String   @unique
+  description String?
+  createdAt   DateTime @default(now())
+
+  roles Role[] @relation("RolePermissions")
+}
+
+// ─────────────────────────────────────────────────────────────
+// Catalog (cached from QuickBooks)
+// ─────────────────────────────────────────────────────────────
+
+model ProductCategory {
+  id               String   @id @default(cuid())
+  tenantId         String
+  quickbooksItemId String?
+  name             String
+  parentId         String?
+  isActive         Boolean  @default(true)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  tenant   Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  parent   ProductCategory?  @relation("CategoryTree", fields: [parentId], references: [id])
+  children ProductCategory[] @relation("CategoryTree")
+  products Product[]
+
+  @@index([tenantId])
+  @@index([parentId])
+}
+
+model Product {
+  id                      String     @id @default(cuid())
+  tenantId                String
+  quickbooksItemId        String?
+  name                    String
+  sku                     String?
+  barcode                 String?
+  description             String?
+  categoryId              String?
+  unitType                String?
+  unitPrice               Decimal    @default(0) @db.Decimal(12, 2)
+  quantityOnHand          Decimal    @default(0) @db.Decimal(12, 3)
+  type                    String?
+  isActive                Boolean    @default(true)
+  requiresWarehousePickup Boolean    @default(false)
+  lastSyncedAt            DateTime?
+  syncStatus              SyncStatus @default(NOT_SYNCED)
+  createdAt               DateTime   @default(now())
+  updatedAt               DateTime   @updatedAt
+
+  tenant    Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  category  ProductCategory? @relation(fields: [categoryId], references: [id])
+  saleItems SaleItem[]
+
+  @@unique([tenantId, quickbooksItemId])
+  @@unique([tenantId, sku])
+  @@unique([tenantId, barcode])
+  @@index([tenantId])
+  @@index([tenantId, name])
+  @@index([categoryId])
+}
+
+// ─────────────────────────────────────────────────────────────
+// Customers (cached from QuickBooks)
+// ─────────────────────────────────────────────────────────────
+
+model Customer {
+  id                   String     @id @default(cuid())
+  tenantId             String
+  quickbooksCustomerId String?
+  name                 String
+  email                String?
+  phone                String?
+  billingAddress       String?
+  isActive             Boolean    @default(true)
+  lastSyncedAt         DateTime?
+  syncStatus           SyncStatus @default(NOT_SYNCED)
+  createdAt            DateTime   @default(now())
+  updatedAt            DateTime   @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  sales  Sale[]
+
+  @@unique([tenantId, quickbooksCustomerId])
+  @@index([tenantId])
+  @@index([tenantId, name])
+}
+
+// ─────────────────────────────────────────────────────────────
+// Sales
+// ─────────────────────────────────────────────────────────────
+
+model Sale {
+  id                     String                  @id @default(cuid())
+  tenantId               String
+  branchId               String
+  registerId             String?
+  cashierId              String
+  customerId             String?
+  saleNumber             String
+  status                 SaleStatus              @default(DRAFT)
+  subtotal               Decimal                 @default(0) @db.Decimal(12, 2)
+  totalDiscount          Decimal                 @default(0) @db.Decimal(12, 2)
+  taxAmount              Decimal                 @default(0) @db.Decimal(12, 2)
+  total                  Decimal                 @default(0) @db.Decimal(12, 2)
+  paidAmount             Decimal                 @default(0) @db.Decimal(12, 2)
+  balanceAmount          Decimal                 @default(0) @db.Decimal(12, 2)
+  paymentStatus          PaymentStatus           @default(UNPAID)
+  quickbooksDocumentType QuickBooksDocumentType?
+  quickbooksDocumentId   String?
+  syncStatus             SyncStatus              @default(NOT_SYNCED)
+  syncError              String?
+  completedAt            DateTime?
+  createdAt              DateTime                @default(now())
+  updatedAt              DateTime                @updatedAt
+
+  tenant    Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  branch    Branch     @relation(fields: [branchId], references: [id])
+  register  Register?  @relation(fields: [registerId], references: [id])
+  cashier   User       @relation(fields: [cashierId], references: [id])
+  customer  Customer?  @relation(fields: [customerId], references: [id])
+  items     SaleItem[]
+  payments  Payment[]
+  receipt   Receipt?
+  printJobs PrintJob[]
+
+  @@unique([tenantId, saleNumber])
+  @@index([tenantId])
+  @@index([branchId])
+  @@index([cashierId])
+  @@index([customerId])
+  @@index([syncStatus])
+  @@index([createdAt])
+}
+
+model SaleItem {
+  id               String        @id @default(cuid())
+  saleId           String
+  productId        String
+  productName      String
+  sku              String?
+  unitPrice        Decimal       @db.Decimal(12, 2)
+  quantity         Decimal       @db.Decimal(12, 3)
+  discountId       String?
+  discountType     DiscountType?
+  discountValue    Decimal?      @db.Decimal(12, 2)
+  discountAmount   Decimal       @default(0) @db.Decimal(12, 2)
+  discountReason   String?
+  approvedByUserId String?
+  taxAmount        Decimal       @default(0) @db.Decimal(12, 2)
+  lineSubtotal     Decimal       @db.Decimal(12, 2)
+  lineTotal        Decimal       @db.Decimal(12, 2)
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+
+  sale       Sale      @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  product    Product   @relation(fields: [productId], references: [id])
+  discount   Discount? @relation(fields: [discountId], references: [id])
+  approvedBy User?     @relation("DiscountApprover", fields: [approvedByUserId], references: [id])
+
+  @@index([saleId])
+  @@index([productId])
+}
+
+model Payment {
+  id                  String        @id @default(cuid())
+  tenantId            String
+  saleId              String
+  receivedByUserId    String?
+  amount              Decimal       @db.Decimal(12, 2)
+  method              PaymentMethod
+  reference           String?
+  quickbooksPaymentId String?
+  syncStatus          SyncStatus    @default(NOT_SYNCED)
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
+
+  tenant     Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  sale       Sale   @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  receivedBy User?  @relation(fields: [receivedByUserId], references: [id])
+
+  @@index([tenantId])
+  @@index([saleId])
+  @@index([syncStatus])
+}
+
+model Discount {
+  id                String       @id @default(cuid())
+  tenantId          String
+  name              String
+  type              DiscountType
+  value             Decimal      @db.Decimal(12, 2)
+  maxValue          Decimal?     @db.Decimal(12, 2)
+  requiresApproval  Boolean      @default(false)
+  approvalThreshold Decimal?     @db.Decimal(12, 2)
+  isActive          Boolean      @default(true)
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+
+  tenant    Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  saleItems SaleItem[]
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+}
+
+model Receipt {
+  id            String    @id @default(cuid())
+  saleId        String    @unique
+  receiptNumber String    @unique
+  content       Json?
+  printCount    Int       @default(0)
+  printedAt     DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  sale      Sale       @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  printJobs PrintJob[]
+}
+
+model PrintJob {
+  id              String         @id @default(cuid())
+  tenantId        String
+  saleId          String
+  receiptId       String?
+  type            PrintJobType
+  status          PrintJobStatus @default(PENDING)
+  html            String
+  copies          Int            @default(1)
+  createdByUserId String?
+  printedAt       DateTime?
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  tenant  Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  sale    Sale     @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  receipt Receipt? @relation(fields: [receiptId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId])
+  @@index([saleId])
+  @@index([status])
+}
+
+// ─────────────────────────────────────────────────────────────
+// QuickBooks sync
+// ─────────────────────────────────────────────────────────────
+
+model SyncJob {
+  id          String     @id @default(cuid())
+  tenantId    String
+  type        String
+  direction   String
+  entityType  String
+  entityId    String?
+  status      SyncStatus @default(PENDING)
+  attempts    Int        @default(0)
+  maxAttempts Int        @default(5)
+  scheduledAt DateTime   @default(now())
+  startedAt   DateTime?
+  completedAt DateTime?
+  lastError   String?
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  tenant Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  logs   SyncLog[]
+
+  @@index([tenantId])
+  @@index([status])
+  @@index([entityType, entityId])
+}
+
+model SyncLog {
+  id         String     @id @default(cuid())
+  tenantId   String
+  syncJobId  String?
+  entityType String
+  entityId   String?
+  direction  String
+  status     SyncStatus
+  attempt    Int        @default(1)
+  message    String?
+  payload    Json?
+  createdAt  DateTime   @default(now())
+
+  tenant  Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  syncJob SyncJob? @relation(fields: [syncJobId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId])
+  @@index([syncJobId])
+  @@index([entityType, entityId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model QuickBooksConnection {
+  id                    String    @id @default(cuid())
+  tenantId              String    @unique
+  realmId               String
+  accessToken           String
+  refreshToken          String
+  tokenType             String    @default("bearer")
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  environment           String    @default("sandbox")
+  isActive              Boolean   @default(true)
+  connectedAt           DateTime  @default(now())
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+}
+
+model QuickBooksMapping {
+  id             String    @id @default(cuid())
+  tenantId       String
+  entityType     String
+  localId        String
+  quickbooksId   String
+  quickbooksType String
+  lastSyncedAt   DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, entityType, localId])
+  @@unique([tenantId, entityType, quickbooksId])
+  @@index([tenantId])
+}
+
+// ─────────────────────────────────────────────────────────────
+// Audit
+// ─────────────────────────────────────────────────────────────
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  tenantId   String
+  userId     String?
+  action     String
+  entityType String?
+  entityId   String?
+  metadata   Json?
+  ipAddress  String?
+  createdAt  DateTime @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User?  @relation(fields: [userId], references: [id])
+
+  @@index([tenantId])
+  @@index([userId])
+  @@index([entityType, entityId])
+  @@index([createdAt])
 }
