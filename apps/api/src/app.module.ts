@@ -24,6 +24,7 @@ import { QuickBooksModule } from './modules/quickbooks/quickbooks.module';
 import { SyncModule } from './modules/sync/sync.module';
 import { SettingsModule } from './modules/settings/settings.module';
 import { AuditLogModule } from './modules/audit-log/audit-log.module';
+import { DashboardModule } from './modules/dashboard/dashboard.module';
 
 @Module({
   imports: [
@@ -44,6 +45,7 @@ import { AuditLogModule } from './modules/audit-log/audit-log.module';
     SyncModule,
     SettingsModule,
     AuditLogModule,
+    DashboardModule,
   ],
   providers: [
     // Order matters: authenticate first (populates request.user), then authorize.
