@@ -12,6 +12,7 @@ import { Button, buttonVariants } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
+import { Tooltip } from '@/components/ui/tooltip';
 import { useAuth } from '@/lib/auth';
 import { Permission } from '@/lib/permissions';
 import {
@@ -261,27 +262,31 @@ export default function ProductsPage() {
                       <div className="flex items-center justify-end gap-1">
                         {canManage ? (
                           <>
-                            <Link
-                              href={`/products/${p.id}/edit`}
-                              className={buttonVariants({ variant: 'ghost', size: 'icon' })}
-                              aria-label="Edit product"
-                            >
-                              <Pencil className="h-4 w-4" />
-                            </Link>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              aria-label={p.isActive ? 'Deactivate' : 'Activate'}
-                              disabled={busyId === p.id}
-                              onClick={() => toggleActive(p)}
-                              className={p.isActive ? 'text-danger' : 'text-success'}
-                            >
-                              {p.isActive ? (
-                                <Ban className="h-4 w-4" />
-                              ) : (
-                                <RotateCcw className="h-4 w-4" />
-                              )}
-                            </Button>
+                            <Tooltip label="Edit product">
+                              <Link
+                                href={`/products/${p.id}/edit`}
+                                className={buttonVariants({ variant: 'ghost', size: 'icon' })}
+                                aria-label="Edit product"
+                              >
+                                <Pencil className="h-4 w-4" />
+                              </Link>
+                            </Tooltip>
+                            <Tooltip label={p.isActive ? 'Deactivate product' : 'Reactivate product'}>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                aria-label={p.isActive ? 'Deactivate' : 'Activate'}
+                                disabled={busyId === p.id}
+                                onClick={() => toggleActive(p)}
+                                className={p.isActive ? 'text-danger' : 'text-success'}
+                              >
+                                {p.isActive ? (
+                                  <Ban className="h-4 w-4" />
+                                ) : (
+                                  <RotateCcw className="h-4 w-4" />
+                                )}
+                              </Button>
+                            </Tooltip>
                           </>
                         ) : (
                           <Link

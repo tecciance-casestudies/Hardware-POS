@@ -40,6 +40,11 @@ interface PosCartValue extends PosCartState {
   setCustomerId: (id: string) => void;
   /** Add a quick-created customer and select it. */
   addCustomer: (customer: ClientCustomer) => void;
+  /**
+   * Refresh the product snapshots embedded in cart items from a freshly
+   * loaded catalog (stock/price may have changed on another register).
+   */
+  refreshProducts: (products: ClientProduct[]) => void;
   clearCart: () => void;
 }
 
@@ -122,6 +127,30 @@ export function PosCartProvider({ children }: { children: React.ReactNode }) {
           addedCustomers: [customer, ...s.addedCustomers.filter((c) => c.id !== customer.id)],
           customerId: customer.id,
         })),
+      refreshProducts: (products) =>
+        setState((s) => {
+          if (s.items.length === 0) return s;
+          const byId = new Map(products.map((p) => [p.id, p]));
+          let changed = false;
+          const items = s.items.map((it) => {
+            const fresh = byId.get(it.product.id);
+            if (!fresh) return it;
+            const cur = it.product;
+            if (
+              cur.quantityOnHand === fresh.quantityOnHand &&
+              cur.unitPrice === fresh.unitPrice &&
+              cur.name === fresh.name &&
+              cur.imageUrl === fresh.imageUrl
+            ) {
+              return it;
+            }
+            changed = true;
+            return { ...it, product: fresh };
+          });
+          // Same reference when nothing changed → no re-render, effects can
+          // call this idempotently after every catalog load.
+          return changed ? { ...s, items } : s;
+        }),
       clearCart: () => setState(EMPTY),
     }),
     [state, hydrated, updateItem],

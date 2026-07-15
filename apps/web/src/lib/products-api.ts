@@ -92,7 +92,8 @@ export function apiOrigin(): string {
 /** Resolve a stored image URL (`/uploads/..`) to an absolute URL the browser can load. */
 export function resolveImageUrl(url: string | null | undefined): string | null {
   if (!url) return null;
-  if (/^https?:\/\//.test(url)) return url;
+  // Absolute and local-preview URLs (object/data URLs) pass through untouched.
+  if (/^(https?:\/\/|blob:|data:)/.test(url)) return url;
   return `${apiOrigin()}${url}`;
 }
 

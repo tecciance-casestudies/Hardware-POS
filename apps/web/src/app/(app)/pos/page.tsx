@@ -16,6 +16,7 @@ import {
   Warehouse,
 } from 'lucide-react';
 
+import { CustomerCombobox } from '@/components/pos/customer-combobox';
 import { ItemDiscountDialog } from '@/components/pos/item-discount-dialog';
 import { ItemNoteDialog } from '@/components/pos/item-note-dialog';
 import { ManagerApprovalDialog } from '@/components/pos/manager-approval-dialog';
@@ -68,6 +69,13 @@ export default function PosPage() {
     setToast(msg);
     window.setTimeout(() => setToast(null), 2400);
   };
+
+  // Keep the cart's product snapshots aligned with each fresh catalog load,
+  // so stock warnings reflect sales made on other registers.
+  React.useEffect(() => {
+    if (!data.loading && !data.error) cart.refreshProducts(data.products);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data.products, data.loading, data.error]);
 
   // ── catalog filtering + pagination ─────────────────────────────────────────
   const categories = ['All', ...data.categories];
@@ -184,10 +192,10 @@ export default function PosPage() {
     return res.reason ?? 'Not approved';
   };
 
-  const allCustomers = React.useMemo(
-    () => [...cart.addedCustomers, ...data.customers],
-    [cart.addedCustomers, data.customers],
-  );
+  // Every picked customer passes through cart.addCustomer, so the name of the
+  // current selection is always resolvable from the cart's own list.
+  const selectedCustomerName =
+    cart.addedCustomers.find((c) => c.id === cart.customerId)?.name ?? null;
 
   const noteItem = cart.items.find((it) => it.product.id === noteFor);
   const discountItem = cart.items.find((it) => it.product.id === discountFor);
@@ -368,18 +376,14 @@ export default function PosPage() {
 
         <div className="space-y-3 border-b border-border p-4">
           <div className="flex items-center gap-2">
-            <Select
-              value={cart.customerId}
-              onChange={(e) => cart.setCustomerId(e.target.value)}
-              className="flex-1"
-            >
-              <option value="">Walk-in customer</option>
-              {allCustomers.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.name}
-                </option>
-              ))}
-            </Select>
+            <CustomerCombobox
+              session={session!}
+              customerId={cart.customerId}
+              customerName={selectedCustomerName}
+              onSelect={(customer) =>
+                customer ? cart.addCustomer(customer) : cart.setCustomerId('')
+              }
+            />
             {canAddCustomer ? (
               <Button
                 variant="outline"
@@ -499,30 +503,38 @@ export default function PosPage() {
         <div className="space-y-2 border-t border-border p-4 text-sm">
           <Row label="Subtotal" value={formatMoney(totals.subtotal, currency)} />
           <Row label="Product discount" value={`-${formatMoney(totals.totalDiscount, currency)}`} />
-          <div className="flex items-center justify-between">
-            <button
-              type="button"
-              disabled={cart.items.length === 0}
-              onClick={() => setOrderDiscountOpen(true)}
-              className={cn(
-                'inline-flex items-center gap-1.5 transition-colors disabled:opacity-50',
-                cart.orderDiscount ? 'text-primary' : 'text-muted-foreground hover:text-foreground',
-              )}
-            >
-              <Tag className="h-3.5 w-3.5" />
-              Order discount
-              {cart.orderApprovalToken ? (
-                <ShieldCheck className="h-3.5 w-3.5" aria-label="Manager approved" />
-              ) : null}
-            </button>
-            {cart.orderDiscount ? (
-              <span className="font-medium text-success">
-                -{formatMoney(totals.orderDiscountAmount, currency)}
-              </span>
-            ) : (
-              <span className="text-muted-foreground">Add</span>
+          <button
+            type="button"
+            disabled={cart.items.length === 0}
+            onClick={() => setOrderDiscountOpen(true)}
+            className={cn(
+              'flex w-full items-center rounded-xl border px-3 py-2.5 text-sm font-medium transition-colors',
+              'disabled:cursor-not-allowed disabled:opacity-50',
+              cart.orderDiscount
+                ? 'justify-between border-border bg-muted/40 hover:border-primary'
+                : 'justify-center gap-1.5 border-dashed border-primary/50 text-primary hover:bg-brand-50',
             )}
-          </div>
+          >
+            {cart.orderDiscount ? (
+              <>
+                <span className="inline-flex items-center gap-1.5">
+                  <Tag className="h-4 w-4" />
+                  Order discount
+                  {cart.orderApprovalToken ? (
+                    <ShieldCheck className="h-4 w-4 text-success" aria-label="Manager approved" />
+                  ) : null}
+                </span>
+                <span className="font-semibold text-success">
+                  -{formatMoney(totals.orderDiscountAmount, currency)}
+                </span>
+              </>
+            ) : (
+              <>
+                <Tag className="h-4 w-4" />
+                Add discount to entire bill
+              </>
+            )}
+          </button>
           <Row
             label={`Tax (${data.settings.taxRatePercent}%)`}
             value={formatMoney(totals.taxAmount, currency)}

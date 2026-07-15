@@ -103,9 +103,10 @@ export default function PaymentPage() {
   const [receiptCtx, setReceiptCtx] = React.useState<ReceiptContext | null>(null);
   const [printing, setPrinting] = React.useState(false);
 
+  // Selected customers always pass through cart.addCustomer, so the cart's own
+  // list is sufficient to resolve the display name.
   const customerName =
-    [...cart.addedCustomers, ...data.customers].find((c) => c.id === cart.customerId)?.name ??
-    'Walk-in customer';
+    cart.addedCustomers.find((c) => c.id === cart.customerId)?.name ?? 'Walk-in customer';
   const hasCustomer = !!cart.customerId;
 
   // Redirect back to the cart if it emptied (but not right after a successful sale).
@@ -159,6 +160,7 @@ export default function PaymentPage() {
   const invalid =
     submitting ||
     cart.items.length === 0 ||
+    totals.hasStockIssue ||
     (needsCustomer && !hasCustomer) ||
     (mode === 'CASH' && (Number(tendered) || 0) < total) ||
     (mode === 'PARTIAL' && (paidAmount <= 0 || paidAmount >= total)) ||
@@ -233,10 +235,20 @@ export default function PaymentPage() {
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not complete the sale');
+      // The failure may be another register beating us to the stock (or a
+      // price change) — refresh the catalog so the cart reflects reality.
+      data.reload();
     } finally {
       setSubmitting(false);
     }
   };
+
+  // Push freshly loaded catalog data into the cart's product snapshots so
+  // stock warnings and totals track reality after a reload.
+  React.useEffect(() => {
+    if (!data.loading && !data.error) cart.refreshProducts(data.products);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data.products, data.loading, data.error]);
 
   const printReceipt = async () => {
     if (!completed || !receiptCtx) return;
@@ -482,6 +494,11 @@ export default function PaymentPage() {
                 <Row label="Balance" value={formatMoney(balance, currency)} tone={balance > 0 ? 'danger' : undefined} />
               </div>
 
+              {totals.hasStockIssue ? (
+                <p className="text-sm text-danger">
+                  Some items exceed available stock — go back to the cart to adjust quantities.
+                </p>
+              ) : null}
               {needsCustomer && !hasCustomer ? (
                 <p className="text-sm text-warning">Select a customer for a credit or partial sale.</p>
               ) : null}

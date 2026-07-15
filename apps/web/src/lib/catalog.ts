@@ -55,7 +55,6 @@ export interface CheckoutData {
   error: string | null;
   products: ClientProduct[];
   categories: string[];
-  customers: ClientCustomer[];
   settings: PosSettings;
   /** Re-fetch the catalog (e.g. after the API comes back up). */
   reload: () => void;
@@ -90,7 +89,6 @@ export function useCheckoutData(session: Session): CheckoutData {
     error: null,
     products: [],
     categories: [],
-    customers: [],
     settings: DEFAULT_SETTINGS,
   });
 
@@ -104,10 +102,9 @@ export function useCheckoutData(session: Session): CheckoutData {
 
     (async () => {
       try {
-        const [prod, cats, custs, settings] = await Promise.all([
+        const [prod, cats, settings] = await Promise.all([
           api.get<{ items: ApiProduct[] }>('/products?pageSize=200', auth),
           api.get<ApiCategory[]>('/categories', auth),
-          api.get<{ items: ClientCustomer[] }>('/customers?pageSize=200', auth),
           api.get<PosSettings>('/settings', auth),
         ]);
         if (cancelled) return;
@@ -118,7 +115,6 @@ export function useCheckoutData(session: Session): CheckoutData {
           error: null,
           products,
           categories: deriveCategories(products),
-          customers: custs.items,
           settings,
         });
       } catch (err) {
@@ -128,7 +124,6 @@ export function useCheckoutData(session: Session): CheckoutData {
           error: err instanceof Error ? err.message : 'Failed to load the product catalog',
           products: [],
           categories: [],
-          customers: [],
           settings: DEFAULT_SETTINGS,
         });
       }

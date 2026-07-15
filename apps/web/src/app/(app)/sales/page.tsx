@@ -17,6 +17,7 @@ import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
+import { Tooltip } from '@/components/ui/tooltip';
 import { useAuth } from '@/lib/auth';
 import { reprintCustomerReceipt } from '@/lib/receipt-print';
 import {
@@ -302,29 +303,33 @@ export default function SalesPage() {
                     </td>
                     <td className="px-4 py-3">
                       <div className="flex items-center justify-end gap-1">
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-8 w-8"
-                          aria-label="Reprint receipt"
-                          disabled={busyId === s.id}
-                          onClick={() => handleReprint(s.id)}
-                        >
-                          <Printer className="h-4 w-4" />
-                        </Button>
-                        {s.syncStatus === 'FAILED' || s.syncStatus === 'PENDING' ? (
+                        <Tooltip label="Reprint receipt">
                           <Button
                             variant="ghost"
                             size="icon"
                             className="h-8 w-8"
-                            aria-label="Retry QuickBooks sync"
+                            aria-label="Reprint receipt"
                             disabled={busyId === s.id}
-                            onClick={() => handleRetry(s.id)}
+                            onClick={() => handleReprint(s.id)}
                           >
-                            <RefreshCw
-                              className={cn('h-4 w-4', busyId === s.id && 'animate-spin')}
-                            />
+                            <Printer className="h-4 w-4" />
                           </Button>
+                        </Tooltip>
+                        {s.syncStatus === 'FAILED' || s.syncStatus === 'PENDING' ? (
+                          <Tooltip label="Retry QuickBooks sync">
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-8 w-8"
+                              aria-label="Retry QuickBooks sync"
+                              disabled={busyId === s.id}
+                              onClick={() => handleRetry(s.id)}
+                            >
+                              <RefreshCw
+                                className={cn('h-4 w-4', busyId === s.id && 'animate-spin')}
+                              />
+                            </Button>
+                          </Tooltip>
                         ) : null}
                       </div>
                     </td>
