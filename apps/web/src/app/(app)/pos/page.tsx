@@ -239,7 +239,9 @@ export default function PosPage() {
           </div>
         ) : null}
 
-        <div className="flex flex-wrap gap-2">
+        {/* Single-line, horizontally scrollable filter rows: vertical footprint
+            stays constant no matter how many categories exist. */}
+        <div className="flex gap-2 overflow-x-auto pb-1 [scrollbar-width:thin]">
           {categories.map((c) => (
             <button
               key={c}
@@ -248,7 +250,7 @@ export default function PosPage() {
                 setSubcategory('All');
               }}
               className={cn(
-                'rounded-full px-3 py-1.5 text-sm font-medium transition-colors',
+                'shrink-0 whitespace-nowrap rounded-full px-3 py-1.5 text-sm font-medium transition-colors',
                 category === c
                   ? 'bg-primary text-primary-foreground'
                   : 'bg-muted text-muted-foreground hover:bg-border',
@@ -260,13 +262,13 @@ export default function PosPage() {
         </div>
 
         {subcategories.length > 0 ? (
-          <div className="flex flex-wrap gap-2">
+          <div className="flex gap-2 overflow-x-auto pb-1 [scrollbar-width:thin]">
             {subcategories.map((s) => (
               <button
                 key={s}
                 onClick={() => setSubcategory(s)}
                 className={cn(
-                  'rounded-full px-3 py-1 text-xs font-medium transition-colors',
+                  'shrink-0 whitespace-nowrap rounded-full px-3 py-1 text-xs font-medium transition-colors',
                   subcategory === s
                     ? 'bg-primary text-primary-foreground'
                     : 'bg-muted text-muted-foreground hover:bg-border',

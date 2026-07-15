@@ -1,7 +1,7 @@
 'use client';
 
 import * as React from 'react';
-import { Check, ChevronDown, Loader2, Search, UserRound } from 'lucide-react';
+import { Check, ChevronDown, Loader2, Search, UserRound, X } from 'lucide-react';
 
 import type { Session } from '@/lib/auth';
 import type { ClientCustomer } from '@/lib/catalog';
@@ -9,7 +9,6 @@ import { fetchCustomers } from '@/lib/customers-api';
 import { cn } from '@/lib/utils';
 
 const PAGE_SIZE = 20;
-const WALK_IN_INDEX = 0;
 
 /**
  * Searchable customer picker for the cart. Queries the API as you type
@@ -33,7 +32,7 @@ export function CustomerCombobox({
   const [results, setResults] = React.useState<ClientCustomer[]>([]);
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
-  const [activeIndex, setActiveIndex] = React.useState(WALK_IN_INDEX);
+  const [activeIndex, setActiveIndex] = React.useState(0);
   const rootRef = React.useRef<HTMLDivElement>(null);
   const inputRef = React.useRef<HTMLInputElement>(null);
 
@@ -69,7 +68,7 @@ export function CustomerCombobox({
           .then((res) => {
             if (cancelled) return;
             setResults(res.items.map((c) => ({ id: c.id, name: c.name })));
-            setActiveIndex(WALK_IN_INDEX);
+            setActiveIndex(0);
           })
           .catch((err: unknown) => {
             if (cancelled) return;
@@ -100,18 +99,16 @@ export function CustomerCombobox({
     setOpen(false);
   };
 
-  // Flat option list for keyboard navigation: index 0 = walk-in, then results.
-  const optionCount = results.length + 1;
   const onInputKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'ArrowDown') {
       e.preventDefault();
-      setActiveIndex((i) => Math.min(i + 1, optionCount - 1));
+      setActiveIndex((i) => Math.min(i + 1, Math.max(results.length - 1, 0)));
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
       setActiveIndex((i) => Math.max(i - 1, 0));
     } else if (e.key === 'Enter') {
       e.preventDefault();
-      pick(activeIndex === WALK_IN_INDEX ? null : (results[activeIndex - 1] ?? null));
+      if (results[activeIndex]) pick(results[activeIndex]);
     }
   };
 
@@ -125,6 +122,7 @@ export function CustomerCombobox({
         className={cn(
           'flex h-11 w-full items-center gap-2 rounded-xl border border-border bg-surface pl-4 pr-3 text-sm',
           'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+          customerId && 'pr-14',
         )}
       >
         <UserRound className="h-4 w-4 shrink-0 text-muted-foreground" />
@@ -133,6 +131,22 @@ export function CustomerCombobox({
         </span>
         <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" />
       </button>
+
+      {customerId ? (
+        // Sibling (not nested — invalid HTML inside the trigger button):
+        // clears back to walk-in without opening the popover.
+        <button
+          type="button"
+          aria-label="Clear customer (walk-in)"
+          onClick={() => {
+            onSelect(null);
+            setOpen(false);
+          }}
+          className="absolute right-9 top-1/2 -translate-y-1/2 rounded-md p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+        >
+          <X className="h-3.5 w-3.5" />
+        </button>
+      ) : null}
 
       {open ? (
         <div className="absolute left-0 right-0 top-full z-40 mt-2 rounded-2xl border border-border bg-surface p-2 shadow-xl">
@@ -149,24 +163,6 @@ export function CustomerCombobox({
           </div>
 
           <ul role="listbox" aria-label="Customers" className="max-h-64 overflow-auto">
-            <li>
-              <button
-                type="button"
-                role="option"
-                aria-selected={!customerId}
-                onClick={() => pick(null)}
-                onMouseEnter={() => setActiveIndex(WALK_IN_INDEX)}
-                className={cn(
-                  'flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm transition-colors',
-                  activeIndex === WALK_IN_INDEX && 'bg-muted',
-                  !customerId && 'font-medium text-primary',
-                )}
-              >
-                Walk-in customer
-                {!customerId ? <Check className="h-4 w-4" /> : null}
-              </button>
-            </li>
-
             {loading ? (
               <li className="flex items-center gap-2 px-3 py-3 text-sm text-muted-foreground">
                 <Loader2 className="h-4 w-4 animate-spin" />
@@ -186,10 +182,10 @@ export function CustomerCombobox({
                     role="option"
                     aria-selected={customerId === c.id}
                     onClick={() => pick(c)}
-                    onMouseEnter={() => setActiveIndex(i + 1)}
+                    onMouseEnter={() => setActiveIndex(i)}
                     className={cn(
                       'flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm transition-colors',
-                      activeIndex === i + 1 && 'bg-muted',
+                      activeIndex === i && 'bg-muted',
                       customerId === c.id && 'font-medium text-primary',
                     )}
                   >
