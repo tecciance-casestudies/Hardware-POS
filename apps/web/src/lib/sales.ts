@@ -1,4 +1,4 @@
-import { api } from './api';
+import { api, authorizedFetch } from './api';
 import type { Session } from './auth';
 import type { DiscountType } from './cart';
 
@@ -263,12 +263,7 @@ export async function downloadSalesReport(
   if (query.dateFrom) params.set('dateFrom', query.dateFrom);
   if (query.dateTo) params.set('dateTo', query.dateTo);
 
-  const res = await fetch(`${api.baseUrl}/sales/report?${params.toString()}`, {
-    headers: {
-      Authorization: `Bearer ${session.token}`,
-      'x-tenant-id': session.user.tenantId,
-    },
-  });
+  const res = await authorizedFetch(`/sales/report?${params.toString()}`, session);
   if (!res.ok) {
     const body = (await res.json().catch(() => null)) as { message?: string | string[] } | null;
     const message = body?.message ?? `Export failed (HTTP ${res.status})`;

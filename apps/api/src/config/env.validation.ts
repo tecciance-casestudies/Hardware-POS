@@ -37,6 +37,13 @@ export class EnvironmentVariables {
   @IsOptional()
   JWT_EXPIRES_IN = '12h';
 
+  /** Days a refresh token stays valid (rotated on every use). */
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @IsOptional()
+  REFRESH_TOKEN_TTL_DAYS = 30;
+
   // ── Sync queue worker ──
   // The background worker drains SyncJob rows. Disable ('false') in tests or when
   // a BullMQ/Redis worker takes over.

@@ -15,7 +15,10 @@ export interface AuthenticatedUser {
 }
 
 export interface AuthTokenResult {
+  /** Short-lived JWT access token. */
   token: string;
+  /** Long-lived opaque refresh token — exchange at POST /auth/refresh. */
+  refreshToken: string;
   user: {
     id: string;
     tenantId: string;

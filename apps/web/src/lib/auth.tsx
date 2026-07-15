@@ -3,26 +3,24 @@
 import * as React from 'react';
 
 import { api } from './api';
-import { Permission, permissionsForRole, type UserRole } from './permissions';
+import { Permission, permissionsForRole } from './permissions';
+import {
+  loadSession,
+  saveSession,
+  subscribeSession,
+  type Session,
+  type SessionUser,
+} from './session-store';
 
-export interface SessionUser {
-  id: string;
-  name: string;
-  email: string | null;
-  role: UserRole;
-  tenantId: string;
-  permissions: Permission[];
-}
+export type { Session, SessionUser };
 
-export interface Session {
-  token: string;
-  user: SessionUser;
-  branchName: string;
-  registerName: string;
-}
-
-const STORAGE_KEY = 'hpos.session';
 const DEV_TENANT = 'tnt_dev';
+
+interface LoginResponse {
+  token: string;
+  refreshToken: string;
+  user: Omit<SessionUser, 'permissions'>;
+}
 
 interface AuthContextValue {
   session: Session | null;
@@ -36,67 +34,51 @@ interface AuthContextValue {
 
 const AuthContext = React.createContext<AuthContextValue | null>(null);
 
+function toSession(res: LoginResponse): Session {
+  return {
+    token: res.token,
+    refreshToken: res.refreshToken,
+    user: { ...res.user, permissions: permissionsForRole(res.user.role) },
+    branchName: 'Main Branch',
+    registerName: 'Register 1',
+  };
+}
+
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [session, setSession] = React.useState<Session | null>(null);
   const [loading, setLoading] = React.useState(true);
 
   React.useEffect(() => {
-    try {
-      const raw = window.localStorage.getItem(STORAGE_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw) as Session;
-        // Stale sessions from the removed offline demo mode can't reach the API.
-        if (parsed.token.startsWith('mock.')) {
-          window.localStorage.removeItem(STORAGE_KEY);
-        } else {
-          setSession(parsed);
-        }
-      }
-    } catch {
-      // ignore malformed storage
-    }
+    setSession(loadSession());
     setLoading(false);
+    // Keep React state in step with store writes (e.g. refresh-on-401 rotations).
+    return subscribeSession(setSession);
   }, []);
 
-  const persist = React.useCallback((next: Session | null) => {
-    setSession(next);
-    if (typeof window === 'undefined') return;
-    if (next) window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-    else window.localStorage.removeItem(STORAGE_KEY);
+  const loginWithEmail = React.useCallback(async (email: string, password: string) => {
+    const res = await api.post<LoginResponse>('/auth/login', { email, password });
+    saveSession(toSession(res));
   }, []);
 
-  const loginWithEmail = React.useCallback(
-    async (email: string, password: string) => {
-      const res = await api.post<{ token: string; user: Omit<SessionUser, 'permissions'> }>(
-        '/auth/login',
-        { email, password },
-      );
-      persist({
-        token: res.token,
-        user: { ...res.user, permissions: permissionsForRole(res.user.role) },
-        branchName: 'Main Branch',
-        registerName: 'Register 1',
-      });
-    },
-    [persist],
-  );
+  const loginWithPin = React.useCallback(async (pin: string) => {
+    const res = await api.post<LoginResponse>(
+      '/auth/pin-login',
+      { pin },
+      { tenantId: DEV_TENANT },
+    );
+    saveSession(toSession(res));
+  }, []);
 
-  const loginWithPin = React.useCallback(
-    async (pin: string) => {
-      const res = await api.post<{ token: string; user: Omit<SessionUser, 'permissions'> }>(
-        '/auth/pin-login',
-        { pin },
-        { tenantId: DEV_TENANT },
-      );
-      persist({
-        token: res.token,
-        user: { ...res.user, permissions: permissionsForRole(res.user.role) },
-        branchName: 'Main Branch',
-        registerName: 'Register 1',
-      });
-    },
-    [persist],
-  );
+  const logout = React.useCallback(() => {
+    const current = loadSession();
+    // Best-effort server-side revocation; local sign-out never waits on it.
+    if (current?.refreshToken) {
+      void api
+        .post('/auth/logout', { refreshToken: current.refreshToken })
+        .catch(() => undefined);
+    }
+    saveSession(null);
+  }, []);
 
   const value = React.useMemo<AuthContextValue>(
     () => ({
@@ -106,9 +88,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       hasPermission: (p) => !!session?.user.permissions.includes(p),
       loginWithEmail,
       loginWithPin,
-      logout: () => persist(null),
+      logout,
     }),
-    [session, loading, loginWithEmail, loginWithPin, persist],
+    [session, loading, loginWithEmail, loginWithPin, logout],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

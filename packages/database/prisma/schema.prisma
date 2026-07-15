@@ -118,6 +118,7 @@ model Tenant {
   quickbooksMappings   QuickBooksMapping[]
   auditLogs            AuditLog[]
   printJobs            PrintJob[]
+  refreshTokens        RefreshToken[]
 }
 
 model Branch {
@@ -178,13 +179,14 @@ model User {
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
 
-  tenant            Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  branch            Branch?    @relation(fields: [branchId], references: [id])
-  customRole        Role?      @relation(fields: [roleId], references: [id])
+  tenant            Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  branch            Branch?        @relation(fields: [branchId], references: [id])
+  customRole        Role?          @relation(fields: [roleId], references: [id])
   sales             Sale[]
   payments          Payment[]
-  approvedDiscounts SaleItem[] @relation("DiscountApprover")
+  approvedDiscounts SaleItem[]     @relation("DiscountApprover")
   auditLogs         AuditLog[]
+  refreshTokens     RefreshToken[]
 
   @@unique([tenantId, email])
   @@index([tenantId])
@@ -215,6 +217,23 @@ model Permission {
   createdAt   DateTime @default(now())
 
   roles Role[] @relation("RolePermissions")
+}
+
+/// Long-lived, rotating session tokens. Only the SHA-256 hash is stored; a
+/// row is dead once `revokedAt` is set or `expiresAt` has passed.
+model RefreshToken {
+  id        String    @id @default(cuid())
+  tenantId  String
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
 }
 
 // ─────────────────────────────────────────────────────────────

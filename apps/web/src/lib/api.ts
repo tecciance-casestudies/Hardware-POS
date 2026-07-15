@@ -1,7 +1,12 @@
 /**
  * Thin API client for the NestJS backend. Attaches the session bearer token and
- * unwraps the standard `{ data }` envelope.
+ * unwraps the standard `{ data }` envelope. When a request fails with 401 and a
+ * refresh token is on hand, the client transparently rotates the session
+ * (single-flight) and retries the request once; if the refresh itself fails,
+ * the session is cleared and the app returns to the login screen.
  */
+
+import { loadSession, saveSession, type Session } from './session-store';
 
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:4000/v1';
 
@@ -29,23 +34,120 @@ interface RequestOptions {
   signal?: AbortSignal;
 }
 
-async function request<T>(method: string, path: string, opts: RequestOptions = {}): Promise<T> {
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (opts.token) headers.Authorization = `Bearer ${opts.token}`;
-  if (opts.tenantId) headers['x-tenant-id'] = opts.tenantId;
+// ── token refresh (single-flight) ───────────────────────────────────────────
 
-  const res = await fetch(`${BASE_URL}${path}`, {
-    method,
-    headers,
-    body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
-    signal: opts.signal,
-  });
+let refreshInFlight: Promise<string | null> | null = null;
+
+/**
+ * Rotate the stored session via POST /auth/refresh. Concurrent 401s share one
+ * refresh call. Resolves with the new access token, or null if refresh is
+ * impossible/failed (caller should treat the original 401 as final).
+ */
+function refreshAccessToken(): Promise<string | null> {
+  if (!refreshInFlight) {
+    refreshInFlight = doRefresh().finally(() => {
+      refreshInFlight = null;
+    });
+  }
+  return refreshInFlight;
+}
+
+async function doRefresh(): Promise<string | null> {
+  const session = loadSession();
+  if (!session?.refreshToken) return null;
+  try {
+    const res = await fetch(`${BASE_URL}/auth/refresh`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refreshToken: session.refreshToken }),
+    });
+    if (!res.ok) return null;
+    const json = (await res.json()) as {
+      data?: { token: string; refreshToken: string };
+      token?: string;
+      refreshToken?: string;
+    };
+    const data = json.data ?? (json as { token: string; refreshToken: string });
+    if (!data.token || !data.refreshToken) return null;
+    const next: Session = { ...session, token: data.token, refreshToken: data.refreshToken };
+    saveSession(next);
+    return data.token;
+  } catch {
+    return null;
+  }
+}
+
+function signOutToLogin(): void {
+  saveSession(null);
+  if (typeof window !== 'undefined' && !window.location.pathname.startsWith('/login')) {
+    window.location.assign('/login');
+  }
+}
+
+// ── request core ────────────────────────────────────────────────────────────
+
+async function request<T>(method: string, path: string, opts: RequestOptions = {}): Promise<T> {
+  const doFetch = (token: string | null | undefined) => {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (token) headers.Authorization = `Bearer ${token}`;
+    if (opts.tenantId) headers['x-tenant-id'] = opts.tenantId;
+    return fetch(`${BASE_URL}${path}`, {
+      method,
+      headers,
+      body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
+      signal: opts.signal,
+    });
+  };
+
+  let res = await doFetch(opts.token);
+
+  // Expired access token → refresh once and retry with the new token.
+  if (res.status === 401 && opts.token) {
+    const newToken = await refreshAccessToken();
+    if (newToken) {
+      res = await doFetch(newToken);
+    } else {
+      signOutToLogin();
+    }
+  }
 
   const json = res.status === 204 ? null : await res.json().catch(() => null);
   if (!res.ok) {
     throw new ApiError(res.status, (json as ApiErrorShape) ?? { statusCode: res.status, message: res.statusText, error: 'Error' });
   }
   return (json && typeof json === 'object' && 'data' in json ? json.data : json) as T;
+}
+
+/**
+ * Authenticated fetch for non-JSON endpoints (file downloads, multipart
+ * uploads) with the same refresh-on-401-and-retry behaviour as `request`.
+ * The caller owns response parsing.
+ */
+export async function authorizedFetch(
+  path: string,
+  session: Pick<Session, 'token' | 'user'>,
+  init: Omit<RequestInit, 'headers'> & { headers?: Record<string, string> } = {},
+): Promise<Response> {
+  const doFetch = (token: string) =>
+    fetch(`${BASE_URL}${path}`, {
+      ...init,
+      headers: {
+        ...init.headers,
+        Authorization: `Bearer ${token}`,
+        'x-tenant-id': session.user.tenantId,
+      },
+    });
+
+  let res = await doFetch(session.token);
+  if (res.status === 401) {
+    const newToken = await refreshAccessToken();
+    if (newToken) {
+      res = await doFetch(newToken);
+    } else {
+      signOutToLogin();
+    }
+  }
+  return res;
 }
 
 export const api = {
