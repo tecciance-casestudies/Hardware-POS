@@ -4,33 +4,28 @@ import { useRouter } from 'next/navigation';
 import * as React from 'react';
 import {
   ArrowLeft,
-  Banknote,
   CheckCircle2,
   Clock,
-  Coins,
-  CreditCard,
-  Delete,
-  Landmark,
+  Minus,
   Plus,
   Printer,
-  QrCode,
   ReceiptText,
-  ScrollText,
-  Split,
+  ShoppingCart,
   Trash2,
-  type LucideIcon,
 } from 'lucide-react';
 
+import { NumericKeypad, QuickAmountButtons } from '@/components/pos/payment/numeric-keypad';
+import { PaymentMethodSelector, type Mode } from '@/components/pos/payment/payment-method-selector';
+import { ProductImage } from '@/components/product-image';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Dialog } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
 import { useAuth } from '@/lib/auth';
-import { computeLine, computeTotals } from '@/lib/cart';
+import { computeLine, computeTotals, type CartItem } from '@/lib/cart';
 import { useCheckoutData } from '@/lib/catalog';
 import { usePosCart } from '@/lib/pos-cart';
 import { printCustomerReceipt, type ReceiptContext } from '@/lib/receipt-print';
@@ -43,25 +38,6 @@ import {
   type PaymentMethodCode,
 } from '@/lib/sales';
 import { cn, formatMoney, round2 } from '@/lib/utils';
-
-type Mode = 'CASH' | 'CARD' | 'BANK_TRANSFER' | 'QR_PAYMENT' | 'CHECK' | 'SPLIT' | 'PARTIAL' | 'CREDIT';
-
-interface MethodOption {
-  key: Mode;
-  label: string;
-  Icon: LucideIcon;
-}
-
-const METHODS: MethodOption[] = [
-  { key: 'CASH', label: 'Cash', Icon: Banknote },
-  { key: 'CARD', label: 'Card', Icon: CreditCard },
-  { key: 'BANK_TRANSFER', label: 'Bank Transfer', Icon: Landmark },
-  { key: 'QR_PAYMENT', label: 'QR Payment', Icon: QrCode },
-  { key: 'CHECK', label: 'Cheque', Icon: ScrollText },
-  { key: 'SPLIT', label: 'Split Payment', Icon: Split },
-  { key: 'PARTIAL', label: 'Partial Payment', Icon: Coins },
-  { key: 'CREDIT', label: 'Credit / Pay Later', Icon: Clock },
-];
 
 const SPLIT_METHODS: { value: PaymentMethodCode; label: string }[] = [
   { value: 'CASH', label: 'Cash' },
@@ -107,6 +83,7 @@ export default function PaymentPage() {
   const [completed, setCompleted] = React.useState<CompletedSale | null>(null);
   const [receiptCtx, setReceiptCtx] = React.useState<ReceiptContext | null>(null);
   const [printing, setPrinting] = React.useState(false);
+  const [summaryOpen, setSummaryOpen] = React.useState(false);
 
   // Selected customers always pass through cart.addCustomer, so the cart's own
   // list is sufficient to resolve the display name.
@@ -133,7 +110,12 @@ export default function PaymentPage() {
   if (mode === 'CASH') {
     paidAmount = total;
     payments = [{ method: 'CASH', amount: total }];
-  } else if (mode === 'CARD' || mode === 'BANK_TRANSFER' || mode === 'QR_PAYMENT' || mode === 'CHECK') {
+  } else if (
+    mode === 'CARD' ||
+    mode === 'BANK_TRANSFER' ||
+    mode === 'QR_PAYMENT' ||
+    mode === 'CHECK'
+  ) {
     paidAmount = total;
     payments = [{ method: mode, amount: total, reference: reference.trim() || undefined }];
   } else if (mode === 'PARTIAL') {
@@ -157,9 +139,10 @@ export default function PaymentPage() {
     payments = [];
   }
 
+  const tenderedNum = Number(tendered) || 0;
   const balance = Math.max(0, round2(total - paidAmount));
-  const change =
-    mode === 'CASH' ? round2(Math.max(0, (Number(tendered) || 0) - total)) : 0;
+  const change = mode === 'CASH' ? round2(Math.max(0, tenderedNum - total)) : 0;
+  const cashShort = mode === 'CASH' ? round2(Math.max(0, total - tenderedNum)) : 0;
   const needsCustomer = paidAmount < total; // partial or credit → invoice needs a customer
 
   const invalid =
@@ -167,9 +150,31 @@ export default function PaymentPage() {
     cart.items.length === 0 ||
     totals.hasStockIssue ||
     (needsCustomer && !hasCustomer) ||
-    (mode === 'CASH' && (Number(tendered) || 0) < total) ||
+    (mode === 'CASH' && tenderedNum < total) ||
     (mode === 'PARTIAL' && (paidAmount <= 0 || paidAmount >= total)) ||
     (mode === 'SPLIT' && (payments.length === 0 || paidAmount > total));
+
+  // Human-readable explanation for a disabled Complete Payment button (surfaced
+  // inline above the footer, and available to screen readers).
+  let disabledReason: string | null = null;
+  if (!submitting) {
+    if (totals.hasStockIssue) {
+      disabledReason = 'Some items exceed available stock — adjust quantities in the cart.';
+    } else if (needsCustomer && !hasCustomer) {
+      disabledReason = 'Select a customer to record a credit or partial sale.';
+    } else if (mode === 'CASH' && tenderedNum < total) {
+      disabledReason = `Enter at least ${formatMoney(total, currency)} to complete this cash payment.`;
+    } else if (mode === 'PARTIAL' && paidAmount <= 0) {
+      disabledReason = 'Enter the amount the customer is paying now.';
+    } else if (mode === 'PARTIAL' && paidAmount >= total) {
+      disabledReason =
+        'Partial amount must be less than the total — use a full payment method instead.';
+    } else if (mode === 'SPLIT' && payments.length === 0) {
+      disabledReason = 'Add at least one split payment.';
+    } else if (mode === 'SPLIT' && paidAmount > total) {
+      disabledReason = 'Split total is more than the amount due.';
+    }
+  }
 
   const numpadTarget = mode === 'CASH' ? 'tendered' : mode === 'PARTIAL' ? 'partial' : null;
   const appendDigit = (d: string) => {
@@ -177,16 +182,21 @@ export default function PaymentPage() {
     const set = numpadTarget === 'tendered' ? setTendered : setPartialAmount;
     set((prev) => {
       if (d === 'back') return prev.slice(0, -1);
+      if (d === '00') return prev === '' ? prev : prev + '00';
       if (d === '.' && prev.includes('.')) return prev;
       return prev + d;
     });
   };
 
-  const quickAmounts = React.useMemo(() => {
-    const base = Math.ceil(total);
-    const rounds = [base, Math.ceil(base / 500) * 500, Math.ceil(base / 1000) * 1000, Math.ceil(base / 5000) * 5000];
-    return [...new Set(rounds)].filter((n) => n >= base).slice(0, 4);
-  }, [total]);
+  const selectMode = (next: Mode) => {
+    setMode(next);
+    setError(null);
+    if (next === 'SPLIT' && splitLines.length === 0) {
+      setSplitLines([
+        { id: splitLineSeq++, method: 'CASH', amount: total.toFixed(2), reference: '' },
+      ]);
+    }
+  };
 
   const addSplitLine = () =>
     setSplitLines((lines) => [
@@ -243,6 +253,10 @@ export default function PaymentPage() {
     }
   };
 
+  const tryComplete = () => {
+    if (!invalid) submit();
+  };
+
   // Push freshly loaded catalog data into the cart's product snapshots so
   // stock warnings and totals track reality after a reload.
   React.useEffect(() => {
@@ -278,276 +292,497 @@ export default function PaymentPage() {
 
   return (
     // Viewport-locked on lg+ so the Complete Payment action never scrolls off:
-    // the shell gives this page a definite height, the two panels each own an
-    // independent scroll region, and the right-panel action bar stays pinned.
-    <div className="flex flex-col gap-4 lg:h-full lg:min-h-0">
-      <div className="flex shrink-0 flex-wrap items-center justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Payment</h1>
-          <p className="text-sm text-muted-foreground">{customerName}</p>
+    // the shell gives this page a definite height, and each panel owns an
+    // independent scroll region. `min-w-0` on every flex/grid child keeps long
+    // LKR labels from forcing horizontal page overflow.
+    <div className="flex h-full min-h-0 min-w-0 flex-col gap-4">
+      <div className="flex shrink-0 flex-wrap items-baseline gap-x-3 gap-y-0">
+        <h1 className="text-2xl font-semibold tracking-tight">Payment</h1>
+        <p className="truncate text-sm text-muted-foreground">{customerName}</p>
+      </div>
+
+      {/* Order summary ~40% · payment workspace ~60% on lg+. */}
+      <div className="grid min-h-0 min-w-0 flex-1 gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]">
+        {/* ── Order summary (desktop / tablet-landscape) ── */}
+        <div className="hidden min-w-0 flex-col overflow-hidden rounded-2xl border border-border bg-card shadow-sm lg:flex lg:max-h-full lg:self-start">
+          <OrderSummary
+            items={cart.items}
+            totals={totals}
+            currency={currency}
+            taxRatePercent={data.settings.taxRatePercent}
+            total={total}
+            onChangeQty={cart.changeQty}
+          />
+        </div>
+
+        {/* ── Unified payment workspace: fixed top · scroll middle · fixed bottom ── */}
+        <div className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-2xl border border-border bg-card shadow-sm">
+          {/* Compact order-summary trigger — only below lg. */}
+          <button
+            type="button"
+            onClick={() => setSummaryOpen(true)}
+            className="flex shrink-0 items-center justify-between gap-3 border-b border-border px-4 py-3 text-left lg:hidden"
+            aria-label="View order summary"
+          >
+            <span className="flex items-center gap-2 text-sm font-medium">
+              <ReceiptText className="h-4 w-4 text-muted-foreground" aria-hidden />
+              Order summary · {totals.itemCount} {totals.itemCount === 1 ? 'item' : 'items'}
+            </span>
+            <span className="font-semibold text-primary">{formatMoney(total, currency)}</span>
+          </button>
+
+          {/* TOP ZONE — Amount due + selected method (always visible). */}
+          <div className="grid shrink-0 grid-cols-1 gap-4 p-5 sm:grid-cols-2 sm:items-center">
+            <div>
+              <div className="text-sm text-muted-foreground">Amount Due</div>
+              <div className="text-3xl font-bold tracking-tight text-primary">
+                {formatMoney(total, currency)}
+              </div>
+            </div>
+            <div className="rounded-2xl border border-border p-3 sm:border-0 sm:border-l sm:border-border sm:pl-5">
+              <PaymentMethodSelector value={mode} onChange={selectMode} />
+            </div>
+          </div>
+
+          {/* MIDDLE ZONE — only region that scrolls when height is tight. */}
+          <div className="min-h-0 flex-1 overflow-y-auto border-t border-border p-5">
+            {mode === 'CASH' ? (
+              <div className="grid gap-5 lg:grid-cols-2">
+                <div className="space-y-4">
+                  <div className="space-y-1.5">
+                    <Label htmlFor="tendered">Amount Received</Label>
+                    <div className="relative">
+                      <span className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-sm font-medium text-muted-foreground">
+                        Rs.
+                      </span>
+                      <Input
+                        id="tendered"
+                        inputMode="decimal"
+                        value={tendered}
+                        onChange={(e) => setTendered(e.target.value)}
+                        className="h-12 pl-11 text-lg font-semibold"
+                      />
+                    </div>
+                  </div>
+
+                  {cashShort > 0 ? (
+                    <div className="flex items-center justify-between rounded-xl bg-danger-soft px-4 py-3">
+                      <span className="text-sm font-medium text-danger">Short by</span>
+                      <span className="text-lg font-bold text-danger">
+                        {formatMoney(cashShort, currency)}
+                      </span>
+                    </div>
+                  ) : (
+                    <div className="flex items-center justify-between rounded-xl bg-success-soft px-4 py-3">
+                      <span className="flex items-center gap-2 text-sm font-medium text-success">
+                        Change
+                      </span>
+                      <span className="flex items-center gap-2 text-lg font-bold text-success">
+                        {formatMoney(change, currency)}
+                        <CheckCircle2 className="h-5 w-5" aria-label="Sufficient amount received" />
+                      </span>
+                    </div>
+                  )}
+
+                  <div className="space-y-2">
+                    <div className="text-sm font-medium text-muted-foreground">Quick Amounts</div>
+                    <QuickAmountButtons
+                      total={total}
+                      selected={tenderedNum}
+                      onPick={(n) => setTendered(n.toFixed(2))}
+                    />
+                  </div>
+                </div>
+
+                <NumericKeypad
+                  onPress={appendDigit}
+                  onEnter={tryComplete}
+                  enterDisabled={invalid}
+                />
+              </div>
+            ) : null}
+
+            {mode === 'CARD' ||
+            mode === 'BANK_TRANSFER' ||
+            mode === 'QR_PAYMENT' ||
+            mode === 'CHECK' ? (
+              <div className="max-w-md space-y-1.5">
+                <Label htmlFor="ref">
+                  {mode === 'CHECK' ? 'Cheque number' : 'Reference'} (optional)
+                </Label>
+                <Input
+                  id="ref"
+                  value={reference}
+                  onChange={(e) => setReference(e.target.value)}
+                  placeholder={mode === 'CHECK' ? 'e.g. cheque no.' : 'e.g. txn / auth ref'}
+                />
+                <p className="text-xs text-muted-foreground">
+                  Full amount of {formatMoney(total, currency)} will be recorded as paid.
+                </p>
+              </div>
+            ) : null}
+
+            {mode === 'PARTIAL' ? (
+              <div className="grid gap-5 lg:grid-cols-2">
+                <div className="space-y-4">
+                  <div className="space-y-1.5">
+                    <Label htmlFor="partial">Amount paid now</Label>
+                    <Input
+                      id="partial"
+                      inputMode="decimal"
+                      placeholder="0.00"
+                      value={partialAmount}
+                      onChange={(e) => setPartialAmount(e.target.value)}
+                      className="h-12 text-lg font-semibold"
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="pmethod">Paid by</Label>
+                    <Select
+                      id="pmethod"
+                      value={partialMethod}
+                      onChange={(e) => setPartialMethod(e.target.value as PaymentMethodCode)}
+                    >
+                      {SPLIT_METHODS.map((m) => (
+                        <option key={m.value} value={m.value}>
+                          {m.label}
+                        </option>
+                      ))}
+                    </Select>
+                  </div>
+                  <div className="flex items-center justify-between rounded-xl bg-muted px-4 py-3 text-sm">
+                    <span className="text-muted-foreground">Remaining balance</span>
+                    <span className="font-semibold">{formatMoney(balance, currency)}</span>
+                  </div>
+                </div>
+                <NumericKeypad
+                  onPress={appendDigit}
+                  onEnter={tryComplete}
+                  enterDisabled={invalid}
+                />
+              </div>
+            ) : null}
+
+            {mode === 'SPLIT' ? (
+              <div className="max-w-xl space-y-3">
+                {splitLines.map((l, i) => (
+                  <div key={l.id} className="flex items-center gap-2">
+                    <Select
+                      value={l.method}
+                      onChange={(e) =>
+                        setSplitLines((ls) =>
+                          ls.map((x) =>
+                            x.id === l.id
+                              ? { ...x, method: e.target.value as PaymentMethodCode }
+                              : x,
+                          ),
+                        )
+                      }
+                      className="w-36"
+                    >
+                      {SPLIT_METHODS.map((m) => (
+                        <option key={m.value} value={m.value}>
+                          {m.label}
+                        </option>
+                      ))}
+                    </Select>
+                    <Input
+                      inputMode="decimal"
+                      value={l.amount}
+                      placeholder="0.00"
+                      className="min-w-0 flex-1"
+                      onChange={(e) =>
+                        setSplitLines((ls) =>
+                          ls.map((x) => (x.id === l.id ? { ...x, amount: e.target.value } : x)),
+                        )
+                      }
+                    />
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="shrink-0 text-danger"
+                      aria-label="Remove payment"
+                      onClick={() => setSplitLines((ls) => ls.filter((x) => x.id !== l.id))}
+                      disabled={splitLines.length <= 1 && i === 0}
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
+                  </div>
+                ))}
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={addSplitLine}
+                  leftIcon={<Plus className="h-4 w-4" />}
+                >
+                  Add payment
+                </Button>
+                <div className="flex items-center justify-between rounded-xl bg-muted px-4 py-3 text-sm">
+                  <span className="text-muted-foreground">Remaining</span>
+                  <span
+                    className={cn('font-semibold', balance > 0 ? 'text-danger' : 'text-success')}
+                  >
+                    {formatMoney(balance, currency)}
+                  </span>
+                </div>
+              </div>
+            ) : null}
+
+            {mode === 'CREDIT' ? (
+              <p className="max-w-md rounded-xl bg-muted px-4 py-3 text-sm text-muted-foreground">
+                The full {formatMoney(total, currency)} will be recorded as credit (an Invoice). A
+                saved customer is required.
+              </p>
+            ) : null}
+
+            {error ? (
+              <p
+                className="mt-4 rounded-xl bg-danger-soft px-4 py-2.5 text-sm font-medium text-danger"
+                role="alert"
+              >
+                {error}
+              </p>
+            ) : null}
+          </div>
+
+          {/* BOTTOM ZONE — paid/balance, print, actions (always visible). */}
+          <div className="shrink-0 space-y-3 border-t border-border bg-surface p-4 pb-[max(1rem,env(safe-area-inset-bottom))]">
+            <div className="flex flex-wrap items-center gap-x-10 gap-y-1 text-sm">
+              <div>
+                <div className="text-muted-foreground">Paid Amount</div>
+                <div className="font-semibold">{formatMoney(paidAmount, currency)}</div>
+              </div>
+              <div>
+                <div className="text-muted-foreground">{change > 0 ? 'Change' : 'Balance'}</div>
+                <div
+                  className={cn(
+                    'font-semibold',
+                    change > 0 ? 'text-success' : balance > 0 ? 'text-danger' : 'text-success',
+                  )}
+                >
+                  {formatMoney(change > 0 ? change : balance, currency)}
+                </div>
+              </div>
+            </div>
+
+            {invalid && disabledReason ? (
+              <p
+                className="rounded-xl bg-warning-soft px-3 py-2 text-xs font-medium text-warning"
+                role="status"
+              >
+                {disabledReason}
+              </p>
+            ) : null}
+
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-2 text-sm">
+                <Printer className="h-4 w-4 text-muted-foreground" aria-hidden />
+                <span id="print-a4-label">Print A4 bill after payment</span>
+                <Switch
+                  checked={printAfter}
+                  onCheckedChange={setPrintAfter}
+                  aria-labelledby="print-a4-label"
+                />
+              </div>
+
+              <div className="flex min-w-0 flex-1 items-center justify-end gap-2 sm:flex-initial">
+                <Button
+                  variant="outline"
+                  size="lg"
+                  className="shrink-0 border-primary text-primary hover:bg-brand-50"
+                  onClick={() => router.push('/pos')}
+                  leftIcon={<ArrowLeft className="h-4 w-4" />}
+                >
+                  Back to Cart
+                </Button>
+                <Button
+                  size="lg"
+                  className="min-w-0 flex-1 sm:flex-initial"
+                  disabled={invalid}
+                  isLoading={submitting}
+                  onClick={submit}
+                  leftIcon={<CheckCircle2 className="h-5 w-5" />}
+                >
+                  Complete Payment
+                </Button>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
 
-      <div className="grid gap-4 lg:min-h-0 lg:flex-1 lg:grid-cols-[1fr_400px] xl:grid-cols-[1fr_440px]">
-        {/* ── Order summary — scrolls internally on lg+ ── */}
-        <Card className="flex min-w-0 flex-col overflow-hidden lg:min-h-0">
-          <CardHeader className="shrink-0">
-            <CardTitle>Order summary ({totals.itemCount} items)</CardTitle>
-          </CardHeader>
-          <div className="min-h-0 flex-1 overflow-auto">
-            <table className="w-full text-sm">
-              <thead className="sticky top-0 z-10">
-                <tr className="border-y border-border bg-muted text-left text-muted-foreground">
-                  <th className="px-4 py-2.5 font-medium">Item</th>
-                  <th className="px-4 py-2.5 text-right font-medium">Price</th>
-                  <th className="px-4 py-2.5 text-right font-medium">Qty</th>
-                  <th className="px-4 py-2.5 text-right font-medium">Disc</th>
-                  <th className="px-4 py-2.5 text-right font-medium">Total</th>
-                </tr>
-              </thead>
-              <tbody>
-                {cart.items.map((it) => {
-                  const line = computeLine(it);
-                  return (
-                    <tr key={it.product.id} className="border-b border-border last:border-0">
-                      <td className="px-4 py-2.5">
-                        <div className="font-medium">{it.product.name}</div>
-                        <div className="text-xs text-muted-foreground">{it.product.sku ?? ''}</div>
-                      </td>
-                      <td className="px-4 py-2.5 text-right">{formatMoney(it.product.unitPrice, currency)}</td>
-                      <td className="px-4 py-2.5 text-right">{it.quantity}</td>
-                      <td className="px-4 py-2.5 text-right text-success">
-                        {line.discountAmount > 0 ? `-${formatMoney(line.discountAmount, currency)}` : '—'}
-                      </td>
-                      <td className="px-4 py-2.5 text-right font-medium">{formatMoney(line.lineTotal, currency)}</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-          <CardContent className="shrink-0 space-y-1.5 border-t border-border pt-4 text-sm">
-            <Row label="Subtotal" value={formatMoney(totals.subtotal, currency)} />
-            <Row label="Product discount" value={`-${formatMoney(totals.totalDiscount, currency)}`} tone="success" />
-            {totals.orderDiscountAmount > 0 ? (
-              <Row label="Order discount" value={`-${formatMoney(totals.orderDiscountAmount, currency)}`} tone="success" />
-            ) : null}
-            <Row label={`Tax / VAT (${data.settings.taxRatePercent}%)`} value={formatMoney(totals.taxAmount, currency)} />
-            <div className="mt-1 flex items-center justify-between rounded-lg bg-brand-50 px-3 py-2.5 text-base font-semibold text-brand-700">
-              <span>Grand Total</span>
-              <span>{formatMoney(total, currency)}</span>
-            </div>
-          </CardContent>
-        </Card>
+      {/* Order-summary drawer for small/portrait screens. */}
+      <Dialog
+        open={summaryOpen}
+        onClose={() => setSummaryOpen(false)}
+        title="Order summary"
+        className="max-w-lg"
+      >
+        <div className="-mx-6 -mb-6 max-h-[70vh] overflow-hidden rounded-b-2xl border-t border-border">
+          <OrderSummary
+            items={cart.items}
+            totals={totals}
+            currency={currency}
+            taxRatePercent={data.settings.taxRatePercent}
+            total={total}
+            onChangeQty={cart.changeQty}
+            hideHeader
+          />
+        </div>
+      </Dialog>
+    </div>
+  );
+}
 
-        {/* ── Payment panel: method (fixed) · content (scroll) · action bar (fixed) ── */}
-        <div className="flex min-w-0 flex-col gap-3 lg:min-h-0">
-          {/* Method selector — fixed */}
-          <div className="shrink-0 rounded-2xl border border-border bg-card p-3 shadow-sm">
-            <div className="mb-2 px-1 text-sm font-semibold">Payment method</div>
-            <div className="grid grid-cols-4 gap-2">
-              {METHODS.map((m) => (
-                <button
-                  key={m.key}
-                  onClick={() => {
-                    setMode(m.key);
-                    setError(null);
-                    if (m.key === 'SPLIT' && splitLines.length === 0) {
-                      setSplitLines([{ id: splitLineSeq++, method: 'CASH', amount: total.toFixed(2), reference: '' }]);
-                    }
-                  }}
-                  className={cn(
-                    'flex min-h-[3.25rem] flex-col items-center justify-center gap-1 rounded-xl border p-1.5 text-center text-[11px] font-medium leading-tight transition-colors',
-                    mode === m.key
-                      ? 'border-primary bg-brand-50 text-brand-700'
-                      : 'border-border text-muted-foreground hover:bg-muted',
-                  )}
+/**
+ * Order-summary body: header with item-count badge, an item table that scrolls
+ * independently for large orders (sticky header) with subtotal/discount/tax/
+ * grand-total pinned directly beneath the items. Shared by the desktop card and
+ * the mobile drawer.
+ */
+function OrderSummary({
+  items,
+  totals,
+  currency,
+  taxRatePercent,
+  total,
+  onChangeQty,
+  hideHeader,
+}: {
+  items: CartItem[];
+  totals: ReturnType<typeof computeTotals>;
+  currency: string;
+  taxRatePercent: number;
+  total: number;
+  onChangeQty: (productId: string, delta: number) => void;
+  hideHeader?: boolean;
+}) {
+  return (
+    <div className="flex min-h-0 flex-col overflow-hidden">
+      {hideHeader ? null : (
+        <div className="flex shrink-0 items-center justify-between gap-3 px-5 py-4">
+          <div className="flex items-center gap-2">
+            <ShoppingCart className="h-5 w-5 text-primary" aria-hidden />
+            <span className="text-lg font-semibold tracking-tight">Order Summary</span>
+          </div>
+          <Badge variant="primary">
+            {totals.itemCount} {totals.itemCount === 1 ? 'item' : 'items'}
+          </Badge>
+        </div>
+      )}
+      <div className="min-h-0 flex-1 overflow-auto">
+        <table className="w-full text-sm">
+          <thead className="sticky top-0 z-10">
+            <tr className="border-y border-border bg-muted text-left text-muted-foreground">
+              <th className="px-4 py-2.5 font-medium">Item</th>
+              <th className="px-3 py-2.5 text-right font-medium">Unit Price</th>
+              <th className="px-3 py-2.5 text-center font-medium">Qty</th>
+              <th className="px-4 py-2.5 text-right font-medium">Total</th>
+            </tr>
+          </thead>
+          <tbody>
+            {items.map((it) => {
+              const line = computeLine(it);
+              return (
+                <tr
+                  key={it.product.id}
+                  className="border-b border-border last:border-0 align-middle"
                 >
-                  <m.Icon className="h-5 w-5" />
-                  {m.label}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* Amount due (fixed) + method content (scrollable) */}
-          <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-border bg-card shadow-sm">
-            <div className="flex shrink-0 items-center justify-between border-b border-border px-4 py-3">
-              <span className="text-sm text-muted-foreground">Amount due</span>
-              <span className="text-xl font-bold text-primary">{formatMoney(total, currency)}</span>
-            </div>
-
-            <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-4">
-              {mode === 'CASH' ? (
-                <div className="grid gap-4 xl:grid-cols-2">
-                  <div className="space-y-3">
-                    <div className="grid grid-cols-2 gap-3">
-                      <div className="space-y-1.5">
-                        <Label htmlFor="tendered">Amount received</Label>
-                        <Input id="tendered" inputMode="decimal" value={tendered} onChange={(e) => setTendered(e.target.value)} className="text-base font-semibold" />
-                      </div>
-                      <div className="space-y-1.5">
-                        <Label>Change</Label>
-                        <div className="flex h-11 items-center rounded-xl bg-success-soft px-4 text-base font-semibold text-success">
-                          {formatMoney(change, currency)}
+                  <td className="px-4 py-3">
+                    <div className="flex items-center gap-3">
+                      <ProductImage
+                        src={it.product.imageUrl}
+                        alt={it.product.name}
+                        className="h-10 w-10 shrink-0"
+                      />
+                      <div className="min-w-0">
+                        <div className="truncate font-medium leading-tight">{it.product.name}</div>
+                        <div className="truncate text-xs text-muted-foreground">
+                          {it.product.sku ? `SKU: ${it.product.sku}` : ''}
                         </div>
                       </div>
                     </div>
-                    <div className="flex flex-wrap gap-2">
-                      {quickAmounts.map((n) => (
-                        <button
-                          key={n}
-                          onClick={() => setTendered(n.toFixed(2))}
-                          className="min-h-11 flex-1 rounded-lg border border-border px-3 text-sm font-medium hover:bg-muted"
-                        >
-                          {formatMoney(n, currency)}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                  <Numpad onPress={appendDigit} />
-                </div>
-              ) : null}
-
-              {mode === 'CARD' || mode === 'BANK_TRANSFER' || mode === 'QR_PAYMENT' || mode === 'CHECK' ? (
-                <div className="space-y-1.5">
-                  <Label htmlFor="ref">{mode === 'CHECK' ? 'Cheque number' : 'Reference'} (optional)</Label>
-                  <Input id="ref" value={reference} onChange={(e) => setReference(e.target.value)} placeholder="e.g. txn / auth ref" />
-                </div>
-              ) : null}
-
-              {mode === 'PARTIAL' ? (
-                <div className="grid gap-4 xl:grid-cols-[1fr_1fr]">
-                  <div className="grid grid-cols-2 gap-3 xl:grid-cols-1">
-                    <div className="space-y-1.5">
-                      <Label htmlFor="partial">Amount paid now</Label>
-                      <Input id="partial" inputMode="decimal" placeholder="0.00" value={partialAmount} onChange={(e) => setPartialAmount(e.target.value)} />
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label htmlFor="pmethod">Paid by</Label>
-                      <Select id="pmethod" value={partialMethod} onChange={(e) => setPartialMethod(e.target.value as PaymentMethodCode)}>
-                        {SPLIT_METHODS.map((m) => (
-                          <option key={m.value} value={m.value}>
-                            {m.label}
-                          </option>
-                        ))}
-                      </Select>
-                    </div>
-                  </div>
-                  <Numpad onPress={appendDigit} />
-                </div>
-              ) : null}
-
-              {mode === 'SPLIT' ? (
-                <div className="space-y-3">
-                  {splitLines.map((l, i) => (
-                    <div key={l.id} className="flex items-center gap-2">
-                      <Select
-                        value={l.method}
-                        onChange={(e) =>
-                          setSplitLines((ls) => ls.map((x) => (x.id === l.id ? { ...x, method: e.target.value as PaymentMethodCode } : x)))
-                        }
-                        className="w-36"
-                      >
-                        {SPLIT_METHODS.map((m) => (
-                          <option key={m.value} value={m.value}>
-                            {m.label}
-                          </option>
-                        ))}
-                      </Select>
-                      <Input
-                        inputMode="decimal"
-                        value={l.amount}
-                        placeholder="0.00"
-                        onChange={(e) => setSplitLines((ls) => ls.map((x) => (x.id === l.id ? { ...x, amount: e.target.value } : x)))}
-                      />
+                  </td>
+                  <td className="whitespace-nowrap px-3 py-3 text-right">
+                    {formatMoney(it.product.unitPrice, currency)}
+                  </td>
+                  <td className="px-3 py-3">
+                    <div className="flex items-center justify-center gap-1">
                       <Button
-                        variant="ghost"
+                        variant="outline"
                         size="icon"
-                        className="text-danger"
-                        aria-label="Remove"
-                        onClick={() => setSplitLines((ls) => ls.filter((x) => x.id !== l.id))}
-                        disabled={splitLines.length <= 1 && i === 0}
+                        className="h-8 w-8 shrink-0"
+                        aria-label={`Decrease ${it.product.name} quantity`}
+                        onClick={() => onChangeQty(it.product.id, -1)}
                       >
-                        <Trash2 className="h-4 w-4" />
+                        <Minus className="h-3.5 w-3.5" />
+                      </Button>
+                      <span className="w-7 text-center font-semibold tabular-nums">
+                        {it.quantity}
+                      </span>
+                      <Button
+                        variant="outline"
+                        size="icon"
+                        className="h-8 w-8 shrink-0"
+                        aria-label={`Increase ${it.product.name} quantity`}
+                        onClick={() => onChangeQty(it.product.id, 1)}
+                      >
+                        <Plus className="h-3.5 w-3.5" />
                       </Button>
                     </div>
-                  ))}
-                  <Button variant="outline" size="sm" onClick={addSplitLine} leftIcon={<Plus className="h-4 w-4" />}>
-                    Add payment
-                  </Button>
-                  <div className="flex items-center justify-between text-sm">
-                    <span className="text-muted-foreground">Paid</span>
-                    <span className="font-medium">{formatMoney(paidAmount, currency)}</span>
-                  </div>
-                </div>
-              ) : null}
-
-              {mode === 'CREDIT' ? (
-                <p className="rounded-lg bg-muted px-3 py-2.5 text-sm text-muted-foreground">
-                  The full amount will be recorded as credit (an Invoice). A customer is required.
-                </p>
-              ) : null}
-
-              {totals.hasStockIssue ? (
-                <p className="text-sm text-danger">
-                  Some items exceed available stock — go back to the cart to adjust quantities.
-                </p>
-              ) : null}
-              {needsCustomer && !hasCustomer ? (
-                <p className="text-sm text-warning">Select a customer for a credit or partial sale.</p>
-              ) : null}
-              {error ? <p className="text-sm text-danger">{error}</p> : null}
-            </div>
-          </div>
-
-          {/* Action bar — always visible (sticky below lg, pinned on lg+) */}
-          <div className="sticky bottom-0 z-10 shrink-0 space-y-2.5 rounded-2xl border border-border bg-surface p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] shadow-sm">
-            <div className="flex items-center justify-between gap-2 text-sm">
-              <span className="text-muted-foreground">Paid</span>
-              <span className="font-medium">{formatMoney(paidAmount, currency)}</span>
-              <span className="ml-auto text-muted-foreground">Balance</span>
-              <span className={cn('font-semibold', balance > 0 ? 'text-danger' : 'text-foreground')}>
-                {formatMoney(balance, currency)}
-              </span>
-            </div>
-            <div className="flex items-center justify-between gap-2 rounded-xl border border-border px-3 py-2">
-              <span className="text-sm">Print bill after payment</span>
-              <Switch checked={printAfter} onCheckedChange={setPrintAfter} />
-            </div>
-            <div className="grid grid-cols-[auto_1fr] gap-2">
-              <Button variant="outline" size="lg" onClick={() => router.push('/pos')} leftIcon={<ArrowLeft className="h-4 w-4" />}>
-                Back to Cart
-              </Button>
-              <Button size="lg" disabled={invalid} isLoading={submitting} onClick={submit}>
-                Complete Payment · {formatMoney(total, currency)}
-              </Button>
-            </div>
-          </div>
+                  </td>
+                  <td className="whitespace-nowrap px-4 py-3 text-right">
+                    <div className="font-semibold">{formatMoney(line.lineTotal, currency)}</div>
+                    {line.discountAmount > 0 ? (
+                      <div className="text-xs font-medium text-success">
+                        -{formatMoney(line.discountAmount, currency)}
+                      </div>
+                    ) : null}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <div className="shrink-0 space-y-1.5 border-t border-border p-4 text-sm">
+        <Row label="Subtotal" value={formatMoney(totals.subtotal, currency)} />
+        {totals.totalDiscount > 0 ? (
+          <Row
+            label="Product Discount"
+            value={`- ${formatMoney(totals.totalDiscount, currency)}`}
+            tone="success"
+          />
+        ) : null}
+        {totals.orderDiscountAmount > 0 ? (
+          <Row
+            label="Order Discount"
+            value={`- ${formatMoney(totals.orderDiscountAmount, currency)}`}
+            tone="success"
+          />
+        ) : null}
+        <Row
+          label={`Tax / VAT (${taxRatePercent}%)`}
+          value={formatMoney(totals.taxAmount, currency)}
+        />
+        <div className="mt-1 flex items-center justify-between rounded-lg bg-brand-50 px-3 py-3 text-base font-semibold text-brand-700">
+          <span>Grand Total</span>
+          <span className="text-lg">{formatMoney(total, currency)}</span>
         </div>
       </div>
     </div>
   );
 }
 
-function Numpad({ onPress }: { onPress: (d: string) => void }) {
-  const keys = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '.', '0', 'back'];
-  return (
-    <div className="grid grid-cols-3 gap-2">
-      {keys.map((k) => (
-        <button
-          key={k}
-          onClick={() => onPress(k)}
-          className="flex h-12 items-center justify-center rounded-xl border border-border text-lg font-medium hover:bg-muted"
-        >
-          {k === 'back' ? <Delete className="h-5 w-5" /> : k}
-        </button>
-      ))}
-    </div>
-  );
-}
-
-function Row({ label, value, tone }: { label: string; value: string; tone?: 'success' | 'danger' }) {
+function Row({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: string;
+  tone?: 'success' | 'danger';
+}) {
   return (
     <div className="flex items-center justify-between">
       <span className="text-muted-foreground">{label}</span>
@@ -601,7 +836,9 @@ function SuccessView({
           {sale.balanceAmount > 0 ? (
             <div className="flex justify-between">
               <span className="text-muted-foreground">Balance due</span>
-              <span className="font-semibold text-danger">{formatMoney(sale.balanceAmount, currency)}</span>
+              <span className="font-semibold text-danger">
+                {formatMoney(sale.balanceAmount, currency)}
+              </span>
             </div>
           ) : null}
           <div className="flex items-center justify-between pt-1">
@@ -615,7 +852,12 @@ function SuccessView({
 
         <div className="mt-5 grid w-full gap-2">
           <div className="grid grid-cols-2 gap-2">
-            <Button variant="outline" size="lg" onClick={onPreviewA4} leftIcon={<ReceiptText className="h-4 w-4" />}>
+            <Button
+              variant="outline"
+              size="lg"
+              onClick={onPreviewA4}
+              leftIcon={<ReceiptText className="h-4 w-4" />}
+            >
               Preview A4 Bill
             </Button>
             <Button size="lg" onClick={onPrintA4} leftIcon={<Printer className="h-4 w-4" />}>
@@ -629,11 +871,20 @@ function SuccessView({
               </button>
             ) : null}
             <span aria-hidden>·</span>
-            <button onClick={onPrintThermal} disabled={printing} className="font-medium hover:underline disabled:opacity-50">
+            <button
+              onClick={onPrintThermal}
+              disabled={printing}
+              className="font-medium hover:underline disabled:opacity-50"
+            >
               {printing ? 'Preparing…' : 'Thermal receipt'}
             </button>
           </div>
-          <Button size="lg" onClick={onNewSale} leftIcon={<Plus className="h-4 w-4" />} className="mt-1">
+          <Button
+            size="lg"
+            onClick={onNewSale}
+            leftIcon={<Plus className="h-4 w-4" />}
+            className="mt-1"
+          >
             New sale
           </Button>
         </div>

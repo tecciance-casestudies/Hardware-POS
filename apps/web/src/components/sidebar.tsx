@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { Store } from 'lucide-react';
+import { PanelLeftClose, PanelLeftOpen, Store } from 'lucide-react';
 import * as React from 'react';
 
 import { NAV_ITEMS } from '@/lib/nav';
@@ -69,7 +69,7 @@ function NavList({ collapsed }: { collapsed?: boolean }) {
 const FOOTER_NOTE = 'QuickBooks is the inventory & accounting master.';
 
 export function Sidebar() {
-  const { collapsed, mobileOpen, closeMobile } = useSidebar();
+  const { collapsed, toggleCollapsed, mobileOpen, closeMobile } = useSidebar();
   const pathname = usePathname();
 
   // Close the mobile drawer whenever the route changes.
@@ -101,6 +101,26 @@ export function Sidebar() {
             {FOOTER_NOTE}
           </div>
         ) : null}
+        {/* Collapse / expand the rail — preference persists (localStorage). */}
+        <div className="border-t border-border p-3">
+          <button
+            type="button"
+            onClick={toggleCollapsed}
+            title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            className={cn(
+              'flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground',
+              collapsed && 'justify-center gap-0',
+            )}
+          >
+            {collapsed ? (
+              <PanelLeftOpen className="h-5 w-5 shrink-0" />
+            ) : (
+              <PanelLeftClose className="h-5 w-5 shrink-0" />
+            )}
+            {!collapsed ? <span>Collapse</span> : null}
+          </button>
+        </div>
       </aside>
 
       {/* Mobile off-canvas drawer. Stays mounted for the slide transition;
