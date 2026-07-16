@@ -28,6 +28,7 @@ import { QuickAddCustomerDialog } from '@/components/pos/quick-add-customer-dial
 import { ProductImage } from '@/components/product-image';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
+import { ChipRow } from '@/components/ui/chip-row';
 import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
 import { useAuth } from '@/lib/auth';
@@ -537,12 +538,13 @@ export default function PosPage() {
             </div>
           ) : null}
 
-          {/* Single-line, horizontally scrollable filter rows: the vertical
-              footprint stays constant no matter how many categories exist. */}
-          <div className="flex gap-2 overflow-x-auto pb-1 [scrollbar-width:thin]">
+          {/* Single-line chip rows: constant height however many categories
+              exist; edge fades + chevrons signal and reach off-screen chips. */}
+          <ChipRow activeKey={category} ariaLabel="categories">
             {categories.map((c) => (
               <button
                 key={c}
+                data-active={category === c}
                 onClick={() => {
                   setCategory(c);
                   setSubcategory('All');
@@ -557,13 +559,14 @@ export default function PosPage() {
                 {c}
               </button>
             ))}
-          </div>
+          </ChipRow>
 
           {subcategories.length > 0 ? (
-            <div className="flex gap-2 overflow-x-auto pb-1 [scrollbar-width:thin]">
+            <ChipRow activeKey={subcategory} ariaLabel="subcategories">
               {subcategories.map((s) => (
                 <button
                   key={s}
+                  data-active={subcategory === s}
                   onClick={() => setSubcategory(s)}
                   className={cn(
                     'h-8 shrink-0 whitespace-nowrap rounded-full px-3 text-xs font-medium transition-colors',
@@ -575,7 +578,7 @@ export default function PosPage() {
                   {s}
                 </button>
               ))}
-            </div>
+            </ChipRow>
           ) : null}
         </div>
 
