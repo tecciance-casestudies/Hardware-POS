@@ -50,3 +50,9 @@ body {
   outline: 2px solid var(--color-ring);
   outline-offset: 2px;
 }
+
+/* Tailwind v4's preflight no longer sets a pointer cursor on buttons;
+   restore it for every enabled button/button-role element app-wide. */
+:where(button, [role='button'], input[type='submit'], input[type='button']):not(:disabled) {
+  cursor: pointer;
+}

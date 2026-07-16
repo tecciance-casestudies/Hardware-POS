@@ -25,6 +25,7 @@ import { QuickAddCustomerDialog } from '@/components/pos/quick-add-customer-dial
 import { ProductImage } from '@/components/product-image';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
+import { ChipRow } from '@/components/ui/chip-row';
 import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
 import { useAuth } from '@/lib/auth';
@@ -213,7 +214,10 @@ export default function PosPage() {
   return (
     <div className="grid gap-5 lg:grid-cols-[1.9fr_1fr]">
       {/* ── Catalog ─────────────────────────────────────────────── */}
-      <div className="space-y-3">
+      {/* min-w-0: grid items refuse to shrink below their content's width by
+          default, which would let the chip rows blow the layout wide instead
+          of scrolling internally. */}
+      <div className="min-w-0 space-y-3">
         <div className="flex items-center gap-3">
           <div className="relative flex-1">
             <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
@@ -239,12 +243,13 @@ export default function PosPage() {
           </div>
         ) : null}
 
-        {/* Single-line, horizontally scrollable filter rows: vertical footprint
-            stays constant no matter how many categories exist. */}
-        <div className="flex gap-2 overflow-x-auto pb-1 [scrollbar-width:thin]">
+        {/* Single-line chip rows: constant height however many categories exist;
+            edge fades + chevrons signal and reach off-screen chips. */}
+        <ChipRow activeKey={category} ariaLabel="categories">
           {categories.map((c) => (
             <button
               key={c}
+              data-active={category === c}
               onClick={() => {
                 setCategory(c);
                 setSubcategory('All');
@@ -259,13 +264,14 @@ export default function PosPage() {
               {c}
             </button>
           ))}
-        </div>
+        </ChipRow>
 
         {subcategories.length > 0 ? (
-          <div className="flex gap-2 overflow-x-auto pb-1 [scrollbar-width:thin]">
+          <ChipRow activeKey={subcategory} ariaLabel="subcategories">
             {subcategories.map((s) => (
               <button
                 key={s}
+                data-active={subcategory === s}
                 onClick={() => setSubcategory(s)}
                 className={cn(
                   'shrink-0 whitespace-nowrap rounded-full px-3 py-1 text-xs font-medium transition-colors',
@@ -277,7 +283,7 @@ export default function PosPage() {
                 {s}
               </button>
             ))}
-          </div>
+          </ChipRow>
         ) : null}
 
         {data.loading ? (

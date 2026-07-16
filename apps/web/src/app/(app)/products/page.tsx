@@ -11,6 +11,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button, buttonVariants } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
+import { SearchSelect } from '@/components/ui/search-select';
 import { Select } from '@/components/ui/select';
 import { Tooltip } from '@/components/ui/tooltip';
 import { useAuth } from '@/lib/auth';
@@ -147,21 +148,23 @@ export default function ProductsPage() {
             className="pl-10"
           />
         </div>
-        <Select
+        <SearchSelect
+          ariaLabel="Filter by category"
+          searchPlaceholder="Search categories…"
           value={categoryId}
-          onChange={(e) => {
-            setCategoryId(e.target.value);
+          onChange={(id) => {
+            setCategoryId(id);
             setSubcategoryId('');
           }}
-          className="w-auto"
-        >
-          <option value="">All categories</option>
-          {categories.map((c) => (
-            <option key={c.id} value={c.id}>
-              {c.name}
-            </option>
-          ))}
-        </Select>
+          options={[
+            { value: '', label: 'All categories' },
+            ...categories.map((c) => ({
+              value: c.id,
+              label: c.name,
+              hint: c.productCount > 0 ? String(c.productCount) : undefined,
+            })),
+          ]}
+        />
         {subcategoryOptions.length > 0 ? (
           <Select
             value={subcategoryId}
