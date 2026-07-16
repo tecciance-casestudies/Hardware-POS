@@ -4,17 +4,13 @@ import { useRouter } from 'next/navigation';
 import * as React from 'react';
 import { ArrowLeft, ArrowRight, ClipboardCheck, Save } from 'lucide-react';
 
-import { BasicInformationStep } from '@/components/products/wizard/basic-information-step';
-import { CategoryMediaStep } from '@/components/products/wizard/category-media-step';
-import { PricingInventoryStep } from '@/components/products/wizard/pricing-inventory-step';
-import { ProductTypeStep } from '@/components/products/wizard/product-type-step';
+import { PriceStockStep } from '@/components/products/wizard/price-stock-step';
+import { ProductDetailsStep } from '@/components/products/wizard/product-details-step';
 import {
   ProductWizardProgress,
   type ProgressItem,
 } from '@/components/products/wizard/product-wizard-progress';
-import { ProductWizardSummary } from '@/components/products/wizard/product-wizard-summary';
 import { ReviewStep, type ReviewIssue } from '@/components/products/wizard/review-step';
-import { VariationSetupStep } from '@/components/products/wizard/variation-setup-step';
 import {
   initialFormState,
   numOrNull,
@@ -41,20 +37,13 @@ import {
 import { variantValidationIssues } from '@/lib/variations/variation-combination-utils';
 import { useVariationStore, variationMockService } from '@/lib/variations/variation-store';
 
+/** The simplified flow is always three steps; variations live inside `pricing`. */
+const STEPS: StepKey[] = ['details', 'pricing', 'review'];
 const STEP_LABELS: Record<StepKey, string> = {
-  type: 'Product Type',
-  basic: 'Basic Information',
-  category: 'Category & Image',
+  details: 'Product Details',
   pricing: 'Price & Stock',
-  variations: 'Variations',
-  review: 'Review',
+  review: 'Review & Save',
 };
-
-function buildSteps(type: ProductType): StepKey[] {
-  return type === 'variations'
-    ? ['type', 'basic', 'category', 'pricing', 'variations', 'review']
-    : ['type', 'basic', 'category', 'pricing', 'review'];
-}
 
 export function ProductForm({
   session,
@@ -75,7 +64,7 @@ export function ProductForm({
   const [imageUrl, setImageUrl] = React.useState<string | null>(product?.imageUrl ?? null);
   const [pendingFile, setPendingFile] = React.useState<File | null>(null);
   const [pendingPreview, setPendingPreview] = React.useState<string | null>(null);
-  const [step, setStep] = React.useState<StepKey>('type');
+  const [step, setStep] = React.useState<StepKey>('details');
   const [errors, setErrors] = React.useState<FieldErrors>({});
   const [saving, setSaving] = React.useState(false);
   const [imageBusy, setImageBusy] = React.useState(false);
@@ -106,7 +95,7 @@ export function ProductForm({
     const draft = productDraftService.load(null);
     if (draft) {
       setForm(draft.fields);
-      setStep(draft.step >= 0 ? (buildSteps(draft.productType)[draft.step] ?? 'type') : 'type');
+      setStep(draft.step >= 0 ? (STEPS[draft.step] ?? 'details') : 'details');
       setDraftSavedAt(draft.savedAt);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -118,25 +107,19 @@ export function ProductForm({
     };
   }, [pendingPreview]);
 
-  const steps = React.useMemo(() => buildSteps(productType), [productType]);
-
-  // Keep the current step valid if the flow shape changes (variations ↔ simple).
-  React.useEffect(() => {
-    if (!steps.includes(step)) setStep('pricing');
-  }, [steps, step]);
-
-  const stepIndex = steps.indexOf(step);
-  const isLast = stepIndex === steps.length - 1;
+  const stepIndex = STEPS.indexOf(step);
+  const isLast = stepIndex === STEPS.length - 1;
   const previewSrc = pendingPreview ?? imageUrl;
 
-  // ---- validation ----
+  // ---- validation (only what the current step needs) ----
   const validate = React.useCallback(
     (key: StepKey): FieldErrors => {
       const e: FieldErrors = {};
-      if (key === 'basic') {
+      if (key === 'details') {
         if (!form.name.trim()) e.name = 'Please enter a product name before continuing.';
         const bc = form.barcode.trim();
-        if (bc && !/^[A-Za-z0-9-]{4,}$/.test(bc)) e.barcode = 'Enter a valid barcode (letters or numbers).';
+        if (bc && !/^[A-Za-z0-9-]{4,}$/.test(bc))
+          e.barcode = 'Enter a valid barcode (letters or numbers).';
       }
       if (key === 'pricing') {
         if (form.unitPrice.trim() === '' || Number.isNaN(Number(form.unitPrice))) {
@@ -151,40 +134,41 @@ export function ProductForm({
   );
 
   const invalidVariantCount = variations.data.enabled
-    ? variations.data.variants.filter((v) => variantValidationIssues(v, variations.data.priceMode).length > 0).length
+    ? variations.data.variants.filter(
+        (v) => variantValidationIssues(v, variations.data.priceMode).length > 0,
+      ).length
     : 0;
   const missingSkuCount = variations.data.variants.filter((v) => !v.sku.trim()).length;
-  const totalVariantStock = variations.data.variants.reduce((n, v) => n + (Number(v.stock) || 0), 0);
+  const totalVariantStock = variations.data.variants.reduce(
+    (n, v) => n + (Number(v.stock) || 0),
+    0,
+  );
 
   const stepStatus = React.useCallback(
     (key: StepKey): StepStatus => {
       if (key === step) return 'current';
-      if (key === 'type') return 'complete';
-      if (key === 'category') return form.categoryId ? 'complete' : 'optional';
-      if (key === 'variations') {
-        if (invalidVariantCount > 0) return 'attention';
-        return variations.data.variants.length > 0 ? 'complete' : 'todo';
-      }
-      const errs = validate(key);
-      if (Object.keys(errs).length > 0) return steps.indexOf(key) < stepIndex ? 'attention' : 'todo';
+      const idx = STEPS.indexOf(key);
       if (key === 'review') return 'todo';
-      return steps.indexOf(key) < stepIndex ? 'complete' : 'todo';
+      if (key === 'pricing' && invalidVariantCount > 0) return 'attention';
+      const errs = validate(key);
+      if (Object.keys(errs).length > 0) return idx < stepIndex ? 'attention' : 'todo';
+      return idx < stepIndex ? 'complete' : 'todo';
     },
-    [step, form.categoryId, invalidVariantCount, variations.data.variants.length, validate, steps, stepIndex],
+    [step, invalidVariantCount, validate, stepIndex],
   );
 
   // Furthest step the user may jump forward to.
   const maxReachable = React.useMemo(() => {
     let reach = 0;
-    for (let i = 0; i < steps.length; i += 1) {
+    for (let i = 0; i < STEPS.length; i += 1) {
       reach = i;
-      const s = stepStatus(steps[i]!);
+      const s = stepStatus(STEPS[i]!);
       if (s !== 'complete' && s !== 'optional' && s !== 'current') break;
     }
     return Math.max(reach, stepIndex);
-  }, [steps, stepStatus, stepIndex]);
+  }, [stepStatus, stepIndex]);
 
-  const progressItems: ProgressItem[] = steps.map((key, i) => ({
+  const progressItems: ProgressItem[] = STEPS.map((key, i) => ({
     key,
     label: STEP_LABELS[key],
     status: stepStatus(key),
@@ -192,7 +176,7 @@ export function ProductForm({
   }));
 
   const goTo = (key: StepKey) => {
-    const target = steps.indexOf(key);
+    const target = STEPS.indexOf(key);
     if (target < 0) return;
     if (target <= maxReachable) {
       setError(null);
@@ -220,14 +204,14 @@ export function ProductForm({
       void submit();
       return;
     }
-    setStep(steps[stepIndex + 1]!);
+    setStep(STEPS[stepIndex + 1]!);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
   const goBack = () => {
     if (stepIndex <= 0) return;
     setError(null);
-    setStep(steps[stepIndex - 1]!);
+    setStep(STEPS[stepIndex - 1]!);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
@@ -304,11 +288,11 @@ export function ProductForm({
   });
 
   const submit = async () => {
-    const basicErr = validate('basic');
+    const detailsErr = validate('details');
     const priceErr = validate('pricing');
-    if (Object.keys(basicErr).length) {
-      setErrors(basicErr);
-      goTo('basic');
+    if (Object.keys(detailsErr).length) {
+      setErrors(detailsErr);
+      goTo('details');
       focusFirstError();
       return;
     }
@@ -319,8 +303,10 @@ export function ProductForm({
       return;
     }
     if (invalidVariantCount > 0) {
-      setError(`${invalidVariantCount} variant${invalidVariantCount === 1 ? '' : 's'} need attention.`);
-      goTo('variations');
+      setError(
+        `${invalidVariantCount} variant${invalidVariantCount === 1 ? '' : 's'} need attention.`,
+      );
+      goTo('pricing');
       return;
     }
     setSaving(true);
@@ -362,7 +348,6 @@ export function ProductForm({
   // ---- derived summary/review data ----
   const category = categories.find((c) => c.id === form.categoryId) ?? null;
   const subcategory = category?.subcategories.find((s) => s.id === form.subcategoryId) ?? null;
-  const completedSteps = steps.filter((k) => stepStatus(k) === 'complete').length;
 
   const priceModeLabel =
     variations.data.priceMode === 'single'
@@ -372,38 +357,76 @@ export function ProductForm({
         : 'Base price + overrides';
 
   const reviewIssues: ReviewIssue[] = [];
-  if (!form.name.trim()) reviewIssues.push({ label: 'Add a product name', step: 'basic' });
+  if (!form.name.trim()) reviewIssues.push({ label: 'Add a product name', step: 'details' });
   if (form.unitPrice.trim() === '' || Number.isNaN(Number(form.unitPrice)))
     reviewIssues.push({ label: 'Set a valid selling price', step: 'pricing' });
   if (productType === 'variations') {
     if (variations.data.variants.length === 0)
-      reviewIssues.push({ label: 'No combinations generated yet', step: 'variations' });
+      reviewIssues.push({ label: 'No combinations generated yet', step: 'pricing' });
     if (invalidVariantCount > 0)
-      reviewIssues.push({ label: `${invalidVariantCount} variant(s) need attention`, step: 'variations' });
+      reviewIssues.push({
+        label: `${invalidVariantCount} variant(s) need attention`,
+        step: 'pricing',
+      });
     if (missingSkuCount > 0)
-      reviewIssues.push({ label: `${missingSkuCount} variant(s) missing SKU`, step: 'variations' });
+      reviewIssues.push({ label: `${missingSkuCount} variant(s) missing SKU`, step: 'pricing' });
   }
 
   const completedLabels: string[] = [];
   if (form.name.trim()) completedLabels.push('Basic information complete');
   if (form.categoryId) completedLabels.push('Category selected');
   if (previewSrc) completedLabels.push('Image added');
-  if (form.unitPrice.trim() !== '' && !Number.isNaN(Number(form.unitPrice))) completedLabels.push('Pricing complete');
+  if (form.unitPrice.trim() !== '' && !Number.isNaN(Number(form.unitPrice)))
+    completedLabels.push('Pricing complete');
   if (productType === 'variations' && variations.data.variants.length > 0)
     completedLabels.push(`${variations.data.variants.length} combinations generated`);
 
-  const nextIsReview = !isLast && steps[stepIndex + 1] === 'review';
-  const primaryLabel = isLast ? (editing ? 'Save changes' : 'Create product') : nextIsReview ? 'Review product' : 'Continue';
-  const primaryIcon = isLast ? <Save className="h-4 w-4" /> : nextIsReview ? <ClipboardCheck className="h-4 w-4" /> : <ArrowRight className="h-4 w-4" />;
+  // Header status: how many required fields are still missing.
+  const requiredRemaining =
+    (form.name.trim() ? 0 : 1) +
+    (form.unitPrice.trim() !== '' && !Number.isNaN(Number(form.unitPrice)) ? 0 : 1);
+
+  const nextIsReview = !isLast && STEPS[stepIndex + 1] === 'review';
+  const primaryLabel = isLast
+    ? editing
+      ? 'Save changes'
+      : 'Create product'
+    : nextIsReview
+      ? 'Review product'
+      : 'Continue';
+  const primaryIcon = isLast ? (
+    <Save className="h-4 w-4" />
+  ) : nextIsReview ? (
+    <ClipboardCheck className="h-4 w-4" />
+  ) : (
+    <ArrowRight className="h-4 w-4" />
+  );
 
   return (
-    <div className="space-y-5 pb-28">
-      {/* Header: title + status + progress */}
+    <div className="mx-auto max-w-[1200px] space-y-5 pb-28">
+      {/* Header: title + compact status + 3-step progress */}
       <div className="space-y-4">
-        <div className="flex items-center justify-between gap-3">
-          <div>
-            <h1 className="text-2xl font-semibold tracking-tight">{editing ? 'Edit product' : 'Add product'}</h1>
-            <p className="text-sm text-muted-foreground">A guided setup — one step at a time.</p>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="min-w-0">
+            <h1 className="text-2xl font-semibold tracking-tight">
+              {editing ? 'Edit product' : 'Add product'}
+            </h1>
+            <p className="text-sm text-muted-foreground">
+              Step {stepIndex + 1} of {STEPS.length}
+              {requiredRemaining > 0 ? (
+                <>
+                  {' · '}
+                  <span className="text-warning">
+                    {requiredRemaining} required field{requiredRemaining === 1 ? '' : 's'} remaining
+                  </span>
+                </>
+              ) : (
+                <>
+                  {' · '}
+                  <span className="text-success">Ready to review</span>
+                </>
+              )}
+            </p>
           </div>
           <Badge variant={editing ? (form.isActive ? 'success' : 'neutral') : 'primary'}>
             {editing ? (form.isActive ? 'Active' : 'Inactive') : 'New'}
@@ -414,112 +437,64 @@ export function ProductForm({
         </div>
       </div>
 
-      {/* Mobile/tablet collapsible summary */}
-      <ProductWizardSummary
-        variant="collapsible"
-        data={{
-          form,
-          productType,
-          imageSrc: previewSrc,
-          categoryName: category?.name ?? null,
-          subcategoryName: subcategory?.name ?? null,
-          variantCount: variations.data.variants.length,
-          completedSteps,
-          totalSteps: steps.length,
-        }}
-      />
-
-      <div className="grid gap-6 lg:grid-cols-[1fr_300px]">
-        {/* Current step */}
-        <div className="min-w-0 rounded-2xl border border-border bg-card p-5 shadow-sm sm:p-6">
-          {step === 'type' ? (
-            <ProductTypeStep value={productType} onChange={(t) => variations.setEnabled(t === 'variations')} />
-          ) : null}
-          {step === 'basic' ? (
-            <BasicInformationStep
-              form={form}
-              set={set}
-              errors={errors}
-              productType={productType}
-              stepLabel={`Step ${stepIndex + 1} of ${steps.length}`}
-            />
-          ) : null}
-          {step === 'category' ? (
-            <CategoryMediaStep
-              form={form}
-              set={set}
-              setCategory={setCategory}
-              categories={categories}
-              imageSrc={previewSrc}
-              imageBusy={imageBusy}
-              onPickFile={onPickFile}
-              onRemoveImage={onRemoveImage}
-              stepLabel={`Step ${stepIndex + 1} of ${steps.length}`}
-            />
-          ) : null}
-          {step === 'pricing' ? (
-            <PricingInventoryStep
-              form={form}
-              set={set}
-              errors={errors}
-              productType={productType}
-              stockLocked={stockLocked}
-              computedVariantStock={productType === 'variations' ? totalVariantStock : null}
-              stepLabel={`Step ${stepIndex + 1} of ${steps.length}`}
-            />
-          ) : null}
-          {step === 'variations' ? (
-            <VariationSetupStep
-              store={variations}
-              baseSku={form.sku}
-              basePrice={Number(form.unitPrice) || 0}
-              stepLabel={`Step ${stepIndex + 1} of ${steps.length}`}
-            />
-          ) : null}
-          {step === 'review' ? (
-            <ReviewStep
-              form={form}
-              productType={productType}
-              categoryName={category?.name ?? null}
-              subcategoryName={subcategory?.name ?? null}
-              imageSrc={previewSrc}
-              completed={completedLabels}
-              issues={reviewIssues}
-              onGoTo={goTo}
-              stepLabel={`Step ${stepIndex + 1} of ${steps.length}`}
-              variation={
-                productType === 'variations'
-                  ? {
-                      attributes: variations.data.attributes.length,
-                      combinations: variations.data.variants.length,
-                      priceModeLabel,
-                      totalStock: totalVariantStock,
-                      outOfStock: variations.data.variants.filter((v) => v.stock <= 0).length,
-                      missingSku: missingSkuCount,
-                      needAttention: invalidVariantCount,
-                    }
-                  : null
-              }
-            />
-          ) : null}
-        </div>
-
-        {/* Desktop summary rail */}
-        <ProductWizardSummary
-          data={{
-            form,
-            productType,
-            imageSrc: previewSrc,
-            categoryName: category?.name ?? null,
-            subcategoryName: subcategory?.name ?? null,
-            variantCount: variations.data.variants.length,
-            completedSteps,
-            totalSteps: steps.length,
-          }}
-        />
+      {/* Single-column step content (no permanent summary sidebar). */}
+      <div className="min-w-0 rounded-2xl border border-border bg-card p-5 shadow-sm sm:p-6">
+        {step === 'details' ? (
+          <ProductDetailsStep
+            form={form}
+            set={set}
+            setCategory={setCategory}
+            errors={errors}
+            productType={productType}
+            categories={categories}
+            imageSrc={previewSrc}
+            imageBusy={imageBusy}
+            onPickFile={onPickFile}
+            onRemoveImage={onRemoveImage}
+          />
+        ) : null}
+        {step === 'pricing' ? (
+          <PriceStockStep
+            form={form}
+            set={set}
+            errors={errors}
+            productType={productType}
+            stockLocked={stockLocked}
+            computedVariantStock={productType === 'variations' ? totalVariantStock : null}
+            variations={variations}
+            baseSku={form.sku}
+            basePrice={Number(form.unitPrice) || 0}
+          />
+        ) : null}
+        {step === 'review' ? (
+          <ReviewStep
+            form={form}
+            productType={productType}
+            categoryName={category?.name ?? null}
+            subcategoryName={subcategory?.name ?? null}
+            imageSrc={previewSrc}
+            completed={completedLabels}
+            issues={reviewIssues}
+            onGoTo={goTo}
+            stepLabel={`Step ${stepIndex + 1} of ${STEPS.length}`}
+            variation={
+              productType === 'variations'
+                ? {
+                    attributes: variations.data.attributes.length,
+                    combinations: variations.data.variants.length,
+                    priceModeLabel,
+                    totalStock: totalVariantStock,
+                    outOfStock: variations.data.variants.filter((v) => v.stock <= 0).length,
+                    missingSku: missingSkuCount,
+                    needAttention: invalidVariantCount,
+                  }
+                : null
+            }
+          />
+        ) : null}
       </div>
 
-      {/* Sticky action bar */}
+      {/* Single sticky action bar controls the whole flow. */}
       <div className="sticky bottom-0 z-30 rounded-2xl border border-border bg-surface/95 px-4 py-3 shadow-[0_-4px_12px_rgba(15,23,42,0.05)] backdrop-blur">
         {error ? <p className="mb-2 text-sm text-danger">{error}</p> : null}
         <div className="flex flex-wrap items-center justify-between gap-3">
@@ -534,8 +509,18 @@ export function ProductForm({
             ) : null}
           </div>
           <div className="flex items-center gap-3">
-            {draftSavedAt ? <span className="hidden text-xs text-muted-foreground sm:inline">Draft saved locally</span> : null}
-            <Button size="lg" onClick={goNext} isLoading={saving} disabled={saving} rightIcon={saving ? undefined : primaryIcon}>
+            {draftSavedAt ? (
+              <span className="hidden text-xs text-muted-foreground sm:inline">
+                Draft saved locally
+              </span>
+            ) : null}
+            <Button
+              size="lg"
+              onClick={goNext}
+              isLoading={saving}
+              disabled={saving}
+              rightIcon={saving ? undefined : primaryIcon}
+            >
               {primaryLabel}
             </Button>
           </div>

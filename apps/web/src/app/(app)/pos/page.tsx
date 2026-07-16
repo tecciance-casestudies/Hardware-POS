@@ -5,6 +5,8 @@ import * as React from 'react';
 import {
   AlertTriangle,
   ArrowRight,
+  Clock,
+  FileText,
   Minus,
   NotebookPen,
   Plus,
@@ -55,6 +57,8 @@ export default function PosPage() {
   const data = useCheckoutData(session!);
   const cart = usePosCart();
   const canAddCustomer = hasPermission(Permission.CUSTOMER_MANAGE);
+  const canViewSales = hasPermission(Permission.SALE_READ);
+  const canQuote = hasPermission(Permission.QUOTATION_READ);
 
   const [query, setQuery] = React.useState('');
   const [category, setCategory] = React.useState('All');
@@ -301,10 +305,7 @@ export default function PosPage() {
           cart.items.map((item) => {
             const line = computeLine(item);
             return (
-              <div
-                key={item.product.id}
-                className="rounded-xl border border-border bg-card p-2.5"
-              >
+              <div key={item.product.id} className="rounded-xl border border-border bg-card p-2.5">
                 <div className="flex items-start gap-2.5">
                   <ProductImage
                     src={item.product.imageUrl}
@@ -414,8 +415,8 @@ export default function PosPage() {
         <Row label="Subtotal" value={formatMoney(totals.subtotal, currency)} />
         {totals.totalDiscount > 0 ? (
           <Row
-            label="Product discount"
-            value={`-${formatMoney(totals.totalDiscount, currency)}`}
+            label="Product Discount"
+            value={`- ${formatMoney(totals.totalDiscount, currency)}`}
             accent="success"
           />
         ) : null}
@@ -452,12 +453,14 @@ export default function PosPage() {
           )}
         </button>
         <Row
-          label={`Tax (${data.settings.taxRatePercent}%)`}
+          label={`VAT (${data.settings.taxRatePercent}%)`}
           value={formatMoney(totals.taxAmount, currency)}
         />
-        <div className="flex items-center justify-between border-t border-border pt-2 text-base font-semibold">
-          <span>Total</span>
-          <span className="tabular-nums">{formatMoney(totals.total, currency)}</span>
+        <div className="flex items-center justify-between border-t border-border pt-2.5">
+          <span className="text-base font-semibold">Grand Total</span>
+          <span className="text-lg font-bold tabular-nums text-primary">
+            {formatMoney(totals.total, currency)}
+          </span>
         </div>
 
         {totals.hasStockIssue ? (
@@ -469,19 +472,53 @@ export default function PosPage() {
 
         <Button
           size="lg"
-          className="mt-1 h-14 w-full text-base"
+          fullWidth
+          className="mt-1 h-14 justify-between px-5 text-base"
           disabled={!canPay}
           onClick={goToPayment}
         >
-          Continue to Payment · {formatMoney(totals.total, currency)}
-          <ArrowRight className="h-5 w-5" />
+          <span>
+            <span className="hidden xl:inline">Proceed to Payment</span>
+            <span className="xl:hidden">Payment</span>
+          </span>
+          <span className="flex min-w-0 items-center gap-1.5">
+            <span className="truncate tabular-nums">{formatMoney(totals.total, currency)}</span>
+            <ArrowRight className="h-5 w-5 shrink-0" />
+          </span>
         </Button>
+
+        {/* Functional secondary actions only — Hold/Reserve have no backing
+            feature in this app, so they are intentionally not shown. */}
+        {(canViewSales || canQuote) && !cartEmpty ? (
+          <div className="grid grid-cols-2 gap-2">
+            {canViewSales ? (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => router.push('/sales')}
+                leftIcon={<Clock className="h-4 w-4" />}
+              >
+                Recent Sales
+              </Button>
+            ) : null}
+            {canQuote ? (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => router.push('/quotations/new')}
+                leftIcon={<FileText className="h-4 w-4" />}
+              >
+                Quote
+              </Button>
+            ) : null}
+          </div>
+        ) : null}
       </div>
     </div>
   );
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-3 lg:grid lg:grid-cols-[1.7fr_1fr] lg:gap-4 xl:grid-cols-[1.85fr_1fr] 2xl:grid-cols-[2fr_1fr]">
+    <div className="flex h-full min-h-0 flex-col gap-3 lg:grid lg:grid-cols-[minmax(0,1fr)_360px] lg:gap-4 xl:grid-cols-[minmax(0,1fr)_400px] 2xl:grid-cols-[minmax(0,1fr)_420px]">
       {/* ── Catalog ─────────────────────────────────────────────── */}
       {/* min-w-0 lets this grid/flex child shrink below its content width so
           the product grid never blows out the track and steals the cart's
@@ -591,24 +628,28 @@ export default function PosPage() {
               No products match your search.
             </p>
           ) : (
-            <div className="grid grid-cols-[repeat(auto-fill,minmax(8.25rem,1fr))] gap-2.5">
+            <div className="grid grid-cols-[repeat(auto-fill,minmax(9rem,1fr))] gap-2.5">
               {pageProducts.map((p) => {
                 const outOfStock = p.quantityOnHand <= 0;
                 const lowStock = !outOfStock && p.quantityOnHand <= LOW_STOCK_THRESHOLD;
                 return (
-                  <button
+                  <div
                     key={p.id}
-                    onClick={() => addToCart(p)}
-                    disabled={outOfStock}
                     title={p.name}
-                    className="group flex flex-col overflow-hidden rounded-xl border border-border bg-card text-left shadow-sm transition-all hover:border-primary hover:shadow disabled:cursor-not-allowed disabled:opacity-60"
+                    className="group flex flex-col overflow-hidden rounded-xl border border-border bg-card text-left shadow-sm transition-all hover:border-primary hover:shadow"
                   >
-                    <div className="relative">
+                    <button
+                      type="button"
+                      onClick={() => addToCart(p)}
+                      disabled={outOfStock}
+                      aria-label={`Add ${p.name} to cart`}
+                      className="relative block text-left disabled:cursor-not-allowed"
+                    >
                       <ProductImage
                         src={p.imageUrl}
                         alt={p.name}
                         rounded="rounded-none"
-                        className="aspect-[4/3] w-full border-0"
+                        className={cn('aspect-[4/3] w-full border-0', outOfStock && 'opacity-60')}
                       />
                       {p.requiresWarehousePickup ? (
                         <span
@@ -620,17 +661,14 @@ export default function PosPage() {
                       ) : null}
                       {outOfStock ? (
                         <span className="absolute right-1.5 top-1.5 rounded-md bg-danger px-1.5 py-0.5 text-[10px] font-semibold text-white">
-                          Out
+                          Out of Stock
                         </span>
                       ) : lowStock ? (
                         <span className="absolute right-1.5 top-1.5 rounded-md bg-warning-soft px-1.5 py-0.5 text-[10px] font-semibold text-warning">
-                          Low
+                          Low Stock
                         </span>
                       ) : null}
-                      <span className="absolute bottom-1.5 right-1.5 flex h-8 w-8 items-center justify-center rounded-lg bg-primary text-primary-foreground shadow transition-opacity group-hover:opacity-100 group-disabled:hidden md:opacity-0">
-                        <Plus className="h-4 w-4" />
-                      </span>
-                    </div>
+                    </button>
                     <div className="flex flex-1 flex-col p-2">
                       <div className="line-clamp-2 min-h-8 text-xs font-medium leading-tight">
                         {p.name}
@@ -650,11 +688,22 @@ export default function PosPage() {
                         >
                           {outOfStock
                             ? 'Out'
-                            : `${p.quantityOnHand}${p.unitType ? ' ' + p.unitType : ''}`}
+                            : `${p.quantityOnHand.toLocaleString()}${p.unitType ? ' ' + p.unitType : ''}`}
                         </span>
                       </div>
+                      <Button
+                        variant={outOfStock ? 'outline' : 'primary'}
+                        size="sm"
+                        fullWidth
+                        disabled={outOfStock}
+                        className="mt-2"
+                        onClick={() => addToCart(p)}
+                        leftIcon={outOfStock ? undefined : <Plus className="h-4 w-4" />}
+                      >
+                        {outOfStock ? 'Out of Stock' : 'Add'}
+                      </Button>
                     </div>
-                  </button>
+                  </div>
                 );
               })}
             </div>
@@ -665,7 +714,11 @@ export default function PosPage() {
         {!data.loading && filtered.length > 0 ? (
           <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-t border-border pt-2.5 text-sm">
             <div className="flex items-center gap-2 text-muted-foreground">
-              <span className="hidden sm:inline">Per page</span>
+              <span className="hidden md:inline">
+                Showing {(page - 1) * pageSize + 1}–{Math.min(page * pageSize, filtered.length)} of{' '}
+                {filtered.length.toLocaleString()} products
+              </span>
+              <span className="hidden sm:inline md:hidden">Per page</span>
               <Select
                 value={String(pageSize)}
                 onChange={(e) => setPageSize(Number(e.target.value))}
@@ -678,10 +731,6 @@ export default function PosPage() {
                   </option>
                 ))}
               </Select>
-              <span className="hidden md:inline">
-                {(page - 1) * pageSize + 1}–{Math.min(page * pageSize, filtered.length)} of{' '}
-                {filtered.length}
-              </span>
             </div>
             <div className="flex items-center gap-1">
               <Button
@@ -731,7 +780,9 @@ export default function PosPage() {
                 </span>
               ) : null}
             </span>
-            {cartEmpty ? 'Cart is empty' : `View cart · ${totals.itemCount} item${totals.itemCount > 1 ? 's' : ''}`}
+            {cartEmpty
+              ? 'Cart is empty'
+              : `View cart · ${totals.itemCount} item${totals.itemCount > 1 ? 's' : ''}`}
           </span>
           <span className="text-base font-semibold tabular-nums">
             {formatMoney(totals.total, currency)}
@@ -740,7 +791,12 @@ export default function PosPage() {
       </div>
 
       {cartOpen ? (
-        <div className="fixed inset-0 z-50 lg:hidden" role="dialog" aria-modal="true" aria-label="Cart">
+        <div
+          className="fixed inset-0 z-50 lg:hidden"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Cart"
+        >
           <button
             type="button"
             aria-label="Close cart"
@@ -841,19 +897,13 @@ export default function PosPage() {
   );
 }
 
-function Row({
-  label,
-  value,
-  accent,
-}: {
-  label: string;
-  value: string;
-  accent?: 'success';
-}) {
+function Row({ label, value, accent }: { label: string; value: string; accent?: 'success' }) {
   return (
     <div className="flex items-center justify-between text-muted-foreground">
       <span>{label}</span>
-      <span className={cn('tabular-nums', accent === 'success' ? 'text-success' : 'text-foreground')}>
+      <span
+        className={cn('tabular-nums', accent === 'success' ? 'text-success' : 'text-foreground')}
+      >
         {value}
       </span>
     </div>
