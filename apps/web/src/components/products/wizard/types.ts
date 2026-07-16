@@ -47,7 +47,9 @@ export const numOrNull = (s: string): number | null => (s.trim() === '' ? null :
 
 export type ProductType = 'simple' | 'variations';
 
-export type StepKey = 'type' | 'basic' | 'category' | 'pricing' | 'variations' | 'review';
+/** The simplified three-step flow. Variations live inside `pricing` (revealed by
+ *  a toggle) rather than as their own step, and there is no separate type step. */
+export type StepKey = 'details' | 'pricing' | 'review';
 
 export type StepStatus = 'todo' | 'current' | 'complete' | 'attention' | 'optional';
 

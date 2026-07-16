@@ -14,6 +14,7 @@ export function PricingInventoryStep({
   stockLocked,
   computedVariantStock,
   stepLabel,
+  embedded = false,
 }: {
   form: FormState;
   set: SetField;
@@ -23,21 +24,25 @@ export function PricingInventoryStep({
   stockLocked: boolean;
   /** For variation products, the read-only sum of all variant stock. */
   computedVariantStock: number | null;
-  stepLabel: string;
+  stepLabel?: string;
+  /** When composed inside another step, hide this step's own header/info panel. */
+  embedded?: boolean;
 }) {
   const isVariation = productType === 'variations';
 
   return (
     <div className="space-y-5">
-      <StepHeader
-        eyebrow={stepLabel}
-        title={isVariation ? 'Base price & inventory rules' : 'Price & inventory'}
-        description={
-          isVariation
-            ? 'Set the base price used for every combination, and how stock is tracked. You’ll enter stock per combination in the next step.'
-            : 'Set the selling price, cost and stock for this product.'
-        }
-      />
+      {embedded ? null : (
+        <StepHeader
+          eyebrow={stepLabel ?? ''}
+          title={isVariation ? 'Base price & inventory rules' : 'Price & inventory'}
+          description={
+            isVariation
+              ? 'Set the base price used for every combination, and how stock is tracked. You’ll enter stock per combination in the next step.'
+              : 'Set the selling price, cost and stock for this product.'
+          }
+        />
+      )}
 
       {/* Pricing */}
       <div className="space-y-4 rounded-2xl border border-border bg-surface p-5">
@@ -48,7 +53,11 @@ export function PricingInventoryStep({
             htmlFor="field-price"
             required
             error={errors.unitPrice}
-            help={isVariation ? 'The base price is automatically used for every combination unless you change it.' : undefined}
+            help={
+              isVariation
+                ? 'The base price is automatically used for every combination unless you change it.'
+                : undefined
+            }
           >
             <Input
               id="field-price"
@@ -59,7 +68,11 @@ export function PricingInventoryStep({
               aria-invalid={!!errors.unitPrice || undefined}
             />
           </Field>
-          <Field label={isVariation ? 'Base cost price (Rs.)' : 'Cost price (Rs.)'} htmlFor="field-cost" hint="Optional">
+          <Field
+            label={isVariation ? 'Base cost price (Rs.)' : 'Cost price (Rs.)'}
+            htmlFor="field-cost"
+            hint="Optional"
+          >
             <Input
               id="field-cost"
               inputMode="decimal"
@@ -83,7 +96,11 @@ export function PricingInventoryStep({
 
         <ToggleRow
           label={isVariation ? 'Track stock separately for each combination' : 'Track inventory'}
-          hint={isVariation ? 'Stock is entered per color, size, or other combination.' : 'Deduct stock as this product is sold.'}
+          hint={
+            isVariation
+              ? 'Stock is entered per color, size, or other combination.'
+              : 'Deduct stock as this product is sold.'
+          }
           checked={form.trackInventory}
           onChange={(v) => set('trackInventory', v)}
         />
@@ -137,10 +154,10 @@ export function PricingInventoryStep({
         />
       </div>
 
-      {isVariation ? (
+      {isVariation && !embedded ? (
         <InfoPanel>
-          The base price will be used for every variation unless you set a different price. Stock will be
-          entered separately for each color, size, or other combination.
+          The base price will be used for every variation unless you set a different price. Stock
+          will be entered separately for each color, size, or other combination.
         </InfoPanel>
       ) : null}
     </div>

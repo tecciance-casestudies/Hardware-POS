@@ -23,6 +23,7 @@ export function CategoryMediaStep({
   onPickFile,
   onRemoveImage,
   stepLabel,
+  embedded = false,
 }: {
   form: FormState;
   set: SetField;
@@ -32,7 +33,9 @@ export function CategoryMediaStep({
   imageBusy: boolean;
   onPickFile: (file: File) => void;
   onRemoveImage: () => void;
-  stepLabel: string;
+  stepLabel?: string;
+  /** When composed inside another step, hide this step's own header/info panel. */
+  embedded?: boolean;
 }) {
   const fileInput = React.useRef<HTMLInputElement>(null);
   const [dragOver, setDragOver] = React.useState(false);
@@ -45,11 +48,13 @@ export function CategoryMediaStep({
 
   return (
     <div className="space-y-5">
-      <StepHeader
-        eyebrow={stepLabel}
-        title="Category & image"
-        description="Group the product and add a photo — both help cashiers find it quickly in the POS."
-      />
+      {embedded ? null : (
+        <StepHeader
+          eyebrow={stepLabel ?? ''}
+          title="Category & image"
+          description="Group the product and add a photo — both help cashiers find it quickly in the POS."
+        />
+      )}
 
       <div className="grid gap-6 lg:grid-cols-2">
         {/* Category */}
@@ -64,7 +69,11 @@ export function CategoryMediaStep({
           </div>
 
           <Field label="Main category" htmlFor="field-category">
-            <Select id="field-category" value={form.categoryId} onChange={(e) => setCategory(e.target.value)}>
+            <Select
+              id="field-category"
+              value={form.categoryId}
+              onChange={(e) => setCategory(e.target.value)}
+            >
               <option value="">Uncategorized</option>
               {categories.map((c) => (
                 <option key={c.id} value={c.id}>
@@ -121,18 +130,34 @@ export function CategoryMediaStep({
 
           {imageSrc ? (
             <div className="space-y-3">
-              <ProductImage src={imageSrc} alt={form.name || 'Product image'} className="aspect-square w-full rounded-xl" />
+              <ProductImage
+                src={imageSrc}
+                alt={form.name || 'Product image'}
+                className="aspect-square w-full rounded-xl"
+              />
               <div className="flex gap-2">
                 <Button
                   variant="outline"
                   className="flex-1"
                   disabled={imageBusy}
-                  leftIcon={imageBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <ImagePlus className="h-4 w-4" />}
+                  leftIcon={
+                    imageBusy ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <ImagePlus className="h-4 w-4" />
+                    )
+                  }
                   onClick={() => fileInput.current?.click()}
                 >
                   Replace
                 </Button>
-                <Button variant="ghost" className="text-danger" disabled={imageBusy} onClick={onRemoveImage} aria-label="Remove image">
+                <Button
+                  variant="ghost"
+                  className="text-danger"
+                  disabled={imageBusy}
+                  onClick={onRemoveImage}
+                  aria-label="Remove image"
+                >
                   <Trash2 className="h-4 w-4" />
                 </Button>
               </div>
@@ -153,7 +178,9 @@ export function CategoryMediaStep({
               }}
               className={cn(
                 'flex aspect-square w-full flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed p-6 text-center transition-colors',
-                dragOver ? 'border-brand-600 bg-brand-50' : 'border-border bg-muted/30 hover:bg-muted',
+                dragOver
+                  ? 'border-brand-600 bg-brand-50'
+                  : 'border-border bg-muted/30 hover:bg-muted',
               )}
             >
               {imageBusy ? (
@@ -162,11 +189,17 @@ export function CategoryMediaStep({
                 <UploadCloud className="h-8 w-8 text-muted-foreground" />
               )}
               <span className="text-sm font-medium">Upload or drag &amp; drop an image</span>
-              <span className="text-xs text-muted-foreground">Square image recommended · PNG, JPG or WebP · max 5 MB</span>
+              <span className="text-xs text-muted-foreground">
+                Square image recommended · PNG, JPG or WebP · max 5 MB
+              </span>
             </button>
           )}
 
-          <Field label="Image alt text" htmlFor="field-alt" help="A short description used for accessibility.">
+          <Field
+            label="Image alt text"
+            htmlFor="field-alt"
+            help="A short description used for accessibility."
+          >
             <Input
               id="field-alt"
               value={form.imageAltText}
@@ -177,7 +210,9 @@ export function CategoryMediaStep({
         </div>
       </div>
 
-      <InfoPanel>A clear product image helps cashiers find the item faster.</InfoPanel>
+      {embedded ? null : (
+        <InfoPanel>A clear product image helps cashiers find the item faster.</InfoPanel>
+      )}
     </div>
   );
 }

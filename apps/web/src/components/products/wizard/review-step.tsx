@@ -94,30 +94,42 @@ export function ReviewStep({
               ))}
             </ul>
           ) : (
-            <p className="mt-2 text-sm text-muted-foreground">No issues found. You’re good to go.</p>
+            <p className="mt-2 text-sm text-muted-foreground">
+              No issues found. You’re good to go.
+            </p>
           )}
         </div>
       </div>
 
       {/* Summary */}
       <div className="grid gap-4 lg:grid-cols-[200px_1fr]">
-        <ProductImage src={imageSrc} alt={form.name || 'Product'} className="aspect-square w-full rounded-2xl" />
+        <ProductImage
+          src={imageSrc}
+          alt={form.name || 'Product'}
+          className="aspect-square w-full rounded-2xl"
+        />
         <div className="grid gap-4 sm:grid-cols-2">
-          <SummaryCard title="Basic" onEdit={() => onGoTo('basic')}>
+          <SummaryCard title="Basic" onEdit={() => onGoTo('details')}>
             <Row label="Name" value={form.name || '—'} />
             <Row label="SKU" value={form.sku || '—'} />
             <Row label="Brand" value={form.brand || '—'} />
             <Row label="Unit" value={form.unitType || '—'} />
           </SummaryCard>
 
-          <SummaryCard title="Category" onEdit={() => onGoTo('category')}>
+          <SummaryCard title="Category" onEdit={() => onGoTo('details')}>
             <Row label="Category" value={categoryName ?? 'Uncategorized'} />
             <Row label="Subcategory" value={subcategoryName ?? '—'} />
           </SummaryCard>
 
           <SummaryCard title="Pricing" onEdit={() => onGoTo('pricing')}>
-            <Row label={productType === 'variations' ? 'Base price' : 'Selling price'} value={form.unitPrice ? formatLkr(Number(form.unitPrice)) : '—'} />
-            <Row label="Cost price" value={form.costPrice ? formatLkr(Number(form.costPrice)) : '—'} />
+            <Row
+              label={productType === 'variations' ? 'Base price' : 'Selling price'}
+              value={form.unitPrice ? formatLkr(Number(form.unitPrice)) : '—'}
+            />
+            <Row
+              label="Cost price"
+              value={form.costPrice ? formatLkr(Number(form.costPrice)) : '—'}
+            />
             <Row label="Tax" value={form.taxable ? 'Taxable' : 'Not taxable'} />
           </SummaryCard>
 
@@ -128,7 +140,11 @@ export function ReviewStep({
           </SummaryCard>
 
           {variation ? (
-            <SummaryCard title="Variations" onEdit={() => onGoTo('variations')} className="sm:col-span-2">
+            <SummaryCard
+              title="Variations"
+              onEdit={() => onGoTo('pricing')}
+              className="sm:col-span-2"
+            >
               <Row label="Options" value={String(variation.attributes)} />
               <Row label="Combinations" value={String(variation.combinations)} />
               <Row label="Price strategy" value={variation.priceModeLabel} />

@@ -13,23 +13,34 @@ export function BasicInformationStep({
   errors,
   productType,
   stepLabel,
+  embedded = false,
 }: {
   form: FormState;
   set: SetField;
   errors: FieldErrors;
   productType: ProductType;
-  stepLabel: string;
+  stepLabel?: string;
+  /** When composed inside another step, hide this step's own header/info panel. */
+  embedded?: boolean;
 }) {
   return (
     <div className="space-y-5">
-      <StepHeader
-        eyebrow={stepLabel}
-        title="Basic information"
-        description="Enter the main information customers and staff will use to identify this product."
-      />
+      {embedded ? null : (
+        <StepHeader
+          eyebrow={stepLabel ?? ''}
+          title="Basic information"
+          description="Enter the main information customers and staff will use to identify this product."
+        />
+      )}
 
       <div className="grid gap-4 sm:grid-cols-2">
-        <Field label="Product name" htmlFor="field-name" required error={errors.name} className="sm:col-span-2">
+        <Field
+          label="Product name"
+          htmlFor="field-name"
+          required
+          error={errors.name}
+          className="sm:col-span-2"
+        >
           <Input
             id="field-name"
             value={form.name}
@@ -69,11 +80,25 @@ export function BasicInformationStep({
         </Field>
 
         <Field label="Brand" htmlFor="field-brand">
-          <Input id="field-brand" value={form.brand} onChange={(e) => set('brand', e.target.value)} placeholder="e.g. Lanka Tiles" />
+          <Input
+            id="field-brand"
+            value={form.brand}
+            onChange={(e) => set('brand', e.target.value)}
+            placeholder="e.g. Lanka Tiles"
+          />
         </Field>
 
-        <Field label="Unit type" htmlFor="field-unit" help="How the item is sold — each piece, bag, metre, etc.">
-          <Input id="field-unit" value={form.unitType} onChange={(e) => set('unitType', e.target.value)} placeholder="e.g. Piece" />
+        <Field
+          label="Unit type"
+          htmlFor="field-unit"
+          help="How the item is sold — each piece, bag, metre, etc."
+        >
+          <Input
+            id="field-unit"
+            value={form.unitType}
+            onChange={(e) => set('unitType', e.target.value)}
+            placeholder="e.g. Piece"
+          />
         </Field>
 
         <Field label="Description" htmlFor="field-description" className="sm:col-span-2">
@@ -87,7 +112,11 @@ export function BasicInformationStep({
         </Field>
       </div>
 
-      <InfoPanel>Customers and cashiers will see the product name and image in the POS.</InfoPanel>
+      {embedded ? null : (
+        <InfoPanel>
+          Customers and cashiers will see the product name and image in the POS.
+        </InfoPanel>
+      )}
     </div>
   );
 }
