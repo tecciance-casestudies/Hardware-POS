@@ -14,13 +14,7 @@ import { useAuth } from '@/lib/auth';
 import { Permission } from '@/lib/permissions';
 import { reprintCustomerReceipt } from '@/lib/receipt-print';
 import { fetchSaleReturns, type ReturnDetail } from '@/lib/returns';
-import {
-  fetchSale,
-  fetchSaleBillDocument,
-  retrySaleSync,
-  type PaymentStatusCode,
-  type SaleDetail,
-} from '@/lib/sales';
+import { fetchSale, retrySaleSync, type PaymentStatusCode, type SaleDetail } from '@/lib/sales';
 import { formatMoney } from '@/lib/utils';
 
 const PAYMENT_STATUS: Record<
@@ -108,23 +102,10 @@ export default function SaleDetailPage() {
     }
   };
 
-  const handleA4Bill = async () => {
-    if (!session || !sale) return;
-    setBusy(true);
-    try {
-      const { html } = await fetchSaleBillDocument(session, sale.id);
-      const win = window.open('', '_blank', 'width=880,height=1000');
-      if (win) {
-        win.document.open();
-        win.document.write(html);
-        win.document.close();
-        win.focus();
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not generate the A4 bill');
-    } finally {
-      setBusy(false);
-    }
+  // A4 is the default bill: open the native, print-ready A4 preview route.
+  const handleA4Bill = () => {
+    if (!sale) return;
+    window.open(`/print/sales/${sale.id}`, '_blank', 'noopener');
   };
 
   if (loading) {
@@ -178,13 +159,11 @@ export default function SaleDetailPage() {
               </Button>
             </Link>
           ) : null}
-          <Button variant="outline" onClick={handleReprint} disabled={busy}>
-            <Printer className="h-4 w-4" />
-            Print receipt
+          <Button variant="outline" onClick={handleA4Bill} disabled={busy} leftIcon={<FileDown className="h-4 w-4" />}>
+            Print A4 bill
           </Button>
-          <Button variant="outline" onClick={handleA4Bill} disabled={busy}>
-            <FileDown className="h-4 w-4" />
-            A4 bill
+          <Button variant="ghost" onClick={handleReprint} disabled={busy} leftIcon={<Printer className="h-4 w-4" />}>
+            Thermal receipt
           </Button>
           {canRetry ? (
             <Button variant="outline" onClick={handleRetry} disabled={busy}>

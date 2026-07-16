@@ -11,9 +11,11 @@ import {
   Pencil,
   Plus,
   RotateCcw,
+  Search,
 } from 'lucide-react';
 
 import { PageHeader } from '@/components/page-header';
+import { SharedSubcategoryLibrary } from '@/components/products/shared-subcategory-library';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
@@ -62,6 +64,7 @@ export default function CategoriesPage() {
   const [expanded, setExpanded] = React.useState<Set<string>>(new Set());
   const [busy, setBusy] = React.useState(false);
 
+  const [query, setQuery] = React.useState('');
   const [catDialog, setCatDialog] = React.useState<CatDialogState>({ open: false, editing: null });
   const [subDialog, setSubDialog] = React.useState<SubDialogState>({
     open: false,
@@ -106,6 +109,23 @@ export default function CategoriesPage() {
       setBusy(false);
     }
   };
+
+  // Search filters categories by their own name/description or any of their
+  // subcategory names. Reorder is disabled while filtering (indices would drift).
+  const q = query.trim().toLowerCase();
+  const searching = q.length > 0;
+  const visibleCategories = React.useMemo(
+    () =>
+      q
+        ? categories.filter(
+            (c) =>
+              c.name.toLowerCase().includes(q) ||
+              (c.description ?? '').toLowerCase().includes(q) ||
+              c.subcategories.some((s) => s.name.toLowerCase().includes(q)),
+          )
+        : categories,
+    [categories, q],
+  );
 
   const moveCategory = async (index: number, dir: -1 | 1) => {
     if (!session) return;
@@ -190,15 +210,26 @@ export default function CategoriesPage() {
   return (
     <div className="space-y-6">
       <PageHeader
-        title="Categories"
+        title="Categories & Subcategories"
         description="Organize the catalog into categories and subcategories."
         actions={
-          canManage ? (
-            <Button onClick={() => setCatDialog({ open: true, editing: null })}>
-              <FolderPlus className="h-4 w-4" />
-              New category
-            </Button>
-          ) : undefined
+          <div className="flex items-center gap-2">
+            <div className="relative">
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Search categories…"
+                className="w-48 pl-9 sm:w-64"
+                aria-label="Search categories and subcategories"
+              />
+            </div>
+            {canManage ? (
+              <Button onClick={() => setCatDialog({ open: true, editing: null })} leftIcon={<FolderPlus className="h-4 w-4" />}>
+                New category
+              </Button>
+            ) : null}
+          </div>
         }
       />
 
@@ -232,15 +263,16 @@ export default function CategoriesPage() {
                         Loading categories…
                       </td>
                     </tr>
-                  ) : categories.length === 0 ? (
+                  ) : visibleCategories.length === 0 ? (
                     <tr>
                       <td colSpan={6} className="px-4 py-16 text-center text-muted-foreground">
-                        No categories yet.
+                        {searching ? 'No categories match your search.' : 'No categories yet.'}
                       </td>
                     </tr>
                   ) : (
-                    categories.map((cat, index) => {
-                      const isOpen = expanded.has(cat.id);
+                    visibleCategories.map((cat) => {
+                      const index = categories.indexOf(cat);
+                      const isOpen = expanded.has(cat.id) || searching;
                       return (
                         <React.Fragment key={cat.id}>
                           <tr className="border-b border-border last:border-0 hover:bg-muted/30">
@@ -283,12 +315,11 @@ export default function CategoriesPage() {
                             </td>
                             <td className="px-4 py-3">
                               <div className="flex items-center justify-center gap-1">
-                                {canManage ? (
+                                {canManage && !searching ? (
                                   <>
                                     <Button
                                       variant="ghost"
-                                      size="icon"
-                                      className="h-8 w-8"
+                                      size="icon-sm"
                                       aria-label="Move up"
                                       disabled={index === 0 || busy}
                                       onClick={() => moveCategory(index, -1)}
@@ -297,8 +328,7 @@ export default function CategoriesPage() {
                                     </Button>
                                     <Button
                                       variant="ghost"
-                                      size="icon"
-                                      className="h-8 w-8"
+                                      size="icon-sm"
                                       aria-label="Move down"
                                       disabled={index === categories.length - 1 || busy}
                                       onClick={() => moveCategory(index, 1)}
@@ -400,6 +430,11 @@ export default function CategoriesPage() {
               </table>
             </div>
           </Card>
+
+          <SharedSubcategoryLibrary
+            categories={categories.map((c) => ({ id: c.id, name: c.name }))}
+            canManage={canManage}
+          />
         </>
       )}
 

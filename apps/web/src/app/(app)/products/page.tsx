@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import * as React from 'react';
-import { Ban, PackagePlus, Pencil, RotateCcw, Search, Warehouse } from 'lucide-react';
+import { Ban, FolderTree, PackagePlus, Pencil, RotateCcw, Search, Warehouse } from 'lucide-react';
 
 import { PageHeader } from '@/components/page-header';
 import { ProductImage } from '@/components/product-image';
@@ -127,12 +127,18 @@ export default function ProductsPage() {
         title="Products"
         description="Manage the product catalog. QuickBooks remains the inventory master."
         actions={
-          canManage ? (
-            <Link href="/products/new" className={buttonVariants()}>
-              <PackagePlus className="h-4 w-4" />
-              Add product
+          <div className="flex items-center gap-2">
+            <Link href="/products/categories" className={buttonVariants({ variant: 'outline' })}>
+              <FolderTree className="h-4 w-4" />
+              Categories
             </Link>
-          ) : undefined
+            {canManage ? (
+              <Link href="/products/new" className={buttonVariants()}>
+                <PackagePlus className="h-4 w-4" />
+                Add product
+              </Link>
+            ) : null}
+          </div>
         }
       />
 

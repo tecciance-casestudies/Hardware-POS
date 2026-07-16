@@ -80,6 +80,11 @@ interface SplitLine {
 
 let splitLineSeq = 1;
 
+/** Open the shell-free A4 bill route for a sale (optionally auto-printing). */
+function openA4Bill(saleId: string, print = false): void {
+  window.open(`/print/sales/${saleId}${print ? '?print=1' : ''}`, '_blank', 'noopener');
+}
+
 export default function PaymentPage() {
   const { session } = useAuth();
   const router = useRouter();
@@ -225,14 +230,9 @@ export default function PaymentPage() {
       setReceiptCtx(ctx);
       setCompleted(sale);
       cart.clearCart();
-      if (printAfter) {
-        setPrinting(true);
-        try {
-          await printCustomerReceipt(session!, sale, ctx);
-        } finally {
-          setPrinting(false);
-        }
-      }
+      // A4 is the default bill for this client: auto-open the A4 print view
+      // (not the old thermal receipt) when "print after payment" is on.
+      if (printAfter) openA4Bill(sale.id, true);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not complete the sale');
       // The failure may be another register beating us to the stock (or a
@@ -267,7 +267,9 @@ export default function PaymentPage() {
         sale={completed}
         currency={currency}
         printing={printing}
-        onPrint={printReceipt}
+        onPreviewA4={() => openA4Bill(completed.id)}
+        onPrintA4={() => openA4Bill(completed.id, true)}
+        onPrintThermal={printReceipt}
         onViewSale={() => router.push(`/sales/${completed.id}`)}
         onNewSale={() => router.push('/pos')}
       />
@@ -275,28 +277,27 @@ export default function PaymentPage() {
   }
 
   return (
-    <div className="space-y-5">
-      <div className="flex flex-wrap items-center justify-between gap-3">
+    // Viewport-locked on lg+ so the Complete Payment action never scrolls off:
+    // the shell gives this page a definite height, the two panels each own an
+    // independent scroll region, and the right-panel action bar stays pinned.
+    <div className="flex flex-col gap-4 lg:h-full lg:min-h-0">
+      <div className="flex shrink-0 flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Payment</h1>
           <p className="text-sm text-muted-foreground">{customerName}</p>
         </div>
-        <Button variant="outline" onClick={() => router.push('/pos')}>
-          <ArrowLeft className="h-4 w-4" />
-          Back to Cart
-        </Button>
       </div>
 
-      <div className="grid gap-5 lg:grid-cols-[1fr_420px]">
-        {/* Order summary */}
-        <Card className="overflow-hidden">
-          <CardHeader>
+      <div className="grid gap-4 lg:min-h-0 lg:flex-1 lg:grid-cols-[1fr_400px] xl:grid-cols-[1fr_440px]">
+        {/* ── Order summary — scrolls internally on lg+ ── */}
+        <Card className="flex min-w-0 flex-col overflow-hidden lg:min-h-0">
+          <CardHeader className="shrink-0">
             <CardTitle>Order summary ({totals.itemCount} items)</CardTitle>
           </CardHeader>
-          <div className="overflow-x-auto">
+          <div className="min-h-0 flex-1 overflow-auto">
             <table className="w-full text-sm">
-              <thead>
-                <tr className="border-y border-border bg-muted/50 text-left text-muted-foreground">
+              <thead className="sticky top-0 z-10">
+                <tr className="border-y border-border bg-muted text-left text-muted-foreground">
                   <th className="px-4 py-2.5 font-medium">Item</th>
                   <th className="px-4 py-2.5 text-right font-medium">Price</th>
                   <th className="px-4 py-2.5 text-right font-medium">Qty</th>
@@ -325,7 +326,7 @@ export default function PaymentPage() {
               </tbody>
             </table>
           </div>
-          <CardContent className="space-y-1.5 border-t border-border pt-4 text-sm">
+          <CardContent className="shrink-0 space-y-1.5 border-t border-border pt-4 text-sm">
             <Row label="Subtotal" value={formatMoney(totals.subtotal, currency)} />
             <Row label="Product discount" value={`-${formatMoney(totals.totalDiscount, currency)}`} tone="success" />
             {totals.orderDiscountAmount > 0 ? (
@@ -339,73 +340,73 @@ export default function PaymentPage() {
           </CardContent>
         </Card>
 
-        {/* Payment method + entry */}
-        <div className="space-y-4">
-          <Card>
-            <CardHeader>
-              <CardTitle>Select payment method</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-                {METHODS.map((m) => (
-                  <button
-                    key={m.key}
-                    onClick={() => {
-                      setMode(m.key);
-                      setError(null);
-                      if (m.key === 'SPLIT' && splitLines.length === 0) {
-                        setSplitLines([{ id: splitLineSeq++, method: 'CASH', amount: total.toFixed(2), reference: '' }]);
-                      }
-                    }}
-                    className={cn(
-                      'flex flex-col items-center gap-1.5 rounded-xl border p-3 text-center text-xs font-medium transition-colors',
-                      mode === m.key
-                        ? 'border-primary bg-brand-50 text-brand-700'
-                        : 'border-border text-muted-foreground hover:bg-muted',
-                    )}
-                  >
-                    <m.Icon className="h-5 w-5" />
-                    {m.label}
-                  </button>
-                ))}
-              </div>
-            </CardContent>
-          </Card>
+        {/* ── Payment panel: method (fixed) · content (scroll) · action bar (fixed) ── */}
+        <div className="flex min-w-0 flex-col gap-3 lg:min-h-0">
+          {/* Method selector — fixed */}
+          <div className="shrink-0 rounded-2xl border border-border bg-card p-3 shadow-sm">
+            <div className="mb-2 px-1 text-sm font-semibold">Payment method</div>
+            <div className="grid grid-cols-4 gap-2">
+              {METHODS.map((m) => (
+                <button
+                  key={m.key}
+                  onClick={() => {
+                    setMode(m.key);
+                    setError(null);
+                    if (m.key === 'SPLIT' && splitLines.length === 0) {
+                      setSplitLines([{ id: splitLineSeq++, method: 'CASH', amount: total.toFixed(2), reference: '' }]);
+                    }
+                  }}
+                  className={cn(
+                    'flex min-h-[3.25rem] flex-col items-center justify-center gap-1 rounded-xl border p-1.5 text-center text-[11px] font-medium leading-tight transition-colors',
+                    mode === m.key
+                      ? 'border-primary bg-brand-50 text-brand-700'
+                      : 'border-border text-muted-foreground hover:bg-muted',
+                  )}
+                >
+                  <m.Icon className="h-5 w-5" />
+                  {m.label}
+                </button>
+              ))}
+            </div>
+          </div>
 
-          <Card>
-            <CardContent className="space-y-4 p-5">
-              <div className="flex items-center justify-between text-sm">
-                <span className="text-muted-foreground">Amount due</span>
-                <span className="text-lg font-semibold text-primary">{formatMoney(total, currency)}</span>
-              </div>
+          {/* Amount due (fixed) + method content (scrollable) */}
+          <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-border bg-card shadow-sm">
+            <div className="flex shrink-0 items-center justify-between border-b border-border px-4 py-3">
+              <span className="text-sm text-muted-foreground">Amount due</span>
+              <span className="text-xl font-bold text-primary">{formatMoney(total, currency)}</span>
+            </div>
 
+            <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-4">
               {mode === 'CASH' ? (
-                <>
-                  <div className="grid grid-cols-2 gap-3">
-                    <div className="space-y-1.5">
-                      <Label htmlFor="tendered">Amount received</Label>
-                      <Input id="tendered" inputMode="decimal" value={tendered} onChange={(e) => setTendered(e.target.value)} />
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label>Change</Label>
-                      <div className="flex h-11 items-center rounded-xl bg-success-soft px-4 text-sm font-semibold text-success">
-                        {formatMoney(change, currency)}
+                <div className="grid gap-4 xl:grid-cols-2">
+                  <div className="space-y-3">
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="space-y-1.5">
+                        <Label htmlFor="tendered">Amount received</Label>
+                        <Input id="tendered" inputMode="decimal" value={tendered} onChange={(e) => setTendered(e.target.value)} className="text-base font-semibold" />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label>Change</Label>
+                        <div className="flex h-11 items-center rounded-xl bg-success-soft px-4 text-base font-semibold text-success">
+                          {formatMoney(change, currency)}
+                        </div>
                       </div>
                     </div>
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                    {quickAmounts.map((n) => (
-                      <button
-                        key={n}
-                        onClick={() => setTendered(n.toFixed(2))}
-                        className="rounded-lg border border-border px-3 py-1.5 text-sm font-medium hover:bg-muted"
-                      >
-                        {formatMoney(n, currency)}
-                      </button>
-                    ))}
+                    <div className="flex flex-wrap gap-2">
+                      {quickAmounts.map((n) => (
+                        <button
+                          key={n}
+                          onClick={() => setTendered(n.toFixed(2))}
+                          className="min-h-11 flex-1 rounded-lg border border-border px-3 text-sm font-medium hover:bg-muted"
+                        >
+                          {formatMoney(n, currency)}
+                        </button>
+                      ))}
+                    </div>
                   </div>
                   <Numpad onPress={appendDigit} />
-                </>
+                </div>
               ) : null}
 
               {mode === 'CARD' || mode === 'BANK_TRANSFER' || mode === 'QR_PAYMENT' || mode === 'CHECK' ? (
@@ -416,8 +417,8 @@ export default function PaymentPage() {
               ) : null}
 
               {mode === 'PARTIAL' ? (
-                <div className="space-y-3">
-                  <div className="grid grid-cols-2 gap-3">
+                <div className="grid gap-4 xl:grid-cols-[1fr_1fr]">
+                  <div className="grid grid-cols-2 gap-3 xl:grid-cols-1">
                     <div className="space-y-1.5">
                       <Label htmlFor="partial">Amount paid now</Label>
                       <Input id="partial" inputMode="decimal" placeholder="0.00" value={partialAmount} onChange={(e) => setPartialAmount(e.target.value)} />
@@ -472,8 +473,8 @@ export default function PaymentPage() {
                       </Button>
                     </div>
                   ))}
-                  <Button variant="outline" size="sm" onClick={addSplitLine}>
-                    <Plus className="h-4 w-4" /> Add payment
+                  <Button variant="outline" size="sm" onClick={addSplitLine} leftIcon={<Plus className="h-4 w-4" />}>
+                    Add payment
                   </Button>
                   <div className="flex items-center justify-between text-sm">
                     <span className="text-muted-foreground">Paid</span>
@@ -488,12 +489,6 @@ export default function PaymentPage() {
                 </p>
               ) : null}
 
-              {/* Totals line */}
-              <div className="space-y-1.5 border-t border-border pt-3 text-sm">
-                <Row label="Paid" value={formatMoney(paidAmount, currency)} />
-                <Row label="Balance" value={formatMoney(balance, currency)} tone={balance > 0 ? 'danger' : undefined} />
-              </div>
-
               {totals.hasStockIssue ? (
                 <p className="text-sm text-danger">
                   Some items exceed available stock — go back to the cart to adjust quantities.
@@ -503,17 +498,32 @@ export default function PaymentPage() {
                 <p className="text-sm text-warning">Select a customer for a credit or partial sale.</p>
               ) : null}
               {error ? <p className="text-sm text-danger">{error}</p> : null}
+            </div>
+          </div>
 
-              <div className="flex items-center justify-between rounded-xl border border-border p-3">
-                <span className="text-sm">Print receipt after payment</span>
-                <Switch checked={printAfter} onCheckedChange={setPrintAfter} />
-              </div>
-
-              <Button size="lg" className="w-full" disabled={invalid} onClick={submit}>
-                {submitting ? 'Completing…' : `Complete Payment · ${formatMoney(total, currency)}`}
+          {/* Action bar — always visible (sticky below lg, pinned on lg+) */}
+          <div className="sticky bottom-0 z-10 shrink-0 space-y-2.5 rounded-2xl border border-border bg-surface p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] shadow-sm">
+            <div className="flex items-center justify-between gap-2 text-sm">
+              <span className="text-muted-foreground">Paid</span>
+              <span className="font-medium">{formatMoney(paidAmount, currency)}</span>
+              <span className="ml-auto text-muted-foreground">Balance</span>
+              <span className={cn('font-semibold', balance > 0 ? 'text-danger' : 'text-foreground')}>
+                {formatMoney(balance, currency)}
+              </span>
+            </div>
+            <div className="flex items-center justify-between gap-2 rounded-xl border border-border px-3 py-2">
+              <span className="text-sm">Print bill after payment</span>
+              <Switch checked={printAfter} onCheckedChange={setPrintAfter} />
+            </div>
+            <div className="grid grid-cols-[auto_1fr] gap-2">
+              <Button variant="outline" size="lg" onClick={() => router.push('/pos')} leftIcon={<ArrowLeft className="h-4 w-4" />}>
+                Back to Cart
               </Button>
-            </CardContent>
-          </Card>
+              <Button size="lg" disabled={invalid} isLoading={submitting} onClick={submit}>
+                Complete Payment · {formatMoney(total, currency)}
+              </Button>
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -559,14 +569,18 @@ function SuccessView({
   sale,
   currency,
   printing,
-  onPrint,
+  onPreviewA4,
+  onPrintA4,
+  onPrintThermal,
   onViewSale,
   onNewSale,
 }: {
   sale: CompletedSale;
   currency: string;
   printing: boolean;
-  onPrint: () => void;
+  onPreviewA4: () => void;
+  onPrintA4: () => void;
+  onPrintThermal: () => void;
   onViewSale?: () => void;
   onNewSale: () => void;
 }) {
@@ -600,18 +614,26 @@ function SuccessView({
         </div>
 
         <div className="mt-5 grid w-full gap-2">
-          <Button variant="outline" size="lg" onClick={onPrint} disabled={printing}>
-            <Printer className="h-4 w-4" />
-            {printing ? 'Preparing…' : 'Print customer receipt'}
-          </Button>
-          {onViewSale ? (
-            <Button variant="outline" size="lg" onClick={onViewSale}>
-              <ReceiptText className="h-4 w-4" />
-              View sale
+          <div className="grid grid-cols-2 gap-2">
+            <Button variant="outline" size="lg" onClick={onPreviewA4} leftIcon={<ReceiptText className="h-4 w-4" />}>
+              Preview A4 Bill
             </Button>
-          ) : null}
-          <Button size="lg" onClick={onNewSale}>
-            <Plus className="h-4 w-4" />
+            <Button size="lg" onClick={onPrintA4} leftIcon={<Printer className="h-4 w-4" />}>
+              Print A4 Bill
+            </Button>
+          </div>
+          <div className="flex items-center justify-center gap-3 text-xs text-muted-foreground">
+            {onViewSale ? (
+              <button onClick={onViewSale} className="font-medium text-primary hover:underline">
+                View sale
+              </button>
+            ) : null}
+            <span aria-hidden>·</span>
+            <button onClick={onPrintThermal} disabled={printing} className="font-medium hover:underline disabled:opacity-50">
+              {printing ? 'Preparing…' : 'Thermal receipt'}
+            </button>
+          </div>
+          <Button size="lg" onClick={onNewSale} leftIcon={<Plus className="h-4 w-4" />} className="mt-1">
             New sale
           </Button>
         </div>

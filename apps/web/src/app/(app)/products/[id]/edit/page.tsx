@@ -5,7 +5,6 @@ import { useParams } from 'next/navigation';
 import * as React from 'react';
 import { ArrowLeft } from 'lucide-react';
 
-import { PageHeader } from '@/components/page-header';
 import { ProductForm } from '@/components/products/product-form';
 import { Card, CardContent } from '@/components/ui/card';
 import { useAuth } from '@/lib/auth';
@@ -43,15 +42,12 @@ export default function EditProductPage() {
 
   return (
     <div className="space-y-6">
-      <div className="space-y-1">
-        <Link
-          href={`/products/${id}`}
-          className="inline-flex items-center gap-1 text-sm text-primary hover:underline"
-        >
-          <ArrowLeft className="h-4 w-4" /> Back to product
-        </Link>
-        <PageHeader title="Edit product" description={product?.name} />
-      </div>
+      <Link
+        href={`/products/${id}`}
+        className="inline-flex items-center gap-1 text-sm text-primary hover:underline"
+      >
+        <ArrowLeft className="h-4 w-4" /> Back to product
+      </Link>
 
       {loading ? (
         <p className="py-16 text-center text-sm text-muted-foreground">Loading…</p>
