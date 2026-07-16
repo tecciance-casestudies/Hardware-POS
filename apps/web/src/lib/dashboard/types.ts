@@ -22,6 +22,9 @@ export interface DashboardMetric {
   status?: MetricStatus;
   /** Small trend series for the sparkline (raw numbers). */
   spark?: number[];
+  /** Short supporting line shown when there is no sparkline/comparison, so the
+   *  card never looks unfinished (e.g. "3 completed today"). */
+  footnote?: string;
   /** Route to navigate to on click. */
   destination?: string;
   /** True when the value/trend comes from the dev-only demo adapter. */

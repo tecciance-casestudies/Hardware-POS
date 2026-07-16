@@ -40,12 +40,13 @@ import {
   DemoBadge,
   EmptyState,
   KpiSkeleton,
-  MetricCard,
+  KPIGrid,
   MiniBarChart,
   ProgressBar,
   SectionCard,
   StatusPill,
   ViewAllLink,
+  type MetricSpec,
 } from './primitives';
 
 const RANGES = ['7D', '30D', '3M', '6M', '1Y'] as const;
@@ -66,7 +67,7 @@ export function AdminDashboard({
   const txns = data.stats?.todayTransactions ?? 0;
   const aov = txns > 0 ? netSales / txns : 0;
 
-  const kpis: { metric: DashboardMetric; icon: LucideIcon }[] = [
+  const kpis: MetricSpec[] = [
     {
       icon: TrendingUp,
       metric: {
@@ -104,6 +105,7 @@ export function AdminDashboard({
         label: 'Transactions',
         value: txns.toLocaleString(),
         helpText: 'Number of sales completed today.',
+        footnote: `${txns.toLocaleString()} completed today`,
         destination: '/sales',
       },
     },
@@ -114,6 +116,7 @@ export function AdminDashboard({
         label: 'Average Order Value',
         value: formatMoney(aov),
         helpText: "Today's sales divided by today's transactions.",
+        footnote: `Across ${txns.toLocaleString()} sales today`,
         destination: '/sales',
       },
     },
@@ -124,6 +127,7 @@ export function AdminDashboard({
         label: 'Open Quotations',
         value: data.pipeline.openCount.toLocaleString(),
         helpText: 'Draft and sent quotations awaiting a decision.',
+        footnote: 'Awaiting a decision',
         destination: '/quotations',
       },
     },
@@ -141,14 +145,16 @@ export function AdminDashboard({
         canReport={canReport}
       />
 
-      {/* KPI grid */}
-      <div className="grid min-w-0 gap-4 sm:grid-cols-2 xl:grid-cols-4 2xl:grid-cols-5">
-        {data.loading && !data.stats ? (
-          <KpiSkeleton count={5} />
-        ) : (
-          kpis.map(({ metric, icon }) => <MetricCard key={metric.id} metric={metric} icon={icon} />)
-        )}
-      </div>
+      {/* KPI grid — container-aware 5 / 3+2 / 2 / 1 layout (no orphan card) */}
+      {data.loading && !data.stats ? (
+        <div className="@container">
+          <div className="grid grid-cols-1 gap-4 @min-[640px]:grid-cols-2 @min-[1050px]:grid-cols-3 @min-[1400px]:grid-cols-5">
+            <KpiSkeleton count={5} />
+          </div>
+        </div>
+      ) : (
+        <KPIGrid metrics={kpis} />
+      )}
 
       {/* Analytics row: sales performance | quickbooks | alerts */}
       <div className="grid min-w-0 gap-4 xl:grid-cols-3">
@@ -191,7 +197,9 @@ function AdminHeader({
   canReport: boolean;
 }) {
   return (
-    <div className="flex flex-wrap items-start justify-between gap-3">
+    // Stacks on laptop/tablet (title row, then actions row); single row on wide
+    // desktop. Actions wrap within their own group so they never overflow.
+    <div className="flex min-w-0 flex-col gap-3 2xl:flex-row 2xl:items-center 2xl:justify-between">
       <div className="min-w-0">
         <h1 className="text-2xl font-semibold tracking-tight">Business Overview</h1>
         <p className="mt-0.5 text-sm text-muted-foreground">
@@ -199,7 +207,7 @@ function AdminHeader({
           {lastUpdated ? <span className="ml-1">Updated {lastUpdated}.</span> : null}
         </p>
       </div>
-      <div className="flex flex-wrap items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2 2xl:justify-end">
         <Link href="/pos" className={buttonVariants({ size: 'md' })}>
           <Plus className="h-4 w-4" />
           New Sale

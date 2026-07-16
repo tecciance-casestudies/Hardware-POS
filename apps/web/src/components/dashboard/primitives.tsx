@@ -101,9 +101,12 @@ function InfoDot({ label }: { label: string }) {
   );
 }
 
-/** KPI card. Renders as a link when a destination is set (keyboard accessible). */
+/** KPI card. Renders as a link when a destination is set (keyboard accessible).
+ *  Uses a full-height flex column so cards in the same grid row match height and
+ *  the trend/footnote area pins to the bottom — no card looks unfinished. */
 export function MetricCard({ metric, icon: Icon }: { metric: DashboardMetric; icon: LucideIcon }) {
   const cmp = metric.comparison;
+  const hasSpark = !!metric.spark && metric.spark.length > 1;
   const body = (
     <>
       <div className="flex items-start justify-between gap-2">
@@ -119,8 +122,8 @@ export function MetricCard({ metric, icon: Icon }: { metric: DashboardMetric; ic
         <span className="text-2xl font-bold tracking-tight">{metric.value}</span>
         {metric.isDemo ? <DemoBadge /> : null}
       </div>
-      <div className="mt-1 flex min-h-5 items-center justify-between gap-2">
-        {cmp ? (
+      {cmp ? (
+        <div className="mt-1 flex min-h-5 items-center gap-2">
           <span
             className={cn('flex items-center gap-1 text-xs font-medium', TREND_TONE[cmp.direction])}
           >
@@ -132,20 +135,23 @@ export function MetricCard({ metric, icon: Icon }: { metric: DashboardMetric; ic
             {cmp.value > 0 ? '+' : ''}
             {cmp.value}% <span className="font-normal text-muted-foreground">{cmp.label}</span>
           </span>
-        ) : (
-          <span />
-        )}
-      </div>
-      {metric.spark && metric.spark.length > 1 ? (
-        <div className={cn('mt-2', cmp ? TREND_TONE[cmp.direction] : 'text-primary')}>
-          <Sparkline data={metric.spark} />
         </div>
       ) : null}
+      {/* Bottom area: sparkline when trend data exists, else a short footnote. */}
+      <div className="mt-auto pt-3">
+        {hasSpark ? (
+          <div className={cn(cmp ? TREND_TONE[cmp.direction] : 'text-primary')}>
+            <Sparkline data={metric.spark!} />
+          </div>
+        ) : metric.footnote ? (
+          <p className="text-xs text-muted-foreground">{metric.footnote}</p>
+        ) : null}
+      </div>
     </>
   );
 
   const base =
-    'block rounded-2xl border border-border bg-card p-4 shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1';
+    'flex h-full flex-col rounded-2xl border border-border bg-card p-4 shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1';
   return metric.destination ? (
     <Link
       href={metric.destination}
@@ -157,6 +163,62 @@ export function MetricCard({ metric, icon: Icon }: { metric: DashboardMetric; ic
   ) : (
     <div className={base}>{body}</div>
   );
+}
+
+export interface MetricSpec {
+  metric: DashboardMetric;
+  icon: LucideIcon;
+}
+
+/**
+ * Container-aware KPI grid. Responds to the dashboard content width (not the
+ * viewport) via CSS container queries, so it re-balances when the sidebar
+ * collapses/expands at the same viewport. Optimised for the 5-card case:
+ *
+ *   ≥1400px content → 5 across
+ *   1050–1399px     → balanced 3 + 2 (six-column internal grid)
+ *   640–1049px      → 2 across, last odd card spans both (no orphan)
+ *   <640px          → 1 across
+ *
+ * Any other count degrades to a clean 1 / 2 / 4 grid with no orphan card.
+ */
+export function KPIGrid({ metrics }: { metrics: MetricSpec[] }) {
+  const isFive = metrics.length === 5;
+  return (
+    <div className="@container">
+      <div
+        className={cn(
+          'grid grid-cols-1 gap-4 @min-[640px]:grid-cols-2',
+          isFive
+            ? '@min-[1050px]:grid-cols-6 @min-[1400px]:grid-cols-5'
+            : '@min-[1100px]:grid-cols-4',
+        )}
+      >
+        {metrics.map((m, i) => (
+          <div key={m.metric.id} className={kpiCellClass(i, metrics.length)}>
+            <MetricCard metric={m.metric} icon={m.icon} />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** Per-card column spans that keep every breakpoint balanced (no orphan card). */
+function kpiCellClass(i: number, n: number): string {
+  if (n === 5) {
+    // First three cards fill the six-column row (2+2+2); last two split it (3+3).
+    const medium =
+      i < 3
+        ? '@min-[1050px]:col-span-2 @min-[1400px]:col-span-1'
+        : '@min-[1050px]:col-span-3 @min-[1400px]:col-span-1';
+    // On the two-column tablet layout the 5th card sits alone on row 3 → span both.
+    const tablet = i === 4 ? '@min-[640px]:col-span-2 @min-[1050px]:col-span-1' : '';
+    return cn(medium, tablet);
+  }
+  // Even counts never orphan; an odd last card spans both columns on tablet.
+  const lastOdd = n % 2 === 1 && i === n - 1;
+  return lastOdd ? '@min-[640px]:col-span-2 @min-[1100px]:col-span-1' : '';
 }
 
 /** Section card with a heading and optional right-side action. */
