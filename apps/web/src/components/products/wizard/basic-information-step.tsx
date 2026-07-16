@@ -79,6 +79,33 @@ export function BasicInformationStep({
           />
         </Field>
 
+        <Field
+          label="Batch family (base SKU)"
+          htmlFor="field-base-sku"
+          help="Products sharing this key are shown as one POS card whose batches are picked manually — e.g. tile code 9122. Leave empty for normal products."
+        >
+          <Input
+            id="field-base-sku"
+            value={form.baseSku}
+            onChange={(e) => set('baseSku', e.target.value)}
+            placeholder="e.g. 9122"
+          />
+        </Field>
+
+        <Field
+          label="Batch code"
+          htmlFor="field-batch-code"
+          help="This product's batch within the family, e.g. LT or HL1."
+        >
+          <Input
+            id="field-batch-code"
+            value={form.batchCode}
+            onChange={(e) => set('batchCode', e.target.value)}
+            placeholder="e.g. LT"
+            disabled={!form.baseSku.trim()}
+          />
+        </Field>
+
         <Field label="Brand" htmlFor="field-brand">
           <Input
             id="field-brand"

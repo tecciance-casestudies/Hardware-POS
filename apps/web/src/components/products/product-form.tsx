@@ -94,7 +94,8 @@ export function ProductForm({
     if (editing) return;
     const draft = productDraftService.load(null);
     if (draft) {
-      setForm(draft.fields);
+      // Merge over defaults so drafts saved before new fields existed stay valid.
+      setForm({ ...initialFormState(), ...draft.fields });
       setStep(draft.step >= 0 ? (STEPS[draft.step] ?? 'details') : 'details');
       setDraftSavedAt(draft.savedAt);
     }
@@ -271,6 +272,9 @@ export function ProductForm({
     name: form.name.trim(),
     sku: form.sku.trim() || null,
     barcode: form.barcode.trim() || null,
+    baseSku: form.baseSku.trim() || null,
+    // A batch code without a family is meaningless — clear it alongside.
+    batchCode: form.baseSku.trim() ? form.batchCode.trim() || null : null,
     brand: form.brand.trim() || null,
     categoryId: form.categoryId || null,
     subcategoryId: form.subcategoryId || null,

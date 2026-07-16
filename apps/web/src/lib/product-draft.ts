@@ -19,6 +19,8 @@ export interface ProductDraftFields {
   name: string;
   sku: string;
   barcode: string;
+  baseSku: string;
+  batchCode: string;
   brand: string;
   categoryId: string;
   subcategoryId: string;

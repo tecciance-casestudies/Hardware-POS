@@ -11,6 +11,10 @@ export interface ClientProduct {
   name: string;
   sku: string | null;
   barcode: string | null;
+  /** Batch family key (e.g. tile code "9122") — non-null marks a batch-tracked product. */
+  baseSku: string | null;
+  /** Batch identifier within the family (e.g. "LT"). */
+  batchCode: string | null;
   categoryName: string;
   subcategoryId: string | null;
   subcategoryName: string | null;
@@ -48,6 +52,8 @@ interface ApiProduct {
   name: string;
   sku: string | null;
   barcode: string | null;
+  baseSku: string | null;
+  batchCode: string | null;
   categoryId: string | null;
   subcategoryId: string | null;
   unitType: string | null;
@@ -99,6 +105,8 @@ function normalizeApi(
     name: p.name,
     sku: p.sku,
     barcode: p.barcode,
+    baseSku: p.baseSku ?? null,
+    batchCode: p.batchCode ?? null,
     categoryName: (p.categoryId && catNames.get(p.categoryId)) || 'Uncategorized',
     subcategoryId: p.subcategoryId ?? null,
     subcategoryName: (p.subcategoryId && subNames.get(p.subcategoryId)) || null,

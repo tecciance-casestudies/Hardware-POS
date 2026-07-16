@@ -9,6 +9,8 @@ export interface ManagedProduct {
   name: string;
   sku: string | null;
   barcode: string | null;
+  baseSku: string | null;
+  batchCode: string | null;
   description: string | null;
   brand: string | null;
   categoryId: string | null;
@@ -50,6 +52,8 @@ export interface ProductInput {
   name: string;
   sku?: string | null;
   barcode?: string | null;
+  baseSku?: string | null;
+  batchCode?: string | null;
   description?: string | null;
   brand?: string | null;
   categoryId?: string | null;
