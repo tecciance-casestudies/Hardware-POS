@@ -7,29 +7,24 @@ import {
   ArrowRight,
   Clock,
   FileText,
-  Layers,
   Minus,
   NotebookPen,
   Plus,
-  ScanLine,
   Search,
   ShieldCheck,
   ShoppingCart,
   Tag,
   Trash2,
   UserPlus,
-  Warehouse,
   X,
 } from 'lucide-react';
 
-import { BatchPickerDialog } from '@/components/pos/batch-picker-dialog';
 import { CustomerCombobox } from '@/components/pos/customer-combobox';
 import { ItemDiscountDialog } from '@/components/pos/item-discount-dialog';
 import { ItemNoteDialog } from '@/components/pos/item-note-dialog';
 import { ManagerApprovalDialog } from '@/components/pos/manager-approval-dialog';
 import { OrderDiscountDialog } from '@/components/pos/order-discount-dialog';
 import { QuickAddCustomerDialog } from '@/components/pos/quick-add-customer-dialog';
-import { ProductImage } from '@/components/product-image';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { ChipRow } from '@/components/ui/chip-row';
@@ -107,68 +102,25 @@ export default function PosPage() {
         const matchesCat = category === 'All' || p.categoryName === category;
         const matchesSub = subcategory === 'All' || p.subcategoryName === subcategory;
         const matchesQuery =
-          !q ||
-          p.name.toLowerCase().includes(q) ||
-          (p.sku ?? '').toLowerCase().includes(q) ||
-          (p.barcode ?? '').toLowerCase().includes(q);
+          !q || p.name.toLowerCase().includes(q) || (p.sku ?? '').toLowerCase().includes(q);
         return matchesCat && matchesSub && matchesQuery;
       }),
     [data.products, category, subcategory, q],
   );
 
-  // ── batch grouping ──────────────────────────────────────────────────────
-  // Products sharing a baseSku are batches of one sellable (tile shade/caliber
-  // varies per batch); they render as a single card whose batch is picked
-  // manually. Lone members fall back to plain product cards.
-  type CatalogEntry =
-    | { kind: 'product'; product: ClientProduct }
-    | { kind: 'group'; baseSku: string; members: ClientProduct[] };
-
-  const entries = React.useMemo<CatalogEntry[]>(() => {
-    const groups = new Map<string, ClientProduct[]>();
-    const ordered: CatalogEntry[] = [];
-    for (const p of filtered) {
-      if (!p.baseSku) {
-        ordered.push({ kind: 'product', product: p });
-        continue;
-      }
-      const members = groups.get(p.baseSku);
-      if (members) {
-        members.push(p);
-      } else {
-        const fresh = [p];
-        groups.set(p.baseSku, fresh);
-        ordered.push({ kind: 'group', baseSku: p.baseSku, members: fresh });
-      }
-    }
-    return ordered.map((e): CatalogEntry => {
-      if (e.kind === 'group' && e.members.length === 1 && e.members[0]) {
-        return { kind: 'product', product: e.members[0] };
-      }
-      return e;
-    });
-  }, [filtered]);
-
-  const [batchGroup, setBatchGroup] = React.useState<{
-    baseSku: string;
-    members: ClientProduct[];
-  } | null>(null);
-
   React.useEffect(() => setPage(1), [q, category, subcategory, pageSize]);
-  const totalPages = Math.max(1, Math.ceil(entries.length / pageSize));
-  const pageEntries = entries.slice((page - 1) * pageSize, page * pageSize);
+  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+  const pageProducts = filtered.slice((page - 1) * pageSize, page * pageSize);
 
   const addToCart = (product: ClientProduct) => {
     cart.addToCart(product);
     showToast(`${product.name} added`);
   };
 
-  // Barcode/scanner: Enter adds an exact barcode/SKU match, else the sole result.
+  // Enter adds an exact SKU match, else the sole result.
   const onSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key !== 'Enter') return;
-    const exact = filtered.find(
-      (p) => (p.barcode ?? '').toLowerCase() === q || (p.sku ?? '').toLowerCase() === q,
-    );
+    const exact = filtered.find((p) => (p.sku ?? '').toLowerCase() === q);
     const target = exact ?? (filtered.length === 1 ? filtered[0] : undefined);
     if (target) {
       addToCart(target);
@@ -347,25 +299,13 @@ export default function PosPage() {
             return (
               <div key={item.product.id} className="rounded-xl border border-border bg-card p-2.5">
                 <div className="flex items-start gap-2.5">
-                  <ProductImage
-                    src={item.product.imageUrl}
-                    alt={item.product.name}
-                    className="h-11 w-11 shrink-0"
-                  />
                   <div className="min-w-0 flex-1">
                     <div className="line-clamp-2 text-sm font-medium leading-tight">
                       {item.product.name}
                     </div>
                     <div className="mt-0.5 flex items-center gap-1.5 truncate text-[11px] text-muted-foreground">
-                      {item.product.batchCode ? (
-                        <span className="shrink-0 rounded bg-brand-50 px-1 py-px font-semibold text-brand-700">
-                          Batch {item.product.batchCode}
-                        </span>
-                      ) : null}
                       <span className="truncate">
-                        {item.product.sku ?? item.product.barcode ?? '—'} ·{' '}
-                        {formatMoney(item.product.unitPrice, currency)}
-                        {item.product.unitType ? `/${item.product.unitType}` : ''}
+                        {item.product.sku ?? '—'} · {formatMoney(item.product.unitPrice, currency)}
                       </span>
                     </div>
                   </div>
@@ -581,9 +521,9 @@ export default function PosPage() {
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 onKeyDown={onSearchKeyDown}
-                placeholder="Search or scan barcode…"
+                placeholder="Search products…"
                 className="h-11 pl-10 pr-9"
-                aria-label="Search products or scan barcode"
+                aria-label="Search products"
               />
               {query ? (
                 <button
@@ -599,15 +539,6 @@ export default function PosPage() {
                 </button>
               ) : null}
             </div>
-            <Button
-              variant="outline"
-              size="icon"
-              className="h-11 w-11 shrink-0"
-              aria-label="Scan barcode"
-              onClick={() => searchRef.current?.focus()}
-            >
-              <ScanLine className="h-5 w-5" />
-            </Button>
           </div>
 
           {data.error ? (
@@ -676,128 +607,33 @@ export default function PosPage() {
             </p>
           ) : (
             <div className="grid grid-cols-[repeat(auto-fill,minmax(9rem,1fr))] gap-2.5">
-              {pageEntries.map((entry) => {
-                if (entry.kind === 'group') {
-                  const { baseSku, members } = entry;
-                  const inStock = members.filter((m) => m.quantityOnHand > 0);
-                  const groupOut = inStock.length === 0;
-                  const cover = inStock[0] ?? members[0];
-                  if (!cover) return null;
-                  const totalQty = inStock.reduce((n, m) => n + m.quantityOnHand, 0);
-                  const prices = (inStock.length > 0 ? inStock : members).map((m) => m.unitPrice);
-                  const minPrice = Math.min(...prices);
-                  const uniformPrice = prices.every((v) => v === prices[0]);
-                  const openPicker = () => setBatchGroup({ baseSku, members });
-                  return (
-                    <div
-                      key={`group-${baseSku}`}
-                      title={cover.name}
-                      className="group flex flex-col overflow-hidden rounded-xl border border-border bg-card text-left shadow-sm transition-all hover:border-primary hover:shadow"
-                    >
-                      <button
-                        type="button"
-                        onClick={openPicker}
-                        disabled={groupOut}
-                        aria-label={`Choose a batch of ${cover.name}`}
-                        className="relative block text-left disabled:cursor-not-allowed"
-                      >
-                        <ProductImage
-                          src={cover.imageUrl}
-                          alt={cover.name}
-                          rounded="rounded-none"
-                          className={cn('aspect-[4/3] w-full border-0', groupOut && 'opacity-60')}
-                        />
-                        <span className="absolute right-1.5 top-1.5 inline-flex items-center gap-1 rounded-md bg-brand-50/95 px-1.5 py-0.5 text-[10px] font-semibold text-brand-700">
-                          <Layers className="h-3 w-3" />
-                          {inStock.length} batch{inStock.length === 1 ? '' : 'es'}
-                        </span>
-                      </button>
-                      <div className="flex flex-1 flex-col p-2">
-                        <div className="line-clamp-2 min-h-8 text-xs font-medium leading-tight">
-                          {cover.name}
-                        </div>
-                        <div className="mt-0.5 truncate text-[11px] text-muted-foreground">
-                          Code {baseSku}
-                        </div>
-                        <div className="mt-1.5 flex items-end justify-between gap-1">
-                          <span className="text-sm font-semibold text-primary">
-                            {uniformPrice
-                              ? formatMoney(minPrice, currency)
-                              : `from ${formatMoney(minPrice, currency)}`}
-                          </span>
-                          <span
-                            className={cn(
-                              'text-[11px]',
-                              groupOut ? 'font-medium text-danger' : 'text-muted-foreground',
-                            )}
-                          >
-                            {groupOut
-                              ? 'Out'
-                              : `${totalQty.toLocaleString()}${cover.unitType ? ' ' + cover.unitType : ''}`}
-                          </span>
-                        </div>
-                        <Button
-                          variant={groupOut ? 'outline' : 'primary'}
-                          size="sm"
-                          fullWidth
-                          disabled={groupOut}
-                          className="mt-2"
-                          onClick={openPicker}
-                          leftIcon={groupOut ? undefined : <Layers className="h-4 w-4" />}
-                        >
-                          {groupOut ? 'Out of Stock' : 'Choose batch'}
-                        </Button>
-                      </div>
-                    </div>
-                  );
-                }
-
-                const p = entry.product;
-                const outOfStock = p.quantityOnHand <= 0;
-                const lowStock = !outOfStock && p.quantityOnHand <= LOW_STOCK_THRESHOLD;
+              {pageProducts.map((p) => {
+                const outOfStock = p.type === 'Inventory' && p.quantityOnHand <= 0;
+                const lowStock =
+                  p.type === 'Inventory' && !outOfStock && p.quantityOnHand <= LOW_STOCK_THRESHOLD;
                 return (
                   <div
                     key={p.id}
                     title={p.name}
                     className="group flex flex-col overflow-hidden rounded-xl border border-border bg-card text-left shadow-sm transition-all hover:border-primary hover:shadow"
                   >
-                    <button
-                      type="button"
-                      onClick={() => addToCart(p)}
-                      disabled={outOfStock}
-                      aria-label={`Add ${p.name} to cart`}
-                      className="relative block text-left disabled:cursor-not-allowed"
-                    >
-                      <ProductImage
-                        src={p.imageUrl}
-                        alt={p.name}
-                        rounded="rounded-none"
-                        className={cn('aspect-[4/3] w-full border-0', outOfStock && 'opacity-60')}
-                      />
-                      {p.requiresWarehousePickup ? (
-                        <span
-                          className="absolute left-1.5 top-1.5 rounded-md bg-warning-soft/90 p-1 text-warning"
-                          title="Warehouse pickup"
-                        >
-                          <Warehouse className="h-3.5 w-3.5" />
-                        </span>
-                      ) : null}
-                      {outOfStock ? (
-                        <span className="absolute right-1.5 top-1.5 rounded-md bg-danger px-1.5 py-0.5 text-[10px] font-semibold text-white">
-                          Out of Stock
-                        </span>
-                      ) : lowStock ? (
-                        <span className="absolute right-1.5 top-1.5 rounded-md bg-warning-soft px-1.5 py-0.5 text-[10px] font-semibold text-warning">
-                          Low Stock
-                        </span>
-                      ) : null}
-                    </button>
-                    <div className="flex flex-1 flex-col p-2">
-                      <div className="line-clamp-2 min-h-8 text-xs font-medium leading-tight">
-                        {p.name}
+                    <div className="flex flex-1 flex-col p-2.5">
+                      <div className="flex items-start justify-between gap-1">
+                        <div className="line-clamp-2 min-h-8 text-xs font-medium leading-tight">
+                          {p.name}
+                        </div>
+                        {outOfStock ? (
+                          <span className="shrink-0 rounded-md bg-danger px-1.5 py-0.5 text-[10px] font-semibold text-white">
+                            Out
+                          </span>
+                        ) : lowStock ? (
+                          <span className="shrink-0 rounded-md bg-warning-soft px-1.5 py-0.5 text-[10px] font-semibold text-warning">
+                            Low
+                          </span>
+                        ) : null}
                       </div>
                       <div className="mt-0.5 truncate text-[11px] text-muted-foreground">
-                        {p.sku ?? p.barcode ?? ''}
+                        {p.sku ?? ''}
                       </div>
                       <div className="mt-1.5 flex items-end justify-between gap-1">
                         <span className="text-sm font-semibold text-primary">
@@ -809,9 +645,13 @@ export default function PosPage() {
                             outOfStock ? 'font-medium text-danger' : 'text-muted-foreground',
                           )}
                         >
-                          {outOfStock
-                            ? 'Out'
-                            : `${p.quantityOnHand.toLocaleString()}${p.unitType ? ' ' + p.unitType : ''}`}
+                          {p.type !== 'Inventory'
+                            ? p.type === 'Service'
+                              ? 'Service'
+                              : '—'
+                            : outOfStock
+                              ? 'Out'
+                              : p.quantityOnHand.toLocaleString()}
                         </span>
                       </div>
                       <Button
@@ -838,8 +678,8 @@ export default function PosPage() {
           <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-t border-border pt-2.5 text-sm">
             <div className="flex items-center gap-2 text-muted-foreground">
               <span className="hidden md:inline">
-                Showing {(page - 1) * pageSize + 1}–{Math.min(page * pageSize, entries.length)} of{' '}
-                {entries.length.toLocaleString()} products
+                Showing {(page - 1) * pageSize + 1}–{Math.min(page * pageSize, filtered.length)} of{' '}
+                {filtered.length.toLocaleString()} products
               </span>
               <span className="hidden sm:inline md:hidden">Per page</span>
               <Select
@@ -1008,19 +848,6 @@ export default function PosPage() {
             setQuickAddOpen(false);
             showToast(`Customer "${customer.name}" added`);
           }}
-        />
-      ) : null}
-
-      {batchGroup ? (
-        <BatchPickerDialog
-          baseSku={batchGroup.baseSku}
-          members={batchGroup.members}
-          currency={currency}
-          onPick={(product) => {
-            addToCart(product);
-            setBatchGroup(null);
-          }}
-          onClose={() => setBatchGroup(null)}
         />
       ) : null}
 

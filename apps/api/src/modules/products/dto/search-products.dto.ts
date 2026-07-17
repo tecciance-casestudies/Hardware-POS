@@ -3,7 +3,7 @@ import { IsBoolean, IsOptional, IsString } from 'class-validator';
 
 import { PaginationQueryDto } from '../../../common/dto/pagination-query.dto';
 
-/** Structured product search: name / sku / barcode / category / active status. */
+/** Structured product search: name / sku / category / active status. */
 export class SearchProductsDto extends PaginationQueryDto {
   @IsString()
   @IsOptional()
@@ -12,10 +12,6 @@ export class SearchProductsDto extends PaginationQueryDto {
   @IsString()
   @IsOptional()
   sku?: string;
-
-  @IsString()
-  @IsOptional()
-  barcode?: string;
 
   @IsString()
   @IsOptional()

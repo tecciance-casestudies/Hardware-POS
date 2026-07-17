@@ -424,43 +424,42 @@ model ProductSubcategory {
   @@index([categoryId])
 }
 
+/// Mirrors the QuickBooks Products & Services item fields (import template):
+/// name, category, item type, SKU, sales description/price, purchase
+/// description/cost, the three account names, quantity on hand + as-of date,
+/// and reorder point. `isActive` and the sync columns are system fields
+/// (QBO items have active status too; soft-delete keeps sale history intact).
 model Product {
-  id                      String     @id @default(cuid())
-  tenantId                String
-  quickbooksItemId        String?
-  name                    String
-  sku                     String?
-  barcode                 String?
-  /// Grouping key for batch-tracked stock (e.g. tile code "9122"): products
-  /// sharing a baseSku are batches of one sellable, picked manually at the POS.
-  baseSku                 String?
-  /// Batch identifier within the baseSku family (e.g. "LT", "HL1").
-  batchCode               String?
-  /// Product-variation wizard state (attributes, price mode, generated
-  /// variants) — persisted verbatim for the web client.
-  variationConfig         Json?
-  description             String?
-  brand                   String?
-  categoryId              String?
-  subcategoryId           String?
-  unitType                String?
-  unitPrice               Decimal    @default(0) @db.Decimal(12, 2)
-  costPrice               Decimal?   @db.Decimal(12, 2)
-  quantityOnHand          Decimal    @default(0) @db.Decimal(12, 3)
-  reorderLevel            Decimal?   @db.Decimal(12, 3)
-  imageUrl                String?
-  imageAltText            String?
-  trackInventory          Boolean    @default(true)
-  taxable                 Boolean    @default(true)
-  type                    String?
-  isActive                Boolean    @default(true)
-  /// Unfinished product saved from the creation wizard — hidden from the POS.
-  isDraft                 Boolean    @default(false)
-  requiresWarehousePickup Boolean    @default(false)
-  lastSyncedAt            DateTime?
-  syncStatus              SyncStatus @default(NOT_SYNCED)
-  createdAt               DateTime   @default(now())
-  updatedAt               DateTime   @updatedAt
+  id               String     @id @default(cuid())
+  tenantId         String
+  quickbooksItemId String?
+  name             String
+  /// QuickBooks item type: Inventory | NonInventory | Service.
+  type             String     @default("Inventory")
+  sku              String?
+  /// Sales description — appears on sales forms and receipts.
+  description      String?
+  categoryId       String?
+  subcategoryId    String?
+  unitPrice        Decimal    @default(0) @db.Decimal(12, 2)
+  /// QBO income account name (auto-resolved on sync; read-only in the UI).
+  incomeAccount    String?
+  /// Purchase description — what vendors see on purchase forms.
+  purchaseDescription String?
+  costPrice        Decimal?   @db.Decimal(12, 2)
+  /// QBO expense account name (auto-resolved on sync; read-only in the UI).
+  expenseAccount   String?
+  quantityOnHand   Decimal    @default(0) @db.Decimal(12, 3)
+  /// The date the quantity on hand was counted (QBO InvStartDate).
+  quantityAsOfDate DateTime?
+  reorderLevel     Decimal?   @db.Decimal(12, 3)
+  /// QBO inventory asset account name (auto-resolved; read-only in the UI).
+  inventoryAssetAccount String?
+  isActive         Boolean    @default(true)
+  lastSyncedAt     DateTime?
+  syncStatus       SyncStatus @default(NOT_SYNCED)
+  createdAt        DateTime   @default(now())
+  updatedAt        DateTime   @updatedAt
 
   tenant         Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   category       ProductCategory?    @relation(fields: [categoryId], references: [id])
@@ -471,11 +470,8 @@ model Product {
 
   @@unique([tenantId, quickbooksItemId])
   @@unique([tenantId, sku])
-  @@unique([tenantId, barcode])
-  @@unique([tenantId, baseSku, batchCode])
   @@index([tenantId])
   @@index([tenantId, name])
-  @@index([tenantId, baseSku])
   @@index([categoryId])
   @@index([subcategoryId])
 }

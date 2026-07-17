@@ -1,0 +1,14 @@
+Product/service name,Category,Item type,SKU,Sales description,Sales price/rate,Income account,Purchase description,Purchase cost,Expense account,Quantity on hand,Quantity as of date,Reorder point,Inventory asset account
+"Winter Jacket","Clothing:Jackets","Inventory","RJ-1","Comfy and soft coat","189","Sales of Product Income","","130","Cost of Goods Sold","25","12/21/2022","5","Inventory Asset"
+"Smart Shirt","Clothing:Shirts","Inventory","SS-001","Smart Oxford shirt","69","Sales","","36","Cost of Goods Sold","40","12/21/2022","10","Inventory Asset"
+"Brown wrapping paper","Packaging","Non-Inventory","WP-01","Everyday wrapping","0","","","20","Purchases","","","",""
+"Customization","Tailoring","Service","","Tailored to fit","200","Sales","","","","","","",""
+"","","","","","","","","","","","","",""
+Guide (Please delete these rows before uploading),,,,,,,,,,,,
+Choose this name carefully. This will appear on your Products & services page and on sales channels you connect to QuickBooks.,"Use categories to group similar items together.
+
+You can create sub-categories by separating category names with a colon, like: Shirts:Smart Button Shirts. Sub-categories can be up to 4 levels deep.","Keep these guidelines in mind for type:
+
+ - Use Non-Inventory for physical products you don't need to track quantities of.
+ - Use Service for the professional services your business offers.
+- Use Inventory for physical products you need to track quantities of.",Use SKU or stock keeping unit to distinguish between items. A SKU is a string of numbers and letters that is unique to each item.,This description will appear on sales forms and reports. It should help you and your customers identify the product.,Enter the price or rate your customers will pay for this product or service.,Enter the income account in your chart of accounts where you want sales transactions to appear.,Enter a description of the product vendors will see when you purchase it.,Enter the price you pay when you buy the product from your suppliers.,Enter the expense account in your chart of accounts where you want purchase transactions to appear.,Enter the quantity on hand for Inventory items.,"If this is left empty, it will reflect the date when you upload and import this spreadsheet.",Enter the Inventory quantity at which we'll remind you to purchase more stock.,Enter the Inventory asset account in your chart of accounts where you record the value of the products you're selling.

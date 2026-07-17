@@ -48,8 +48,7 @@ export type SaleForReturn = Prisma.SaleGetPayload<{
             id: true;
             name: true;
             sku: true;
-            imageUrl: true;
-            trackInventory: true;
+            type: true;
           };
         };
       };
@@ -86,7 +85,7 @@ const returnListInclude = {
 const saleForReturnInclude = {
   items: {
     include: {
-      product: { select: { id: true, name: true, sku: true, imageUrl: true, trackInventory: true } },
+      product: { select: { id: true, name: true, sku: true, type: true } },
     },
   },
   customer: true,

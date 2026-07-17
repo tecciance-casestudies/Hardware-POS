@@ -9,7 +9,6 @@ import { Prisma, Product, UserRole } from '@hardware-pos/database';
 import type { Paginated } from '@hardware-pos/shared';
 
 import { paginate } from '../../common/pagination';
-import { StorageService } from '../../common/storage/storage.service';
 import { SyncQueueService } from '../sync/queue/sync-queue.service';
 import { MockSyncSummary, ProductsRepository } from './products.repository';
 import { CreateProductDto } from './dto/create-product.dto';
@@ -21,7 +20,6 @@ import { UpdateProductDto } from './dto/update-product.dto';
 export class ProductsService {
   constructor(
     private readonly productsRepository: ProductsRepository,
-    private readonly storage: StorageService,
     private readonly syncQueue: SyncQueueService,
   ) {}
 
@@ -33,7 +31,7 @@ export class ProductsService {
         categoryId: query.categoryId,
         subcategoryId: query.subcategoryId,
         isActive: query.isActive === undefined ? undefined : query.isActive === 'true',
-        isDraft: query.isDraft === undefined ? undefined : query.isDraft === 'true',
+        type: query.type,
         syncStatus: query.syncStatus,
         stockStatus: query.stockStatus,
       },
@@ -49,7 +47,6 @@ export class ProductsService {
       {
         name: query.name,
         sku: query.sku,
-        barcode: query.barcode,
         categoryId: query.categoryId,
         subcategoryId: query.subcategoryId,
         isActive: query.isActive,
@@ -68,45 +65,30 @@ export class ProductsService {
     return product;
   }
 
-  async getByBarcode(tenantId: string, barcode: string): Promise<Product> {
-    const product = await this.productsRepository.findByBarcode(tenantId, barcode);
-    if (!product) {
-      throw new NotFoundException(`No product with barcode ${barcode}`);
-    }
-    return product;
-  }
-
   /** Create a locally-managed product (not yet in QuickBooks → NOT_SYNCED). */
   async create(tenantId: string, dto: CreateProductDto): Promise<Product> {
     const link = await this.resolveCategoryLink(tenantId, dto.categoryId, dto.subcategoryId);
     const data: Prisma.ProductUncheckedCreateInput = {
       tenantId,
       name: dto.name,
+      type: dto.type ?? 'Inventory',
       sku: dto.sku ?? null,
-      barcode: dto.barcode ?? null,
-      baseSku: dto.baseSku ?? null,
-      batchCode: dto.batchCode ?? null,
       description: dto.description ?? null,
-      brand: dto.brand ?? null,
       categoryId: link.categoryId ?? null,
       subcategoryId: link.subcategoryId ?? null,
-      unitType: dto.unitType ?? null,
       unitPrice: dto.unitPrice,
+      purchaseDescription: dto.purchaseDescription ?? null,
       costPrice: dto.costPrice ?? null,
       quantityOnHand: dto.quantityOnHand ?? 0,
+      quantityAsOfDate: dto.quantityAsOfDate ? new Date(dto.quantityAsOfDate) : new Date(),
       reorderLevel: dto.reorderLevel ?? null,
-      imageAltText: dto.imageAltText ?? null,
-      trackInventory: dto.trackInventory ?? true,
-      taxable: dto.taxable ?? true,
-      requiresWarehousePickup: dto.requiresWarehousePickup ?? false,
       isActive: dto.isActive ?? true,
-      isDraft: dto.isDraft ?? false,
       syncStatus: 'NOT_SYNCED',
     };
     try {
       const created = await this.productsRepository.create(tenantId, data);
-      // New published products flow to QuickBooks automatically (drafts wait).
-      return created.isDraft ? created : await this.queueQuickBooksPush(tenantId, created);
+      // New products flow to QuickBooks automatically when it is connected.
+      return await this.queueQuickBooksPush(tenantId, created);
     } catch (err) {
       throw this.mapWriteError(err);
     }
@@ -146,34 +128,28 @@ export class ProductsService {
     // Prisma treats `undefined` fields as "leave unchanged"; column names match the DTO.
     const data: Prisma.ProductUncheckedUpdateInput = {
       name: dto.name,
+      type: dto.type,
       sku: dto.sku,
-      barcode: dto.barcode,
-      baseSku: dto.baseSku,
-      batchCode: dto.batchCode,
       description: dto.description,
-      brand: dto.brand,
       categoryId: link.categoryId,
       subcategoryId: link.subcategoryId,
-      unitType: dto.unitType,
       unitPrice: dto.unitPrice,
+      purchaseDescription: dto.purchaseDescription,
       costPrice: dto.costPrice,
       quantityOnHand: dto.quantityOnHand,
+      // Restating the count implies a fresh as-of date unless one was given.
+      quantityAsOfDate: dto.quantityAsOfDate
+        ? new Date(dto.quantityAsOfDate)
+        : changingStock
+          ? new Date()
+          : undefined,
       reorderLevel: dto.reorderLevel,
-      imageAltText: dto.imageAltText,
-      trackInventory: dto.trackInventory,
-      taxable: dto.taxable,
-      requiresWarehousePickup: dto.requiresWarehousePickup,
       isActive: dto.isActive,
-      isDraft: dto.isDraft,
     };
     try {
       const updated = await this.productsRepository.update(id, data);
-      // Push to QuickBooks when a draft is published, or when QBO-relevant
-      // fields of an already-linked product changed.
-      const published = existing.isDraft && updated.isDraft === false;
-      const linkedAndChanged =
-        existing.quickbooksItemId != null && this.qboFieldsChanged(existing, updated);
-      if (!updated.isDraft && (published || linkedAndChanged)) {
+      // Push QBO-relevant edits of a linked product back to QuickBooks.
+      if (existing.quickbooksItemId != null && this.qboFieldsChanged(existing, updated)) {
         return await this.queueQuickBooksPush(tenantId, updated);
       }
       return updated;
@@ -187,47 +163,28 @@ export class ProductsService {
     const existing = await this.getById(tenantId, id);
     const updated = await this.productsRepository.update(id, { isActive: false });
     // Deactivating a QBO-linked product marks the QBO item inactive too.
-    if (!updated.isDraft && existing.quickbooksItemId != null) {
+    if (existing.quickbooksItemId != null) {
       return this.queueQuickBooksPush(tenantId, updated);
     }
     return updated;
   }
 
-  async setImage(
-    tenantId: string,
-    id: string,
-    file: { buffer: Buffer; mimetype: string } | undefined,
-  ): Promise<Product> {
-    if (!file) {
-      throw new BadRequestException('No image file provided');
-    }
-    const existing = await this.getById(tenantId, id);
-    const url = await this.storage.saveImage(file);
-    if (existing.imageUrl) {
-      await this.storage.remove(existing.imageUrl);
-    }
-    return this.productsRepository.update(id, { imageUrl: url });
-  }
-
-  async removeImage(tenantId: string, id: string): Promise<Product> {
-    const existing = await this.getById(tenantId, id);
-    if (existing.imageUrl) {
-      await this.storage.remove(existing.imageUrl);
-    }
-    return this.productsRepository.update(id, { imageUrl: null });
-  }
-
   /** Queue a product push to QuickBooks; the sync worker creates/updates the Item. */
   async syncToQuickBooks(tenantId: string, id: string): Promise<Product> {
-    const product = await this.getById(tenantId, id);
-    if (product.isDraft) {
-      throw new BadRequestException('Draft products cannot be pushed to QuickBooks');
-    }
+    await this.getById(tenantId, id);
     const queued = await this.syncQueue.enqueueProductSync(tenantId, id);
     if (!queued) {
       throw new BadRequestException('QuickBooks is not connected');
     }
     return this.productsRepository.update(id, { syncStatus: 'PENDING' });
+  }
+
+  /**
+   * Mock QuickBooks sync — refreshes the local product cache from the mock
+   * catalog. Stock/prices are only ever updated via sync, never edited in the POS.
+   */
+  mockSync(tenantId: string): Promise<MockSyncSummary> {
+    return this.productsRepository.mockSync(tenantId);
   }
 
   /**
@@ -245,39 +202,14 @@ export class ProductsService {
     const num = (v: unknown): number | null => (v == null ? null : Number(v));
     return (
       before.name !== after.name ||
+      before.type !== after.type ||
       before.sku !== after.sku ||
       before.description !== after.description ||
+      before.purchaseDescription !== after.purchaseDescription ||
       num(before.unitPrice) !== num(after.unitPrice) ||
       num(before.costPrice) !== num(after.costPrice) ||
       before.isActive !== after.isActive
     );
-  }
-
-  /**
-   * Mock QuickBooks sync — refreshes the local product cache from the mock
-   * catalog. Stock/prices are only ever updated via sync, never edited in the POS.
-   */
-  mockSync(tenantId: string): Promise<MockSyncSummary> {
-    return this.productsRepository.mockSync(tenantId);
-  }
-
-  /** Read the persisted variation-wizard state for a product. */
-  async getVariationConfig(tenantId: string, id: string): Promise<{ config: unknown | null }> {
-    const product = await this.getById(tenantId, id);
-    return { config: product.variationConfig ?? null };
-  }
-
-  /** Persist the variation-wizard state verbatim (client-owned document). */
-  async saveVariationConfig(
-    tenantId: string,
-    id: string,
-    config: Record<string, unknown>,
-  ): Promise<{ config: unknown | null }> {
-    await this.getById(tenantId, id); // 404s for foreign/unknown products
-    const updated = await this.productsRepository.update(id, {
-      variationConfig: config as Prisma.InputJsonValue,
-    });
-    return { config: updated.variationConfig ?? null };
   }
 
   /**
@@ -320,11 +252,7 @@ export class ProductsService {
   private mapWriteError(err: unknown): Error {
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
       const target = (err.meta?.target as string[] | undefined)?.join(', ') ?? 'field';
-      const which = target.includes('sku')
-        ? 'SKU'
-        : target.includes('barcode')
-          ? 'barcode'
-          : 'value';
+      const which = target.includes('sku') ? 'SKU' : 'value';
       return new ConflictException(`A product with this ${which} already exists`);
     }
     return err instanceof Error ? err : new BadRequestException('Could not save product');

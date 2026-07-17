@@ -1,5 +1,7 @@
 import {
   IsBoolean,
+  IsDateString,
+  IsIn,
   IsNotEmpty,
   IsNumber,
   IsOptional,
@@ -8,42 +10,35 @@ import {
   Min,
 } from 'class-validator';
 
+/** QuickBooks item types (mirrors the QBO Products & Services template). */
+export const PRODUCT_TYPES = ['Inventory', 'NonInventory', 'Service'] as const;
+export type ProductType = (typeof PRODUCT_TYPES)[number];
+
+/**
+ * Mirrors the QuickBooks Products & Services fields: name, category, item
+ * type, SKU, sales description/price, purchase description/cost, quantity on
+ * hand + as-of date, and reorder point. The three QBO account names are
+ * auto-resolved during sync — never client input.
+ */
 export class CreateProductDto {
   @IsString()
   @IsNotEmpty()
   @MaxLength(200)
   name!: string;
 
+  @IsIn(PRODUCT_TYPES)
+  @IsOptional()
+  type?: ProductType;
+
   @IsString()
   @IsOptional()
   @MaxLength(80)
   sku?: string;
 
-  @IsString()
-  @IsOptional()
-  @MaxLength(80)
-  barcode?: string;
-
-  /** Batch grouping: family key shared by sibling batches (e.g. tile code "9122"). */
-  @IsString()
-  @IsOptional()
-  @MaxLength(80)
-  baseSku?: string;
-
-  /** Batch identifier within the baseSku family (e.g. "LT", "HL1"). */
-  @IsString()
-  @IsOptional()
-  @MaxLength(40)
-  batchCode?: string;
-
+  /** Sales description — appears on sales forms and receipts. */
   @IsString()
   @IsOptional()
   description?: string;
-
-  @IsString()
-  @IsOptional()
-  @MaxLength(120)
-  brand?: string;
 
   @IsString()
   @IsOptional()
@@ -53,15 +48,17 @@ export class CreateProductDto {
   @IsOptional()
   subcategoryId?: string;
 
-  @IsString()
-  @IsOptional()
-  @MaxLength(40)
-  unitType?: string;
-
+  /** Sales price/rate. */
   @IsNumber()
   @Min(0)
   unitPrice!: number;
 
+  /** Purchase description — what vendors see on purchase forms. */
+  @IsString()
+  @IsOptional()
+  purchaseDescription?: string;
+
+  /** Purchase cost. */
   @IsNumber()
   @Min(0)
   @IsOptional()
@@ -72,34 +69,18 @@ export class CreateProductDto {
   @IsOptional()
   quantityOnHand?: number;
 
+  /** The date the quantity on hand was counted (QBO "Quantity as of date"). */
+  @IsDateString()
+  @IsOptional()
+  quantityAsOfDate?: string;
+
+  /** Reorder point. */
   @IsNumber()
   @Min(0)
   @IsOptional()
   reorderLevel?: number;
 
-  @IsString()
-  @IsOptional()
-  @MaxLength(200)
-  imageAltText?: string;
-
-  @IsBoolean()
-  @IsOptional()
-  trackInventory?: boolean;
-
-  @IsBoolean()
-  @IsOptional()
-  taxable?: boolean;
-
-  @IsBoolean()
-  @IsOptional()
-  requiresWarehousePickup?: boolean;
-
   @IsBoolean()
   @IsOptional()
   isActive?: boolean;
-
-  /** Save as an unfinished draft — hidden from the POS until published. */
-  @IsBoolean()
-  @IsOptional()
-  isDraft?: boolean;
 }

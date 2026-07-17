@@ -5,19 +5,12 @@ import type { Paginated } from '@hardware-pos/shared';
 import { paginate } from '../../common/pagination';
 import { SettingsService } from '../settings/settings.service';
 import { ReceiptsRepository, SaleForReceipt } from './receipts.repository';
-import {
-  CustomerReceiptData,
-  renderCustomerReceipt,
-  renderWarehousePicking,
-  WarehousePickingData,
-} from './receipt-templates';
+import { CustomerReceiptData, renderCustomerReceipt } from './receipt-templates';
 import { QueryPrintJobsDto } from './dto/query-print-jobs.dto';
 
 export interface CustomerReceiptResult {
   receiptNumber: string;
-  warehousePickupRequired: boolean;
   printJob: PrintJob;
-  warehousePrintJob: PrintJob | null;
 }
 
 @Injectable()
@@ -29,11 +22,7 @@ export class ReceiptsService {
 
   // ── generation ─────────────────────────────────────────────────────────────
 
-  /**
-   * Generate the customer receipt. For a hardware POS the default is the customer
-   * receipt only; if any line's product requires warehouse pickup, a warehouse
-   * picking copy print job is created alongside it.
-   */
+  /** Generate the customer receipt for a completed sale. */
   async generateCustomer(
     tenantId: string,
     saleId: string,
@@ -58,45 +47,7 @@ export class ReceiptsService {
       createdByUserId: userId,
     });
 
-    const pickupItems = sale.items.filter((it) => it.product?.requiresWarehousePickup);
-    let warehousePrintJob: PrintJob | null = null;
-    if (pickupItems.length > 0) {
-      warehousePrintJob = await this.receiptsRepository.createPrintJob({
-        tenantId,
-        saleId: sale.id,
-        type: 'WAREHOUSE_PICKING',
-        html: renderWarehousePicking(this.toWarehouseData(sale, pickupItems)),
-        createdByUserId: userId,
-      });
-    }
-
-    return {
-      receiptNumber: receipt.receiptNumber,
-      warehousePickupRequired: pickupItems.length > 0,
-      printJob,
-      warehousePrintJob,
-    };
-  }
-
-  /** Generate (or reprint) the warehouse picking copy for the pickup items. */
-  async generateWarehouse(
-    tenantId: string,
-    saleId: string,
-    userId: string | null,
-  ): Promise<PrintJob> {
-    const sale = await this.loadCompletedSale(tenantId, saleId);
-    const pickupItems = sale.items.filter((it) => it.product?.requiresWarehousePickup);
-    if (pickupItems.length === 0) {
-      throw new BadRequestException('No items on this sale require warehouse pickup');
-    }
-
-    return this.receiptsRepository.createPrintJob({
-      tenantId,
-      saleId: sale.id,
-      type: 'WAREHOUSE_PICKING',
-      html: renderWarehousePicking(this.toWarehouseData(sale, pickupItems)),
-      createdByUserId: userId,
-    });
+    return { receiptNumber: receipt.receiptNumber, printJob };
   }
 
   // ── print jobs ─────────────────────────────────────────────────────────────
@@ -180,24 +131,6 @@ export class ReceiptsService {
       paymentStatus: sale.paymentStatus,
       payments: sale.payments.map((p) => ({ method: p.method, amount: Number(p.amount) })),
       footer,
-    };
-  }
-
-  private toWarehouseData(
-    sale: SaleForReceipt,
-    pickupItems: SaleForReceipt['items'],
-  ): WarehousePickingData {
-    return {
-      storeName: sale.tenant.name,
-      saleNumber: sale.saleNumber,
-      dateTime: this.formatDateTime(sale.completedAt ?? sale.createdAt),
-      customerName: sale.customer?.name ?? null,
-      items: pickupItems.map((it) => ({
-        name: it.productName,
-        sku: it.sku,
-        quantity: Number(it.quantity),
-        unitType: it.product?.unitType ?? null,
-      })),
     };
   }
 

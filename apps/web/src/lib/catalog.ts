@@ -10,19 +10,13 @@ export interface ClientProduct {
   id: string;
   name: string;
   sku: string | null;
-  barcode: string | null;
-  /** Batch family key (e.g. tile code "9122") — non-null marks a batch-tracked product. */
-  baseSku: string | null;
-  /** Batch identifier within the family (e.g. "LT"). */
-  batchCode: string | null;
+  /** QuickBooks item type: Inventory | NonInventory | Service. */
+  type: string;
   categoryName: string;
   subcategoryId: string | null;
   subcategoryName: string | null;
-  unitType: string | null;
   unitPrice: number;
   quantityOnHand: number;
-  requiresWarehousePickup: boolean;
-  imageUrl: string | null;
 }
 
 export interface ClientCustomer {
@@ -51,16 +45,11 @@ interface ApiProduct {
   id: string;
   name: string;
   sku: string | null;
-  barcode: string | null;
-  baseSku: string | null;
-  batchCode: string | null;
+  type: string;
   categoryId: string | null;
   subcategoryId: string | null;
-  unitType: string | null;
   unitPrice: string | number;
   quantityOnHand: string | number;
-  requiresWarehousePickup: boolean;
-  imageUrl: string | null;
 }
 
 interface ApiSubcategory {
@@ -104,17 +93,12 @@ function normalizeApi(
     id: p.id,
     name: p.name,
     sku: p.sku,
-    barcode: p.barcode,
-    baseSku: p.baseSku ?? null,
-    batchCode: p.batchCode ?? null,
+    type: p.type,
     categoryName: (p.categoryId && catNames.get(p.categoryId)) || 'Uncategorized',
     subcategoryId: p.subcategoryId ?? null,
     subcategoryName: (p.subcategoryId && subNames.get(p.subcategoryId)) || null,
-    unitType: p.unitType,
     unitPrice: Number(p.unitPrice),
     quantityOnHand: Number(p.quantityOnHand),
-    requiresWarehousePickup: p.requiresWarehousePickup,
-    imageUrl: p.imageUrl,
   };
 }
 
@@ -143,7 +127,7 @@ export function useCheckoutData(session: Session): CheckoutData {
     (async () => {
       try {
         const [prod, cats, settings] = await Promise.all([
-          api.get<{ items: ApiProduct[] }>('/products?pageSize=200&isDraft=false', auth),
+          api.get<{ items: ApiProduct[] }>('/products?pageSize=200', auth),
           api.get<ApiCategory[]>('/categories', auth),
           api.get<PosSettings>('/settings', auth),
         ]);

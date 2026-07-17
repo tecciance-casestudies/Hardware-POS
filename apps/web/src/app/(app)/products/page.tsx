@@ -2,10 +2,10 @@
 
 import Link from 'next/link';
 import * as React from 'react';
-import { Ban, FolderTree, PackagePlus, Pencil, RotateCcw, Search, Warehouse } from 'lucide-react';
+import { Ban, FileUp, FolderTree, PackagePlus, Pencil, RotateCcw, Search } from 'lucide-react';
 
+import { ImportProductsDialog } from '@/components/products/import-products-dialog';
 import { PageHeader } from '@/components/page-header';
-import { ProductImage } from '@/components/product-image';
 import { SyncBadge } from '@/components/quickbooks/sync-badge';
 import { Badge } from '@/components/ui/badge';
 import { Button, buttonVariants } from '@/components/ui/button';
@@ -31,7 +31,7 @@ import { cn, formatMoney } from '@/lib/utils';
 const PAGE_SIZES = [20, 30, 40, 50];
 
 function isLowStock(p: ManagedProduct): boolean {
-  return p.trackInventory && p.reorderLevel != null && p.quantityOnHand <= p.reorderLevel;
+  return p.type === 'Inventory' && p.reorderLevel != null && p.quantityOnHand <= p.reorderLevel;
 }
 
 export default function ProductsPage() {
@@ -55,6 +55,7 @@ export default function ProductsPage() {
   const [error, setError] = React.useState<string | null>(null);
   const [busyId, setBusyId] = React.useState<string | null>(null);
   const [reloadKey, setReloadKey] = React.useState(0);
+  const [importOpen, setImportOpen] = React.useState(false);
 
   React.useEffect(() => {
     const t = window.setTimeout(() => setDebouncedSearch(search.trim()), 300);
@@ -134,10 +135,16 @@ export default function ProductsPage() {
               Categories
             </Link>
             {canManage ? (
-              <Link href="/products/new" className={buttonVariants()}>
-                <PackagePlus className="h-4 w-4" />
-                Add product
-              </Link>
+              <>
+                <Button variant="outline" onClick={() => setImportOpen(true)}>
+                  <FileUp className="h-4 w-4" />
+                  Import
+                </Button>
+                <Link href="/products/new" className={buttonVariants()}>
+                  <PackagePlus className="h-4 w-4" />
+                  Add product
+                </Link>
+              </>
             ) : null}
           </div>
         }
@@ -150,7 +157,7 @@ export default function ProductsPage() {
           <Input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search name, SKU, or barcode…"
+            placeholder="Search name or SKU…"
             className="pl-10"
           />
         </div>
@@ -249,36 +256,33 @@ export default function ProductsPage() {
                 rows.map((p) => (
                   <tr key={p.id} className="border-b border-border last:border-0 hover:bg-muted/30">
                     <td className="px-4 py-3">
-                      <div className="flex items-center gap-3">
-                        <ProductImage src={p.imageUrl} alt={p.name} className="h-11 w-11 shrink-0" />
-                        <div className="min-w-0">
-                          <Link
-                            href={`/products/${p.id}`}
-                            className="font-medium text-foreground hover:text-primary hover:underline"
-                          >
-                            {p.name}
-                          </Link>
-                          <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                            {p.brand ? <span>{p.brand}</span> : null}
-                            {p.requiresWarehousePickup ? (
-                              <span className="inline-flex items-center gap-0.5">
-                                <Warehouse className="h-3 w-3" /> Warehouse
-                              </span>
-                            ) : null}
-                          </div>
+                      <div className="min-w-0">
+                        <Link
+                          href={`/products/${p.id}`}
+                          className="font-medium text-foreground hover:text-primary hover:underline"
+                        >
+                          {p.name}
+                        </Link>
+                        <div className="text-xs text-muted-foreground">
+                          {p.type === 'NonInventory' ? 'Non-Inventory' : p.type}
                         </div>
                       </div>
                     </td>
                     <td className="px-4 py-3 text-muted-foreground">{p.sku ?? '—'}</td>
                     <td className="px-4 py-3 text-right font-medium">{formatMoney(p.unitPrice)}</td>
                     <td className="px-4 py-3 text-right">
-                      <span className={cn(p.quantityOnHand <= 0 && 'font-medium text-danger')}>
-                        {p.quantityOnHand}
-                        {p.unitType ? ` ${p.unitType}` : ''}
-                      </span>
-                      {isLowStock(p) && p.quantityOnHand > 0 ? (
-                        <div className="text-xs text-warning">Low</div>
-                      ) : null}
+                      {p.type === 'Inventory' ? (
+                        <>
+                          <span className={cn(p.quantityOnHand <= 0 && 'font-medium text-danger')}>
+                            {p.quantityOnHand}
+                          </span>
+                          {isLowStock(p) && p.quantityOnHand > 0 ? (
+                            <div className="text-xs text-warning">Low</div>
+                          ) : null}
+                        </>
+                      ) : (
+                        <span className="text-muted-foreground">—</span>
+                      )}
                     </td>
                     <td className="px-4 py-3">
                       {p.quickbooksItemId ? (
@@ -289,7 +293,6 @@ export default function ProductsPage() {
                     </td>
                     <td className="px-4 py-3">
                       <div className="flex flex-col items-start gap-1">
-                        {p.isDraft ? <Badge variant="warning">Draft</Badge> : null}
                         {!p.isActive ? <Badge variant="danger">Inactive</Badge> : null}
                         <SyncBadge status={p.syncStatus} />
                       </div>
@@ -383,6 +386,14 @@ export default function ProductsPage() {
           </div>
         </div>
       </div>
+      {session ? (
+        <ImportProductsDialog
+          session={session}
+          open={importOpen}
+          onClose={() => setImportOpen(false)}
+          onImported={() => setReloadKey((k) => k + 1)}
+        />
+      ) : null}
     </div>
   );
 }

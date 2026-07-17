@@ -62,6 +62,7 @@ export interface ComputedLine {
   productName: string;
   sku: string | null;
   /** Whether the sale should decrement the product's on-hand stock. */
+  /** Derived from the QBO item type: only Inventory items decrement stock. */
   trackInventory: boolean;
   unitPrice: number;
   quantity: number;

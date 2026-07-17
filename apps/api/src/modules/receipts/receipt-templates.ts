@@ -33,22 +33,7 @@ export interface CustomerReceiptData {
   footer: string;
 }
 
-export interface PickingLine {
-  name: string;
-  sku: string | null;
-  quantity: number;
-  unitType: string | null;
-}
-
-export interface WarehousePickingData {
-  storeName: string;
-  saleNumber: string;
-  dateTime: string;
-  customerName: string | null;
-  items: PickingLine[];
-}
-
-function esc(value: unknown): string {
+export function esc(value: unknown): string {
   return String(value ?? '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
@@ -125,53 +110,6 @@ export function renderCustomerReceipt(d: CustomerReceiptData): string {
       ${payments}
     </div>
     <div class="foot">${esc(d.footer)}</div>
-  </div>
-</body></html>`;
-}
-
-export function renderWarehousePicking(d: WarehousePickingData): string {
-  const rows = d.items
-    .map(
-      (it, i) => `
-      <tr>
-        <td class="r">${i + 1}</td>
-        <td>${esc(it.name)}</td>
-        <td>${esc(it.sku ?? '')}</td>
-        <td class="r">${it.quantity} ${esc(it.unitType ?? '')}</td>
-        <td class="pick">☐</td>
-      </tr>`,
-    )
-    .join('');
-
-  return `<!doctype html>
-<html><head><meta charset="utf-8"><title>Warehouse Picking ${esc(d.saleNumber)}</title>
-<style>
-  * { box-sizing: border-box; }
-  body { font-family: Arial, Helvetica, sans-serif; color: #111; margin: 0; padding: 24px; }
-  .doc { max-width: 640px; margin: 0 auto; }
-  .banner { background: #1d4ed8; color: #fff; padding: 8px 12px; font-weight: bold; letter-spacing: 1px; }
-  h1 { font-size: 20px; margin: 12px 0 2px; }
-  .meta { color: #444; font-size: 13px; margin-bottom: 16px; }
-  table { width: 100%; border-collapse: collapse; font-size: 14px; }
-  th, td { border: 1px solid #bbb; padding: 8px; text-align: left; }
-  th { background: #f1f5f9; }
-  .r { text-align: right; }
-  .pick { text-align: center; font-size: 18px; width: 48px; }
-  .sign { margin-top: 32px; font-size: 13px; color: #333; }
-  .print-btn { display:block; margin:0 0 16px; padding:8px 16px; font-size:14px; cursor:pointer; }
-  @media print { .no-print { display: none; } body { padding: 0; } }
-</style></head>
-<body>
-  ${PRINT_BUTTON}
-  <div class="doc">
-    <div class="banner">WAREHOUSE PICKING COPY — NOT A RECEIPT</div>
-    <h1>${esc(d.storeName)}</h1>
-    <div class="meta">Sale ${esc(d.saleNumber)} · ${esc(d.dateTime)}${d.customerName ? ` · Customer: ${esc(d.customerName)}` : ''}</div>
-    <table>
-      <thead><tr><th class="r">#</th><th>Item</th><th>SKU</th><th class="r">Qty</th><th>Picked</th></tr></thead>
-      <tbody>${rows}</tbody>
-    </table>
-    <div class="sign">Picked by: ______________________ &nbsp;&nbsp; Checked by: ______________________ &nbsp;&nbsp; Date: ____________</div>
   </div>
 </body></html>`;
 }

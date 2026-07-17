@@ -5,13 +5,19 @@ export interface QboItem {
   Name: string;
   Sku?: string;
   Description?: string;
+  PurchaseDesc?: string;
   UnitPrice?: number;
   PurchaseCost?: number;
   QtyOnHand?: number;
+  /** The date QtyOnHand was established (YYYY-MM-DD). */
+  InvStartDate?: string;
   Type?: string;
   Active?: boolean;
   SubItem?: boolean;
   ParentRef?: { value: string; name?: string };
+  IncomeAccountRef?: { value: string; name?: string };
+  ExpenseAccountRef?: { value: string; name?: string };
+  AssetAccountRef?: { value: string; name?: string };
   /** Optimistic-concurrency token required by QBO for updates. */
   SyncToken?: string;
 }

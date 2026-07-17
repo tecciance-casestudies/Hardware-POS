@@ -3,45 +3,34 @@
 /**
  * Product-wizard draft persistence (wizard progress only).
  *
- * "Save draft" persists the product itself server-side (POST/PATCH /products
- * with isDraft: true), so drafts survive across browsers and appear in the
- * products table. This module only keeps the wizard's local progress — form
- * fields, product type, current step, and the id of the server draft — so a
- * refresh or accidental navigation resumes exactly where the user left off.
- * Components never touch localStorage directly.
+ * Saves the in-progress wizard (form fields + current step) to localStorage so
+ * a refresh or accidental navigation doesn't lose work. Components never touch
+ * localStorage directly.
  */
 
 const LS_PREFIX = 'hpos.productDraft.';
 
+/** Mirrors the wizard FormState (QuickBooks Products & Services fields). */
 export interface ProductDraftFields {
   name: string;
+  type: 'Inventory' | 'NonInventory' | 'Service';
   sku: string;
-  barcode: string;
-  baseSku: string;
-  batchCode: string;
-  brand: string;
   categoryId: string;
   subcategoryId: string;
-  unitType: string;
+  description: string;
   unitPrice: string;
+  purchaseDescription: string;
   costPrice: string;
   quantityOnHand: string;
+  quantityAsOfDate: string;
   reorderLevel: string;
-  description: string;
-  imageAltText: string;
-  trackInventory: boolean;
-  taxable: boolean;
-  requiresWarehousePickup: boolean;
   isActive: boolean;
 }
 
 export interface ProductDraft {
   fields: ProductDraftFields;
-  productType: 'simple' | 'variations';
   step: number;
   savedAt: string;
-  /** Server product id created by "Save draft" — re-saves update it in place. */
-  serverProductId?: string | null;
 }
 
 function keyFor(productId: string | null | undefined): string {
@@ -58,10 +47,7 @@ export const productDraftService = {
     }
   },
 
-  save(
-    productId: string | null | undefined,
-    draft: Omit<ProductDraft, 'savedAt'>,
-  ): string {
+  save(productId: string | null | undefined, draft: Omit<ProductDraft, 'savedAt'>): string {
     const savedAt = new Date().toISOString();
     try {
       localStorage.setItem(keyFor(productId), JSON.stringify({ ...draft, savedAt }));
@@ -74,19 +60,6 @@ export const productDraftService = {
   clear(productId: string | null | undefined): void {
     try {
       localStorage.removeItem(keyFor(productId));
-    } catch {
-      /* ignore */
-    }
-  },
-
-  /** Move a "new" draft onto a real product id after creation (parity with variations). */
-  promoteDraft(productId: string): void {
-    try {
-      const draft = localStorage.getItem(keyFor(null));
-      if (draft) localStorage.removeItem(keyFor(null));
-      // Intentionally not copied onto the created product — it's now server-backed.
-      void productId;
-      void draft;
     } catch {
       /* ignore */
     }

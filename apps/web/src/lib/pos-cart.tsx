@@ -139,8 +139,7 @@ export function PosCartProvider({ children }: { children: React.ReactNode }) {
             if (
               cur.quantityOnHand === fresh.quantityOnHand &&
               cur.unitPrice === fresh.unitPrice &&
-              cur.name === fresh.name &&
-              cur.imageUrl === fresh.imageUrl
+              cur.name === fresh.name
             ) {
               return it;
             }

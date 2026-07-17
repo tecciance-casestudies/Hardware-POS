@@ -41,7 +41,7 @@ interface DocLine {
 }
 
 const saleForBill = {
-  items: { include: { product: { select: { unitType: true } } } },
+  items: true,
   payments: true,
   customer: true,
   branch: { select: { name: true, address: true, phone: true } },
@@ -206,7 +206,7 @@ export class DocumentsService {
       sku: it.sku,
       description: null,
       quantity: num(it.quantity),
-      unitType: it.product?.unitType ?? null,
+      unitType: null,
       unitPrice: num(it.unitPrice),
       discountAmount: num(it.discountAmount),
       taxAmount: num(it.taxAmount),

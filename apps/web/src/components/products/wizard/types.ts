@@ -1,60 +1,55 @@
-import type { ManagedProduct } from '@/lib/products-api';
+import type { ManagedProduct, ProductItemType } from '@/lib/products-api';
 
-/** Plain product fields (unchanged from the original form — reused verbatim). */
+/**
+ * Product form fields — mirrors the QuickBooks Products & Services template:
+ * name, category, item type, SKU, sales description/price, purchase
+ * description/cost, quantity on hand + as-of date, and reorder point. The
+ * three QBO account names are auto-resolved server-side (read-only here).
+ */
 export interface FormState {
   name: string;
+  type: ProductItemType;
   sku: string;
-  barcode: string;
-  /** Batch family key (e.g. tile code "9122") — groups sibling batches at the POS. */
-  baseSku: string;
-  /** Batch identifier within the family (e.g. "LT", "HL1"). */
-  batchCode: string;
-  brand: string;
   categoryId: string;
   subcategoryId: string;
-  unitType: string;
+  /** Sales description. */
+  description: string;
+  /** Sales price/rate. */
   unitPrice: string;
+  /** Purchase description. */
+  purchaseDescription: string;
+  /** Purchase cost. */
   costPrice: string;
   quantityOnHand: string;
+  /** Quantity as of date (YYYY-MM-DD). */
+  quantityAsOfDate: string;
+  /** Reorder point. */
   reorderLevel: string;
-  description: string;
-  imageAltText: string;
-  trackInventory: boolean;
-  taxable: boolean;
-  requiresWarehousePickup: boolean;
   isActive: boolean;
 }
+
+const today = (): string => new Date().toISOString().slice(0, 10);
 
 export function initialFormState(p?: ManagedProduct): FormState {
   return {
     name: p?.name ?? '',
+    type: p?.type ?? 'Inventory',
     sku: p?.sku ?? '',
-    barcode: p?.barcode ?? '',
-    baseSku: p?.baseSku ?? '',
-    batchCode: p?.batchCode ?? '',
-    brand: p?.brand ?? '',
     categoryId: p?.categoryId ?? '',
     subcategoryId: p?.subcategoryId ?? '',
-    unitType: p?.unitType ?? '',
+    description: p?.description ?? '',
     unitPrice: p ? String(p.unitPrice) : '',
+    purchaseDescription: p?.purchaseDescription ?? '',
     costPrice: p?.costPrice != null ? String(p.costPrice) : '',
     quantityOnHand: p ? String(p.quantityOnHand) : '0',
+    quantityAsOfDate: p?.quantityAsOfDate ? p.quantityAsOfDate.slice(0, 10) : today(),
     reorderLevel: p?.reorderLevel != null ? String(p.reorderLevel) : '',
-    description: p?.description ?? '',
-    imageAltText: p?.imageAltText ?? '',
-    trackInventory: p?.trackInventory ?? true,
-    taxable: p?.taxable ?? true,
-    requiresWarehousePickup: p?.requiresWarehousePickup ?? false,
     isActive: p?.isActive ?? true,
   };
 }
 
 export const numOrNull = (s: string): number | null => (s.trim() === '' ? null : Number(s));
 
-export type ProductType = 'simple' | 'variations';
-
-/** The simplified three-step flow. Variations live inside `pricing` (revealed by
- *  a toggle) rather than as their own step, and there is no separate type step. */
 export type StepKey = 'details' | 'pricing' | 'review';
 
 export type StepStatus = 'todo' | 'current' | 'complete' | 'attention' | 'optional';

@@ -6,7 +6,7 @@ import { PaginationQueryDto } from '../../../common/dto/pagination-query.dto';
 export type StockStatus = 'IN' | 'OUT';
 
 export class QueryProductsDto extends PaginationQueryDto {
-  /** Free-text search across name, SKU, and barcode. */
+  /** Free-text search across name and SKU. */
   @IsString()
   @IsOptional()
   search?: string;
@@ -27,10 +27,10 @@ export class QueryProductsDto extends PaginationQueryDto {
   @IsOptional()
   isActive?: string;
 
-  /** Filter drafts in ('true') or out ('false'); omit to include both. */
-  @IsIn(['true', 'false'])
+  /** QuickBooks item type filter. */
+  @IsIn(['Inventory', 'NonInventory', 'Service'])
   @IsOptional()
-  isDraft?: string;
+  type?: string;
 
   @IsEnum(SyncStatus)
   @IsOptional()
