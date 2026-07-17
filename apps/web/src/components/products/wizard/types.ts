@@ -5,6 +5,10 @@ export interface FormState {
   name: string;
   sku: string;
   barcode: string;
+  /** Batch family key (e.g. tile code "9122") — groups sibling batches at the POS. */
+  baseSku: string;
+  /** Batch identifier within the family (e.g. "LT", "HL1"). */
+  batchCode: string;
   brand: string;
   categoryId: string;
   subcategoryId: string;
@@ -26,6 +30,8 @@ export function initialFormState(p?: ManagedProduct): FormState {
     name: p?.name ?? '',
     sku: p?.sku ?? '',
     barcode: p?.barcode ?? '',
+    baseSku: p?.baseSku ?? '',
+    batchCode: p?.batchCode ?? '',
     brand: p?.brand ?? '',
     categoryId: p?.categoryId ?? '',
     subcategoryId: p?.subcategoryId ?? '',

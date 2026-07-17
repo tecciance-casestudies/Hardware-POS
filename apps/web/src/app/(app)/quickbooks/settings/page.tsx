@@ -80,7 +80,9 @@ export default function QuickBooksSettingsPage() {
 
         <div className="flex items-center gap-3 pt-2">
           <Button disabled={!canManage}>Save settings</Button>
-          <span className="text-xs text-muted-foreground">Settings are simulated for now.</span>
+          <span className="text-xs text-muted-foreground">
+            Saving sync preferences is not wired to the server yet.
+          </span>
         </div>
       </CardContent>
     </Card>

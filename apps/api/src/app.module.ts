@@ -28,6 +28,7 @@ import { SyncModule } from './modules/sync/sync.module';
 import { SettingsModule } from './modules/settings/settings.module';
 import { AuditLogModule } from './modules/audit-log/audit-log.module';
 import { DashboardModule } from './modules/dashboard/dashboard.module';
+import { BranchesModule } from './modules/branches/branches.module';
 
 @Module({
   imports: [
@@ -52,6 +53,7 @@ import { DashboardModule } from './modules/dashboard/dashboard.module';
     SettingsModule,
     AuditLogModule,
     DashboardModule,
+    BranchesModule,
   ],
   providers: [
     // Order matters: authenticate first (populates request.user), then authorize.

@@ -3,10 +3,24 @@ import type { SaleReturnStatusCode } from '@hardware-pos/shared';
 
 import type { ClientProduct } from '@/lib/catalog';
 import type { QuotationListItem } from '@/lib/quotations';
-import type { DashboardStats } from '@/lib/dashboard-api';
+import type {
+  DashboardStats,
+  PaymentMethodTotal,
+  RankedCategoryApi,
+  RankedProductApi,
+  ShiftSummaryApi,
+} from '@/lib/dashboard-api';
 import type { PaymentStatusCode, SyncStatusCode } from '@/lib/sales';
 
-import type { PipelineStage, QuickBooksHealth } from './types';
+import type {
+  BreakdownRow,
+  FrequentItem,
+  MetricComparison,
+  PipelineStage,
+  QuickBooksHealth,
+  RankedRow,
+  ShiftSummary,
+} from './types';
 
 export const LOW_STOCK_THRESHOLD = 5;
 
@@ -125,4 +139,102 @@ export function syncStatusMeta(status: SyncStatusCode): {
     default:
       return { label: 'Not synced', tone: 'muted' };
   }
+}
+
+// ── real-aggregate view-model builders (replacing the demo adapters) ─────────
+
+/** Percentage change vs the previous window; undefined when there's no baseline. */
+export function buildComparison(
+  value: number,
+  prevValue: number,
+  label = 'vs previous 7 days',
+): MetricComparison | undefined {
+  if (prevValue <= 0) return undefined;
+  const pct = ((value - prevValue) / prevValue) * 100;
+  return {
+    value: Math.round(pct * 10) / 10,
+    direction: pct > 0.5 ? 'up' : pct < -0.5 ? 'down' : 'neutral',
+    label,
+  };
+}
+
+const PAYMENT_LABELS: Record<string, { label: string; tone: BreakdownRow['tone'] }> = {
+  CASH: { label: 'Cash', tone: 'cash' },
+  CARD: { label: 'Card', tone: 'card' },
+  BANK_TRANSFER: { label: 'Bank transfer', tone: 'bank' },
+  QR_PAYMENT: { label: 'QR payment', tone: 'qr' },
+  CHECK: { label: 'Cheque', tone: 'other' },
+  STORE_CREDIT: { label: 'Store credit', tone: 'credit' },
+};
+
+export function buildPaymentBreakdown(totals: PaymentMethodTotal[]): BreakdownRow[] {
+  const sum = totals.reduce((n, t) => n + t.amount, 0);
+  return [...totals]
+    .sort((a, b) => b.amount - a.amount)
+    .map((t) => {
+      const meta = PAYMENT_LABELS[t.method] ?? { label: t.method, tone: 'other' as const };
+      return {
+        key: t.method,
+        label: meta.label,
+        amount: t.amount,
+        percent: sum > 0 ? Math.round((t.amount / sum) * 100) : 0,
+        tone: meta.tone,
+      };
+    });
+}
+
+export function buildTopCategoryRows(categories: RankedCategoryApi[]): RankedRow[] {
+  const max = categories.reduce((m, c) => Math.max(m, c.amount), 0);
+  return categories.map((c) => ({
+    key: c.label,
+    label: c.label,
+    amount: c.amount,
+    percent: max > 0 ? Math.round((c.amount / max) * 100) : 0,
+  }));
+}
+
+export function buildFrequentItems(products: RankedProductApi[]): FrequentItem[] {
+  return products.map((p) => ({
+    key: p.productId ?? p.name,
+    name: p.name,
+    imageUrl: p.imageUrl,
+    quantity: p.quantity,
+    amount: p.amount,
+  }));
+}
+
+/**
+ * Shift view from the cashier's real activity. There is no drawer-session
+ * feature yet, so the drawer starts at zero and never records counts —
+ * expected cash equals cash sales minus refunds and the difference is 0.
+ */
+export function buildShiftSummary(api: ShiftSummaryApi | null): ShiftSummary {
+  if (!api) {
+    return {
+      isOpen: false,
+      startedAtLabel: 'No sales yet today',
+      startingCash: 0,
+      cashSales: 0,
+      cardSales: 0,
+      bankQrSales: 0,
+      refunds: 0,
+      expectedCash: 0,
+      drawerBalance: 0,
+      difference: 0,
+    };
+  }
+  return {
+    isOpen: api.startedAt != null,
+    startedAtLabel: api.startedAt
+      ? new Date(api.startedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      : 'No sales yet today',
+    startingCash: 0,
+    cashSales: api.cashSales,
+    cardSales: api.cardSales,
+    bankQrSales: api.bankQrSales,
+    refunds: api.refunds,
+    expectedCash: api.expectedCash,
+    drawerBalance: api.expectedCash,
+    difference: 0,
+  };
 }

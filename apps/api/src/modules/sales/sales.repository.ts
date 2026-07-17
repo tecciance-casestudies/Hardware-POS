@@ -6,7 +6,14 @@ import { SyncQueueService } from '../sync/queue/sync-queue.service';
 import { ComputedLine, PersistSaleInput, SalesListFilter } from './sales.types';
 
 export type SaleWithRelations = Prisma.SaleGetPayload<{
-  include: { items: true; payments: true; customer: true };
+  include: {
+    items: true;
+    payments: true;
+    customer: true;
+    branch: { select: { id: true; name: true; code: true; address: true; phone: true } };
+    register: { select: { id: true; name: true; code: true } };
+    cashier: { select: { id: true; name: true } };
+  };
 }>;
 
 /** Sale row for the history list: base fields + names, payment methods, item count. */
@@ -19,7 +26,14 @@ export type SaleListRow = Prisma.SaleGetPayload<{
   };
 }>;
 
-const saleInclude = { items: true, payments: true, customer: true } as const;
+const saleInclude = {
+  items: true,
+  payments: true,
+  customer: true,
+  branch: { select: { id: true, name: true, code: true, address: true, phone: true } },
+  register: { select: { id: true, name: true, code: true } },
+  cashier: { select: { id: true, name: true } },
+} as const;
 
 const saleListInclude = {
   customer: { select: { name: true } },

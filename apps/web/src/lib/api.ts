@@ -62,14 +62,27 @@ async function doRefresh(): Promise<string | null> {
       body: JSON.stringify({ refreshToken: session.refreshToken }),
     });
     if (!res.ok) return null;
-    const json = (await res.json()) as {
-      data?: { token: string; refreshToken: string };
-      token?: string;
-      refreshToken?: string;
-    };
-    const data = json.data ?? (json as { token: string; refreshToken: string });
+    interface RefreshPayload {
+      token: string;
+      refreshToken: string;
+      branch?: { id: string; name: string } | null;
+      register?: { id: string; name: string } | null;
+    }
+    const json = (await res.json()) as { data?: RefreshPayload } & Partial<RefreshPayload>;
+    const data = json.data ?? (json as RefreshPayload);
     if (!data.token || !data.refreshToken) return null;
-    const next: Session = { ...session, token: data.token, refreshToken: data.refreshToken };
+    const next: Session = {
+      ...session,
+      token: data.token,
+      refreshToken: data.refreshToken,
+      // Keep the session's location current (branch/register may be reassigned).
+      ...(data.branch !== undefined
+        ? { branchId: data.branch?.id ?? null, branchName: data.branch?.name ?? 'No branch assigned' }
+        : {}),
+      ...(data.register !== undefined
+        ? { registerId: data.register?.id ?? null, registerName: data.register?.name ?? '—' }
+        : {}),
+    };
     saveSession(next);
     return data.token;
   } catch {

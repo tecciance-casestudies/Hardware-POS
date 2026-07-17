@@ -1,10 +1,9 @@
 'use client';
 
-import { useRouter } from 'next/navigation';
+import * as React from 'react';
 import { CheckCircle2, Link2, ShieldCheck } from 'lucide-react';
 
 import { CurrencyMismatchWarning } from '@/components/quickbooks/currency-warning';
-import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { useAuth } from '@/lib/auth';
@@ -12,10 +11,33 @@ import { Permission } from '@/lib/permissions';
 import { formatQbTime, useQuickBooks } from '@/lib/quickbooks';
 
 export default function QuickBooksConnectPage() {
-  const { state, connect, disconnect } = useQuickBooks();
+  const { state, loading, connect, disconnect } = useQuickBooks();
   const { hasPermission } = useAuth();
-  const router = useRouter();
   const canManage = hasPermission(Permission.QUICKBOOKS_MANAGE);
+
+  const [redirecting, setRedirecting] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+
+  const handleConnect = async () => {
+    setRedirecting(true);
+    setError(null);
+    try {
+      await connect(); // navigates the browser to Intuit on success
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not start the QuickBooks connection');
+      setRedirecting(false);
+    }
+  };
+
+  if (loading) {
+    return (
+      <Card className="max-w-xl">
+        <CardContent className="py-16 text-center text-sm text-muted-foreground">
+          Loading QuickBooks status…
+        </CardContent>
+      </Card>
+    );
+  }
 
   if (state.connected && state.company) {
     return (
@@ -28,7 +50,7 @@ export default function QuickBooksConnectPage() {
             <div>
               <div className="font-semibold">Connected</div>
               <div className="text-sm text-muted-foreground">
-                {state.company.name} · {state.company.currency} · connected{' '}
+                {state.company.name} · {state.company.currency ?? '—'} · connected{' '}
                 {formatQbTime(state.connectedAtISO)}
               </div>
             </div>
@@ -54,8 +76,8 @@ export default function QuickBooksConnectPage() {
       </CardHeader>
       <CardContent className="space-y-5">
         <p className="text-sm text-muted-foreground">
-          You will be redirected to QuickBooks to authorize access. The POS reads products, prices,
-          and stock, and writes sales receipts, invoices, and payments back to QuickBooks.
+          You will be redirected to Intuit to sign in and authorize access. The POS reads products,
+          prices, and stock, and writes sales receipts, invoices, and payments back to QuickBooks.
         </p>
 
         <ul className="space-y-2 text-sm">
@@ -69,23 +91,11 @@ export default function QuickBooksConnectPage() {
           )}
         </ul>
 
-        <div className="flex items-center gap-2">
-          <Badge variant="warning">Sandbox</Badge>
-          <span className="text-xs text-muted-foreground">
-            Simulated connection — real OAuth is not implemented yet.
-          </span>
-        </div>
+        {error ? <p className="text-sm text-danger">{error}</p> : null}
 
-        <Button
-          size="lg"
-          disabled={!canManage}
-          onClick={() => {
-            connect();
-            router.push('/quickbooks');
-          }}
-        >
+        <Button size="lg" disabled={!canManage || redirecting} onClick={handleConnect}>
           <Link2 className="h-4 w-4" />
-          Connect QuickBooks
+          {redirecting ? 'Redirecting to Intuit…' : 'Connect QuickBooks'}
         </Button>
         {!canManage ? (
           <p className="text-xs text-muted-foreground">

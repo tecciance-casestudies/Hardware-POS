@@ -431,6 +431,14 @@ model Product {
   name                    String
   sku                     String?
   barcode                 String?
+  /// Grouping key for batch-tracked stock (e.g. tile code "9122"): products
+  /// sharing a baseSku are batches of one sellable, picked manually at the POS.
+  baseSku                 String?
+  /// Batch identifier within the baseSku family (e.g. "LT", "HL1").
+  batchCode               String?
+  /// Product-variation wizard state (attributes, price mode, generated
+  /// variants) — persisted verbatim for the web client.
+  variationConfig         Json?
   description             String?
   brand                   String?
   categoryId              String?
@@ -462,8 +470,10 @@ model Product {
   @@unique([tenantId, quickbooksItemId])
   @@unique([tenantId, sku])
   @@unique([tenantId, barcode])
+  @@unique([tenantId, baseSku, batchCode])
   @@index([tenantId])
   @@index([tenantId, name])
+  @@index([tenantId, baseSku])
   @@index([categoryId])
   @@index([subcategoryId])
 }

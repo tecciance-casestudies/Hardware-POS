@@ -3,7 +3,20 @@
 import * as React from 'react';
 
 import type { Session } from '@/lib/auth';
-import { fetchDashboardStats, type DashboardStats } from '@/lib/dashboard-api';
+import {
+  fetchDashboardStats,
+  fetchDashboardSummary,
+  fetchPaymentMethods,
+  fetchShiftSummary,
+  fetchTopCategories,
+  fetchTopProducts,
+  type DashboardStats,
+  type DashboardSummary,
+  type PaymentMethodTotal,
+  type RankedCategoryApi,
+  type RankedProductApi,
+  type ShiftSummaryApi,
+} from '@/lib/dashboard-api';
 import { fetchProducts } from '@/lib/products-api';
 import { fetchQuotations, type QuotationListItem } from '@/lib/quotations';
 import { fetchSales, type SaleListItem } from '@/lib/sales';
@@ -25,6 +38,15 @@ export interface DashboardData {
   stock: ReturnType<typeof summarizeStock>;
   pipeline: ReturnType<typeof buildQuotationPipeline>;
   quickbooks: ReturnType<typeof buildQuickBooksHealth>;
+  /** 7-day KPI window with previous-period comparison (real aggregates). */
+  summary: DashboardSummary | null;
+  /** Payment split — tenant-wide for admin, the user's own for cashier. */
+  paymentMethods: PaymentMethodTotal[];
+  topCategories: RankedCategoryApi[];
+  /** Cashier variant only: the user's best-selling items. */
+  frequentItems: RankedProductApi[];
+  /** Cashier variant only: today's own activity. */
+  shift: ShiftSummaryApi | null;
 }
 
 /**
@@ -33,11 +55,19 @@ export interface DashboardData {
  * `Promise.allSettled` so one failing panel never blanks the whole page. Polls
  * while the tab is visible and exposes a manual `refresh()`.
  */
-export function useDashboardData(session: Session): DashboardData {
+export function useDashboardData(
+  session: Session,
+  variant: 'admin' | 'cashier' = 'admin',
+): DashboardData {
   const [stats, setStats] = React.useState<DashboardStats | null>(null);
   const [recentSales, setRecentSales] = React.useState<SaleListItem[]>([]);
   const [quotations, setQuotations] = React.useState<QuotationListItem[]>([]);
   const [products, setProducts] = React.useState<{ quantityOnHand: number }[]>([]);
+  const [summary, setSummary] = React.useState<DashboardSummary | null>(null);
+  const [paymentMethods, setPaymentMethods] = React.useState<PaymentMethodTotal[]>([]);
+  const [topCategories, setTopCategories] = React.useState<RankedCategoryApi[]>([]);
+  const [frequentItems, setFrequentItems] = React.useState<RankedProductApi[]>([]);
+  const [shift, setShift] = React.useState<ShiftSummaryApi | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
   const [lastUpdatedLabel, setLastUpdatedLabel] = React.useState<string | null>(null);
@@ -47,13 +77,29 @@ export function useDashboardData(session: Session): DashboardData {
 
   React.useEffect(() => {
     let cancelled = false;
+    const mine = variant === 'cashier';
 
     const load = async () => {
-      const [statsRes, salesRes, quotesRes, productsRes] = await Promise.allSettled([
+      const [
+        statsRes,
+        salesRes,
+        quotesRes,
+        productsRes,
+        summaryRes,
+        paymentsRes,
+        categoriesRes,
+        frequentRes,
+        shiftRes,
+      ] = await Promise.allSettled([
         fetchDashboardStats(session),
         fetchSales(session, { pageSize: 8 }),
         fetchQuotations(session, { pageSize: 100 }),
         fetchProducts(session, { pageSize: 200 }),
+        fetchDashboardSummary(session),
+        fetchPaymentMethods(session, { mine }),
+        fetchTopCategories(session, 5),
+        mine ? fetchTopProducts(session, { limit: 6, mine: true }) : Promise.resolve([]),
+        mine ? fetchShiftSummary(session) : Promise.resolve(null),
       ]);
       if (cancelled) return;
 
@@ -61,16 +107,20 @@ export function useDashboardData(session: Session): DashboardData {
       if (salesRes.status === 'fulfilled') setRecentSales(salesRes.value.items);
       if (quotesRes.status === 'fulfilled') setQuotations(quotesRes.value.items);
       if (productsRes.status === 'fulfilled') setProducts(productsRes.value.items);
+      if (summaryRes.status === 'fulfilled') setSummary(summaryRes.value);
+      if (paymentsRes.status === 'fulfilled') setPaymentMethods(paymentsRes.value);
+      if (categoriesRes.status === 'fulfilled') setTopCategories(categoriesRes.value);
+      if (frequentRes.status === 'fulfilled') setFrequentItems(frequentRes.value);
+      if (shiftRes.status === 'fulfilled') setShift(shiftRes.value);
 
       // Only surface an error banner when everything failed — a single failed
       // panel degrades to its own empty/error state instead.
-      const allFailed = [statsRes, salesRes, quotesRes, productsRes].every(
-        (r) => r.status === 'rejected',
-      );
+      const core = [statsRes, salesRes, quotesRes, productsRes, summaryRes];
+      const allFailed = core.every((r) => r.status === 'rejected');
       if (allFailed) {
-        const first = [statsRes, salesRes, quotesRes, productsRes].find(
-          (r) => r.status === 'rejected',
-        ) as PromiseRejectedResult | undefined;
+        const first = core.find((r) => r.status === 'rejected') as
+          | PromiseRejectedResult
+          | undefined;
         setError(
           first?.reason instanceof Error ? first.reason.message : 'Could not load dashboard',
         );
@@ -97,7 +147,7 @@ export function useDashboardData(session: Session): DashboardData {
       window.removeEventListener('focus', loadIfVisible);
       document.removeEventListener('visibilitychange', loadIfVisible);
     };
-  }, [session, tick]);
+  }, [session, tick, variant]);
 
   const stock = React.useMemo(() => summarizeStock(products), [products]);
   const pipeline = React.useMemo(() => buildQuotationPipeline(quotations), [quotations]);
@@ -121,5 +171,10 @@ export function useDashboardData(session: Session): DashboardData {
     stock,
     pipeline,
     quickbooks,
+    summary,
+    paymentMethods,
+    topCategories,
+    frequentItems,
+    shift,
   };
 }

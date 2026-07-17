@@ -27,8 +27,6 @@ export interface DashboardMetric {
   footnote?: string;
   /** Route to navigate to on click. */
   destination?: string;
-  /** True when the value/trend comes from the dev-only demo adapter. */
-  isDemo?: boolean;
 }
 
 export type AlertSeverity = 'critical' | 'warning' | 'info';

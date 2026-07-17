@@ -35,7 +35,7 @@ import {
   type ProductInput,
 } from '@/lib/products-api';
 import { variantValidationIssues } from '@/lib/variations/variation-combination-utils';
-import { useVariationStore, variationMockService } from '@/lib/variations/variation-store';
+import { useVariationStore, variationService } from '@/lib/variations/variation-store';
 
 /** The simplified flow is always three steps; variations live inside `pricing`. */
 const STEPS: StepKey[] = ['details', 'pricing', 'review'];
@@ -94,7 +94,8 @@ export function ProductForm({
     if (editing) return;
     const draft = productDraftService.load(null);
     if (draft) {
-      setForm(draft.fields);
+      // Merge over defaults so drafts saved before new fields existed stay valid.
+      setForm({ ...initialFormState(), ...draft.fields });
       setStep(draft.step >= 0 ? (STEPS[draft.step] ?? 'details') : 'details');
       setDraftSavedAt(draft.savedAt);
     }
@@ -271,6 +272,9 @@ export function ProductForm({
     name: form.name.trim(),
     sku: form.sku.trim() || null,
     barcode: form.barcode.trim() || null,
+    baseSku: form.baseSku.trim() || null,
+    // A batch code without a family is meaningless — clear it alongside.
+    batchCode: form.baseSku.trim() ? form.batchCode.trim() || null : null,
     brand: form.brand.trim() || null,
     categoryId: form.categoryId || null,
     subcategoryId: form.subcategoryId || null,
@@ -320,9 +324,8 @@ export function ProductForm({
         router.push(`/products/${product.id}`);
       } else {
         const created = await createProduct(session, input);
-        // Move draft variation setup onto the new product id + clear the form draft.
-        // TODO(backend): POST generated variants to a real /products/:id/variants endpoint.
-        variationMockService.promoteDraft(created.id);
+        // Push the draft variation setup to the server under the new product id.
+        await variationService.promoteDraft(created.id);
         productDraftService.clear(null);
         if (pendingFile) {
           try {

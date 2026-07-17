@@ -9,6 +9,8 @@ export interface ManagedProduct {
   name: string;
   sku: string | null;
   barcode: string | null;
+  baseSku: string | null;
+  batchCode: string | null;
   description: string | null;
   brand: string | null;
   categoryId: string | null;
@@ -26,6 +28,7 @@ export interface ManagedProduct {
   isActive: boolean;
   quickbooksItemId: string | null;
   syncStatus: ProductSyncStatus;
+  lastSyncedAt: string | null;
 }
 
 export interface ProductsPage {
@@ -50,6 +53,8 @@ export interface ProductInput {
   name: string;
   sku?: string | null;
   barcode?: string | null;
+  baseSku?: string | null;
+  batchCode?: string | null;
   description?: string | null;
   brand?: string | null;
   categoryId?: string | null;

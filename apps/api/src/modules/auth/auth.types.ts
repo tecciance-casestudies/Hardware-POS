@@ -26,4 +26,8 @@ export interface AuthTokenResult {
     email: string | null;
     role: UserRole;
   };
+  /** Where this session sells from — the user's branch (or tenant default). */
+  branch: { id: string; name: string } | null;
+  /** The branch's default register. */
+  register: { id: string; name: string } | null;
 }

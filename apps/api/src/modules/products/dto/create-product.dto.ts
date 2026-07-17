@@ -24,6 +24,18 @@ export class CreateProductDto {
   @MaxLength(80)
   barcode?: string;
 
+  /** Batch grouping: family key shared by sibling batches (e.g. tile code "9122"). */
+  @IsString()
+  @IsOptional()
+  @MaxLength(80)
+  baseSku?: string;
+
+  /** Batch identifier within the baseSku family (e.g. "LT", "HL1"). */
+  @IsString()
+  @IsOptional()
+  @MaxLength(40)
+  batchCode?: string;
+
   @IsString()
   @IsOptional()
   description?: string;

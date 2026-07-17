@@ -8,6 +8,7 @@ import {
 import { JwtService } from '@nestjs/jwt';
 
 import { decryptSecret, encryptSecret } from '../../common/crypto';
+import { queryCompanyInfo } from './quickbooks.api';
 import { QBO_SCOPE, QuickBooksConfig } from './quickbooks.config';
 import { QuickBooksRepository } from './quickbooks.repository';
 import {
@@ -24,9 +25,19 @@ interface OAuthStatePayload {
 /** Refresh the access token when it is within this window of expiring. */
 const REFRESH_BUFFER_MS = 60_000;
 
+/** How long a fetched company name/currency stays valid before re-querying QBO. */
+const COMPANY_INFO_TTL_MS = 15 * 60_000;
+
+interface CachedCompanyInfo {
+  companyName: string | null;
+  currency: string | null;
+  fetchedAt: number;
+}
+
 @Injectable()
 export class QuickBooksService {
   private readonly logger = new Logger(QuickBooksService.name);
+  private readonly companyInfoCache = new Map<string, CachedCompanyInfo>();
 
   constructor(
     private readonly config: QuickBooksConfig,
@@ -100,6 +111,7 @@ export class QuickBooksService {
       }
       await this.repository.delete(tenantId);
     }
+    this.companyInfoCache.delete(tenantId);
     return { disconnected: true };
   }
 
@@ -108,14 +120,50 @@ export class QuickBooksService {
   async getConnectionStatus(tenantId: string): Promise<QuickBooksConnectionStatus> {
     const connection = await this.repository.find(tenantId);
     if (!connection || !connection.isActive) {
-      return { connected: false, realmId: null, environment: null, tokenExpiresAt: null };
+      return {
+        connected: false,
+        realmId: null,
+        environment: null,
+        tokenExpiresAt: null,
+        connectedAt: null,
+        companyName: null,
+        currency: null,
+      };
     }
+    const info = await this.fetchCompanyInfo(tenantId, connection.realmId);
     return {
       connected: true,
       realmId: connection.realmId,
       environment: connection.environment,
       tokenExpiresAt: connection.accessTokenExpiresAt?.toISOString() ?? null,
+      connectedAt: connection.connectedAt.toISOString(),
+      companyName: info.companyName,
+      currency: info.currency,
     };
+  }
+
+  /**
+   * Company name/currency from QBO, cached per tenant so status polling doesn't
+   * burn API quota. Failures degrade to nulls — status must work offline too.
+   */
+  private async fetchCompanyInfo(
+    tenantId: string,
+    realmId: string,
+  ): Promise<{ companyName: string | null; currency: string | null }> {
+    const cached = this.companyInfoCache.get(tenantId);
+    if (cached && Date.now() - cached.fetchedAt < COMPANY_INFO_TTL_MS) {
+      return cached;
+    }
+    try {
+      const cfg = this.config.resolve();
+      const accessToken = await this.getValidAccessToken(tenantId);
+      const info = await queryCompanyInfo({ apiBase: cfg.apiBase, realmId, accessToken });
+      this.companyInfoCache.set(tenantId, { ...info, fetchedAt: Date.now() });
+      return info;
+    } catch (err) {
+      this.logger.warn(`QuickBooks company info fetch failed: ${(err as Error).message}`);
+      return { companyName: null, currency: null };
+    }
   }
 
   // ── access token (refresh logic) ───────────────────────────────────────────

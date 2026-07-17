@@ -81,6 +81,8 @@ export class ProductsService {
       name: dto.name,
       sku: dto.sku ?? null,
       barcode: dto.barcode ?? null,
+      baseSku: dto.baseSku ?? null,
+      batchCode: dto.batchCode ?? null,
       description: dto.description ?? null,
       brand: dto.brand ?? null,
       categoryId: link.categoryId ?? null,
@@ -140,6 +142,8 @@ export class ProductsService {
       name: dto.name,
       sku: dto.sku,
       barcode: dto.barcode,
+      baseSku: dto.baseSku,
+      batchCode: dto.batchCode,
       description: dto.description,
       brand: dto.brand,
       categoryId: link.categoryId,
@@ -204,6 +208,25 @@ export class ProductsService {
    */
   mockSync(tenantId: string): Promise<MockSyncSummary> {
     return this.productsRepository.mockSync(tenantId);
+  }
+
+  /** Read the persisted variation-wizard state for a product. */
+  async getVariationConfig(tenantId: string, id: string): Promise<{ config: unknown | null }> {
+    const product = await this.getById(tenantId, id);
+    return { config: product.variationConfig ?? null };
+  }
+
+  /** Persist the variation-wizard state verbatim (client-owned document). */
+  async saveVariationConfig(
+    tenantId: string,
+    id: string,
+    config: Record<string, unknown>,
+  ): Promise<{ config: unknown | null }> {
+    await this.getById(tenantId, id); // 404s for foreign/unknown products
+    const updated = await this.productsRepository.update(id, {
+      variationConfig: config as Prisma.InputJsonValue,
+    });
+    return { config: updated.variationConfig ?? null };
   }
 
   /**

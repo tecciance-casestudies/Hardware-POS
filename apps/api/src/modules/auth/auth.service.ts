@@ -138,6 +138,7 @@ export class AuthService {
       expiresAt,
     );
 
+    const location = await this.authRepository.resolveLocation(user.tenantId, user.branchId);
     await this.authRepository.touchLastLogin(user.id);
 
     return {
@@ -150,6 +151,8 @@ export class AuthService {
         email: user.email,
         role: user.role,
       },
+      branch: location.branch,
+      register: location.register,
     };
   }
 

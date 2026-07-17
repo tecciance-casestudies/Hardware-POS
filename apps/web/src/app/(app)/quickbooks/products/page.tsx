@@ -10,12 +10,12 @@ import { Card, CardContent } from '@/components/ui/card';
 import { useAuth } from '@/lib/auth';
 import { Permission } from '@/lib/permissions';
 import { formatQbTime, useQuickBooks } from '@/lib/quickbooks';
-import { syncQuickBooksProducts, type SyncProductsSummary } from '@/lib/quickbooks-api';
+import type { SyncProductsSummary } from '@/lib/quickbooks-api';
 import { cn, formatMoney } from '@/lib/utils';
 
 export default function QuickBooksProductsPage() {
-  const { state, syncProducts } = useQuickBooks();
-  const { session, hasPermission } = useAuth();
+  const { state, loading, syncProducts } = useQuickBooks();
+  const { hasPermission } = useAuth();
   const canManage = hasPermission(Permission.QUICKBOOKS_MANAGE);
 
   const [syncing, setSyncing] = React.useState(false);
@@ -23,18 +23,26 @@ export default function QuickBooksProductsPage() {
   const [error, setError] = React.useState<string | null>(null);
 
   const handleSync = async () => {
-    if (!session) return;
     setSyncing(true);
     setError(null);
-    syncProducts(); // animate the local table (mock store)
-    try {
-      setResult(await syncQuickBooksProducts(session));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Sync failed');
-    } finally {
-      setSyncing(false);
+    const summary = await syncProducts(); // pulls from QBO, then refreshes the table
+    if (summary) {
+      setResult(summary);
+    } else {
+      setError('Sync failed — check the sync log for details.');
     }
+    setSyncing(false);
   };
+
+  if (loading) {
+    return (
+      <Card>
+        <CardContent className="py-16 text-center text-sm text-muted-foreground">
+          Loading QuickBooks products…
+        </CardContent>
+      </Card>
+    );
+  }
 
   if (!state.connected) {
     return (
@@ -51,8 +59,8 @@ export default function QuickBooksProductsPage() {
       <CurrencyMismatchWarning currency={state.company?.currency} />
       <div className="flex items-center justify-between">
         <p className="text-sm text-muted-foreground">
-          {state.products.length} products cached from QuickBooks · {state.company?.currency} · last
-          pull {formatQbTime(state.productSync.lastSyncISO)}
+          {state.products.length} products cached from QuickBooks · {state.company?.currency ?? '—'}{' '}
+          · last pull {formatQbTime(state.productSync.lastSyncISO)}
         </p>
         <Button onClick={handleSync} disabled={!canManage || syncing}>
           <RefreshCw className={cn('h-4 w-4', syncing && 'animate-spin')} />
@@ -107,6 +115,13 @@ export default function QuickBooksProductsPage() {
                   <td className="px-4 py-3 text-muted-foreground">{formatQbTime(p.lastSyncISO)}</td>
                 </tr>
               ))}
+              {state.products.length === 0 ? (
+                <tr>
+                  <td colSpan={6} className="px-4 py-12 text-center text-muted-foreground">
+                    No QuickBooks-linked products yet. Run “Sync Products” to pull the catalog.
+                  </td>
+                </tr>
+              ) : null}
             </tbody>
           </table>
         </div>
