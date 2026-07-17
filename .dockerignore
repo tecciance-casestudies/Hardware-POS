@@ -1,0 +1,33 @@
+# Keep the API build context small and avoid copying host-built artifacts
+# (which could carry the wrong Prisma engine or stale dist output).
+node_modules
+**/node_modules
+dist
+**/dist
+.next
+**/.next
+.turbo
+**/.turbo
+**/*.tsbuildinfo
+coverage
+**/coverage
+
+# Local env + secrets — never bake into the image
+.env
+.env.local
+.env.*.local
+apps/*/.env
+packages/*/.env
+.env.prod
+
+# Local upload storage (served from a mounted volume in production)
+apps/api/uploads
+
+# VCS / editor / misc
+.git
+.gitignore
+.idea
+.vscode
+temp
+docs
+*.log

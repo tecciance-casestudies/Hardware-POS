@@ -1,0 +1,72 @@
+# Hardware POS — production stack for a single EC2 instance.
+#
+#   caddy  : public entrypoint. Terminates HTTPS (auto Let's Encrypt cert for
+#            api.axlopos.com) and reverse-proxies to the API. Only 80/443 open.
+#   api    : NestJS. Internal only — reachable via the caddy network, never
+#            published to the host.
+#   db     : PostgreSQL. Internal only — NO published port, no SG rule. The API
+#            reaches it as host "db" on the private compose network.
+#
+# All configuration comes from .env.prod (see .env.prod.example). Every var —
+# including the full DATABASE_URL and POSTGRES_PASSWORD — is injected into the
+# containers via env_file, so there is no ${VAR} interpolation to trip over.
+#
+# Bring up:   docker compose -f docker-compose.prod.yml up -d --build
+# Logs:       docker compose -f docker-compose.prod.yml logs -f api
+# Migrations run automatically when the api container boots.
+
+services:
+  caddy:
+    image: caddy:2
+    container_name: hardware-pos-caddy
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data # issued certificates — persist this, it's the cert store
+      - caddy_config:/config
+    depends_on:
+      - api
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    container_name: hardware-pos-api
+    restart: always
+    env_file:
+      - .env.prod
+    environment:
+      # Highest precedence — guarantees uploads land on the mounted volume
+      # regardless of what .env.prod says.
+      UPLOAD_DIR: /data/uploads
+    volumes:
+      - uploads_data:/data/uploads # local product images (or use STORAGE_PROVIDER=s3)
+    depends_on:
+      db:
+        condition: service_healthy
+    # No "ports:" — the API is never exposed to the host or the internet.
+
+  db:
+    image: postgres:16-alpine
+    container_name: hardware-pos-db
+    restart: always
+    env_file:
+      - .env.prod # provides POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_DB
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d hardware_pos"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    # No "ports:" — DB is private to this network. Back it up with pg_dump -> S3.
+
+volumes:
+  caddy_data:
+  caddy_config:
+  uploads_data:
+  pgdata:

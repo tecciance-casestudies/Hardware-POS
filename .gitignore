@@ -16,7 +16,9 @@ out/
 .env
 .env.local
 .env.*.local
+.env.prod
 !.env.example
+!.env.prod.example
 
 # Prisma
 packages/database/prisma/migrations/dev.db*

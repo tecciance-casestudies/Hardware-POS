@@ -1,0 +1,34 @@
+# AWS Amplify Hosting build spec for the pnpm + turbo monorepo.
+# The frontend lives in apps/web; `buildPath: /` runs every command from the
+# repo root so the pnpm workspace (and @hardware-pos/shared) resolves.
+#
+# In the Amplify console also set:
+#   • Monorepo root directory:  apps/web   (mirrored by appRoot below)
+#   • Environment variable NEXT_PUBLIC_API_URL = https://api.axlopos.com/v1
+#     — baked into the client bundle AT BUILD TIME, so it must be set here.
+#
+# NOTE: pnpm must be installed as a real global binary (not `npx pnpm`), or
+# turbo fails with "Unable to find package manager binary" — it shells out to
+# pnpm to run each package's build script.
+version: 1
+applications:
+  - appRoot: apps/web
+    frontend:
+      phases:
+        preBuild:
+          commands:
+            - npm install -g pnpm@10.33.0
+            - pnpm install --frozen-lockfile
+        build:
+          commands:
+            - pnpm exec turbo run build --filter=@hardware-pos/web
+      artifacts:
+        # Relative to the repo root because of buildPath: /
+        baseDirectory: apps/web/.next
+        files:
+          - "**/*"
+      cache:
+        paths:
+          - apps/web/.next/cache/**/*
+          - node_modules/**/*
+      buildPath: /

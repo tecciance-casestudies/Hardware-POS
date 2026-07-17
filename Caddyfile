@@ -1,0 +1,21 @@
+# Caddy terminates TLS for the backend. On first boot it obtains a free
+# Let's Encrypt certificate for api.axlopos.com over the ACME HTTP-01 challenge
+# (needs ports 80 + 443 open in the EC2 security group) and auto-renews it.
+#
+# All paths — the /v1 API, /uploads static images, and the QuickBooks OAuth
+# callback — are the same origin (api.axlopos.com), so one reverse_proxy covers
+# everything.
+
+api.axlopos.com {
+	encode zstd gzip
+
+	# Product-image uploads can be a few MB; lift the default request cap.
+	request_body {
+		max_size 25MB
+	}
+
+	reverse_proxy api:4000
+
+	# Optional: send access logs to stdout (view with `docker compose logs caddy`).
+	log
+}
