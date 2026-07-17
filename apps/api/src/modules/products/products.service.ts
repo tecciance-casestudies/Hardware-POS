@@ -210,6 +210,25 @@ export class ProductsService {
     return this.productsRepository.mockSync(tenantId);
   }
 
+  /** Read the persisted variation-wizard state for a product. */
+  async getVariationConfig(tenantId: string, id: string): Promise<{ config: unknown | null }> {
+    const product = await this.getById(tenantId, id);
+    return { config: product.variationConfig ?? null };
+  }
+
+  /** Persist the variation-wizard state verbatim (client-owned document). */
+  async saveVariationConfig(
+    tenantId: string,
+    id: string,
+    config: Record<string, unknown>,
+  ): Promise<{ config: unknown | null }> {
+    await this.getById(tenantId, id); // 404s for foreign/unknown products
+    const updated = await this.productsRepository.update(id, {
+      variationConfig: config as Prisma.InputJsonValue,
+    });
+    return { config: updated.variationConfig ?? null };
+  }
+
   /**
    * Validate + normalise the category ↔ subcategory link (spec §17): a chosen
    * subcategory must belong to the effective category, and selecting one keeps

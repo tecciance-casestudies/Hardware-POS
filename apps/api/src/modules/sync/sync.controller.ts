@@ -13,6 +13,12 @@ import { SyncService } from './sync.service';
 export class SyncController {
   constructor(private readonly syncService: SyncService) {}
 
+  /** Queue health for the header pill — readable by any authenticated role. */
+  @Get('status')
+  status(@TenantId() tenantId: string) {
+    return this.syncService.status(tenantId);
+  }
+
   @Get('logs')
   @RequirePermissions(Permission.SYNC_READ)
   listLogs(

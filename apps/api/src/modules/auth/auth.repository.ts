@@ -29,6 +29,40 @@ export class AuthRepository {
     await this.prisma.user.update({ where: { id }, data: { lastLoginAt: new Date() } });
   }
 
+  // ── session location ─────────────────────────────────────────────────────
+
+  /**
+   * Resolve the branch + register a session operates at: the user's assigned
+   * branch (or the tenant's first active branch for unassigned owners/admins)
+   * and that branch's first active register.
+   */
+  async resolveLocation(
+    tenantId: string,
+    branchId: string | null,
+  ): Promise<{
+    branch: { id: string; name: string } | null;
+    register: { id: string; name: string } | null;
+  }> {
+    const branch = branchId
+      ? await this.prisma.branch.findFirst({
+          where: { id: branchId, tenantId, isActive: true },
+          select: { id: true, name: true },
+        })
+      : await this.prisma.branch.findFirst({
+          where: { tenantId, isActive: true },
+          orderBy: { createdAt: 'asc' },
+          select: { id: true, name: true },
+        });
+    if (!branch) return { branch: null, register: null };
+
+    const register = await this.prisma.register.findFirst({
+      where: { branchId: branch.id, isActive: true },
+      orderBy: { createdAt: 'asc' },
+      select: { id: true, name: true },
+    });
+    return { branch, register };
+  }
+
   // ── refresh tokens ─────────────────────────────────────────────────────
 
   async createRefreshToken(

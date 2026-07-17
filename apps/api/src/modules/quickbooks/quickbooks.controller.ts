@@ -23,12 +23,15 @@ export class QuickBooksController {
     private readonly quickBooksSalesSyncService: QuickBooksSalesSyncService,
   ) {}
 
-  /** Redirect the admin to the QuickBooks authorization screen. Owner/admin only. */
+  /**
+   * The Intuit authorization URL for the frontend to navigate to. Returned as
+   * JSON (not a redirect) because the route needs the Bearer header, which a
+   * plain browser navigation cannot send. Owner/admin only.
+   */
   @Get('connect')
   @Roles(UserRole.OWNER, UserRole.ADMIN)
-  async connect(@TenantId() tenantId: string, @Res() res: Response): Promise<void> {
-    const url = await this.quickBooksService.getAuthorizationUrl(tenantId);
-    res.redirect(url);
+  async connect(@TenantId() tenantId: string): Promise<{ url: string }> {
+    return { url: await this.quickBooksService.getAuthorizationUrl(tenantId) };
   }
 
   /** OAuth redirect target from QuickBooks — public (no session on the redirect). */

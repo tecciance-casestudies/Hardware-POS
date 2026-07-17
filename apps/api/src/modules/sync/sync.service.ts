@@ -15,6 +15,11 @@ export class SyncService {
     private readonly syncQueue: SyncQueueService,
   ) {}
 
+  /** Queue health summary for the header sync pill. */
+  status(tenantId: string) {
+    return this.syncRepository.statusSummary(tenantId);
+  }
+
   async listLogs(tenantId: string, query: QuerySyncLogsDto): Promise<Paginated<SyncLog>> {
     const [items, total] = await this.syncRepository.findLogs(
       tenantId,

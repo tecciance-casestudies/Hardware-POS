@@ -15,6 +15,16 @@ interface QueryResponse {
   QueryResponse?: { Item?: QboItem[] };
 }
 
+interface CompanyInfoQueryResponse {
+  QueryResponse?: { CompanyInfo?: Array<{ CompanyName?: string }> };
+}
+
+interface PreferencesQueryResponse {
+  QueryResponse?: {
+    Preferences?: Array<{ CurrencyPrefs?: { HomeCurrency?: { value?: string } } }>;
+  };
+}
+
 /** A reference to another QuickBooks entity (Item, Customer, …). */
 export interface QboRef {
   value: string;
@@ -80,17 +90,9 @@ interface RequestParams {
   accessToken: string;
 }
 
-/**
- * Query all Items from a QuickBooks company. The caller filters by type; we pull
- * everything (up to 1000) so inventory and non-inventory items are both returned.
- */
-export async function queryItems(params: {
-  apiBase: string;
-  realmId: string;
-  accessToken: string;
-}): Promise<QboItem[]> {
-  const query = encodeURIComponent('select * from Item maxresults 1000');
-  const url = `${params.apiBase}/v3/company/${params.realmId}/query?minorversion=65&query=${query}`;
+/** Run a QBO SQL-ish query against the Accounting API and return the parsed JSON. */
+async function runQuery<T>(params: RequestParams, query: string): Promise<T> {
+  const url = `${params.apiBase}/v3/company/${params.realmId}/query?minorversion=65&query=${encodeURIComponent(query)}`;
 
   const res = await fetch(url, {
     method: 'GET',
@@ -102,11 +104,32 @@ export async function queryItems(params: {
 
   if (!res.ok) {
     const detail = await res.text().catch(() => '');
-    throw new Error(`QuickBooks item query failed (${res.status}): ${detail}`);
+    throw new Error(`QuickBooks query failed (${res.status}): ${detail}`);
   }
+  return (await res.json()) as T;
+}
 
-  const json = (await res.json()) as QueryResponse;
+/**
+ * Query all Items from a QuickBooks company. The caller filters by type; we pull
+ * everything (up to 1000) so inventory and non-inventory items are both returned.
+ */
+export async function queryItems(params: RequestParams): Promise<QboItem[]> {
+  const json = await runQuery<QueryResponse>(params, 'select * from Item maxresults 1000');
   return json.QueryResponse?.Item ?? [];
+}
+
+/** Fetch the connected company's display name and home currency (best-effort fields). */
+export async function queryCompanyInfo(
+  params: RequestParams,
+): Promise<{ companyName: string | null; currency: string | null }> {
+  const [company, prefs] = await Promise.all([
+    runQuery<CompanyInfoQueryResponse>(params, 'select * from CompanyInfo'),
+    runQuery<PreferencesQueryResponse>(params, 'select * from Preferences'),
+  ]);
+  return {
+    companyName: company.QueryResponse?.CompanyInfo?.[0]?.CompanyName ?? null,
+    currency: prefs.QueryResponse?.Preferences?.[0]?.CurrencyPrefs?.HomeCurrency?.value ?? null,
+  };
 }
 
 /** Create a QuickBooks Sales Receipt (used for fully-paid sales). */

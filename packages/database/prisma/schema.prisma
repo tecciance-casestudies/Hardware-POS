@@ -436,6 +436,9 @@ model Product {
   baseSku                 String?
   /// Batch identifier within the baseSku family (e.g. "LT", "HL1").
   batchCode               String?
+  /// Product-variation wizard state (attributes, price mode, generated
+  /// variants) — persisted verbatim for the web client.
+  variationConfig         Json?
   description             String?
   brand                   String?
   categoryId              String?

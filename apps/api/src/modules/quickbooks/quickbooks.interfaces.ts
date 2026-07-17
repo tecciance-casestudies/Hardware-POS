@@ -7,6 +7,11 @@ export interface QuickBooksConnectionStatus {
   realmId: string | null;
   environment: string | null;
   tokenExpiresAt: string | null;
+  connectedAt: string | null;
+  /** Company display name from QBO CompanyInfo — null when the lookup fails. */
+  companyName: string | null;
+  /** Home currency code from QBO Preferences — null when the lookup fails. */
+  currency: string | null;
 }
 
 /** Raw token response from the Intuit token endpoint. */
