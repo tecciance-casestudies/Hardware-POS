@@ -15,6 +15,7 @@ export const SYNC_JOB_HANDLERS = Symbol('SYNC_JOB_HANDLERS');
 export const SyncJobType = {
   SALES_SYNC: 'SALES_SYNC',
   RETURN_SYNC: 'RETURN_SYNC',
+  PRODUCT_SYNC: 'PRODUCT_SYNC',
 } as const;
 export type SyncJobType = (typeof SyncJobType)[keyof typeof SyncJobType];
 

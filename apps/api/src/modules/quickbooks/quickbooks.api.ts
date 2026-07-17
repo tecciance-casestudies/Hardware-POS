@@ -12,6 +12,16 @@ export interface QboItem {
   Active?: boolean;
   SubItem?: boolean;
   ParentRef?: { value: string; name?: string };
+  /** Optimistic-concurrency token required by QBO for updates. */
+  SyncToken?: string;
+}
+
+/** A QuickBooks account (only the fields item creation needs). */
+export interface QboAccount {
+  Id: string;
+  Name: string;
+  AccountType: string;
+  AccountSubType?: string;
 }
 
 interface QueryResponse {
@@ -121,6 +131,51 @@ export async function queryItems(params: RequestParams): Promise<QboItem[]> {
   return json.QueryResponse?.Item ?? [];
 }
 
+/** Fetch one Item by id (used to obtain the SyncToken before an update). */
+export async function queryItemById(params: RequestParams, id: string): Promise<QboItem | null> {
+  const json = await runQuery<QueryResponse>(
+    params,
+    `select * from Item where Id = '${id.replace(/'/g, '')}'`,
+  );
+  return json.QueryResponse?.Item?.[0] ?? null;
+}
+
+/** List accounts (for resolving the Income / COGS / Inventory Asset refs). */
+export async function queryAccounts(params: RequestParams): Promise<QboAccount[]> {
+  const json = await runQuery<{ QueryResponse?: { Account?: QboAccount[] } }>(
+    params,
+    'select Id, Name, AccountType, AccountSubType from Account maxresults 1000',
+  );
+  return json.QueryResponse?.Account ?? [];
+}
+
+/** Create a QuickBooks Item (product/service). */
+export async function createItem(
+  params: RequestParams,
+  body: Record<string, unknown>,
+): Promise<QboItem> {
+  const json = await postEntity<{ Item?: QboItem }>(params, 'item', body);
+  if (!json.Item?.Id) {
+    throw new Error('QuickBooks Item response did not include an Id');
+  }
+  return json.Item;
+}
+
+/**
+ * Sparse-update a QuickBooks Item: only the provided fields change. Requires the
+ * item's current SyncToken (QBO's optimistic-concurrency token).
+ */
+export async function updateItemSparse(
+  params: RequestParams,
+  body: Record<string, unknown> & { Id: string; SyncToken: string },
+): Promise<QboItem> {
+  const json = await postEntity<{ Item?: QboItem }>(params, 'item', { ...body, sparse: true });
+  if (!json.Item?.Id) {
+    throw new Error('QuickBooks Item response did not include an Id');
+  }
+  return json.Item;
+}
+
 /** Fetch the connected company's display name and home currency (best-effort fields). */
 export async function queryCompanyInfo(
   params: RequestParams,
@@ -183,7 +238,7 @@ export async function createCreditMemo(
 /** POST a JSON entity to the Accounting API and return the parsed response. */
 async function postEntity<T>(
   params: RequestParams,
-  entity: 'salesreceipt' | 'invoice' | 'payment' | 'refundreceipt' | 'creditmemo',
+  entity: 'salesreceipt' | 'invoice' | 'payment' | 'refundreceipt' | 'creditmemo' | 'item',
   body: unknown,
 ): Promise<T> {
   const url = `${params.apiBase}/v3/company/${params.realmId}/${entity}?minorversion=65`;

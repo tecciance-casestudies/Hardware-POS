@@ -98,6 +98,44 @@ export class SyncQueueService {
   }
 
   /**
+   * Enqueue an outbound product push (create/update the QBO Item). Only queues
+   * when an active QuickBooks connection exists — otherwise returns false and
+   * the product simply stays local. Safe to call outside a transaction: unlike
+   * sales, a product row exists independently of its sync job.
+   */
+  async enqueueProductSync(tenantId: string, productId: string): Promise<boolean> {
+    const connection = await this.prisma.quickBooksConnection.findUnique({
+      where: { tenantId },
+      select: { isActive: true },
+    });
+    if (!connection?.isActive) return false;
+
+    await this.prisma.$transaction([
+      this.prisma.syncJob.create({
+        data: {
+          tenantId,
+          type: SyncJobType.PRODUCT_SYNC,
+          direction: SyncDirection.OUTBOUND,
+          entityType: SyncEntityType.PRODUCT,
+          entityId: productId,
+          status: 'PENDING',
+        },
+      }),
+      this.prisma.syncLog.create({
+        data: {
+          tenantId,
+          entityType: SyncEntityType.PRODUCT,
+          entityId: productId,
+          direction: SyncDirection.OUTBOUND,
+          status: 'PENDING',
+          message: 'Product queued for QuickBooks sync',
+        },
+      }),
+    ]);
+    return true;
+  }
+
+  /**
    * Atomically claim up to `limit` due jobs. A job is due when it is PENDING, its
    * `scheduledAt` has passed, and it still has attempts left. Claiming flips it to
    * SYNCING and increments `attempts`; the conditional update makes concurrent

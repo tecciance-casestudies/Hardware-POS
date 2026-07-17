@@ -153,24 +153,6 @@ export class ProductsRepository {
     return this.prisma.product.update({ where: { id }, data });
   }
 
-  /** Queue a locally-created product for a QuickBooks push (stub until real QBO writes). */
-  async queueQuickBooksSync(tenantId: string, id: string): Promise<Product> {
-    return this.prisma.$transaction(async (tx) => {
-      const product = await tx.product.update({ where: { id }, data: { syncStatus: 'PENDING' } });
-      await tx.syncLog.create({
-        data: {
-          tenantId,
-          entityType: 'PRODUCT',
-          entityId: id,
-          direction: 'OUTBOUND',
-          status: 'PENDING',
-          message: `Product "${product.name}" queued for QuickBooks sync`,
-        },
-      });
-      return product;
-    });
-  }
-
   /**
    * Simulate a QuickBooks catalog pull: upsert the mock hardware products and
    * their categories, marking each SYNCED. This is the ONLY write path for the

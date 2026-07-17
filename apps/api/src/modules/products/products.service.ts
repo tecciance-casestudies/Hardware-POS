@@ -10,6 +10,7 @@ import type { Paginated } from '@hardware-pos/shared';
 
 import { paginate } from '../../common/pagination';
 import { StorageService } from '../../common/storage/storage.service';
+import { SyncQueueService } from '../sync/queue/sync-queue.service';
 import { MockSyncSummary, ProductsRepository } from './products.repository';
 import { CreateProductDto } from './dto/create-product.dto';
 import { QueryProductsDto } from './dto/query-products.dto';
@@ -21,6 +22,7 @@ export class ProductsService {
   constructor(
     private readonly productsRepository: ProductsRepository,
     private readonly storage: StorageService,
+    private readonly syncQueue: SyncQueueService,
   ) {}
 
   async list(tenantId: string, query: QueryProductsDto): Promise<Paginated<Product>> {
@@ -102,7 +104,9 @@ export class ProductsService {
       syncStatus: 'NOT_SYNCED',
     };
     try {
-      return await this.productsRepository.create(tenantId, data);
+      const created = await this.productsRepository.create(tenantId, data);
+      // New published products flow to QuickBooks automatically (drafts wait).
+      return created.isDraft ? created : await this.queueQuickBooksPush(tenantId, created);
     } catch (err) {
       throw this.mapWriteError(err);
     }
@@ -163,7 +167,16 @@ export class ProductsService {
       isDraft: dto.isDraft,
     };
     try {
-      return await this.productsRepository.update(id, data);
+      const updated = await this.productsRepository.update(id, data);
+      // Push to QuickBooks when a draft is published, or when QBO-relevant
+      // fields of an already-linked product changed.
+      const published = existing.isDraft && updated.isDraft === false;
+      const linkedAndChanged =
+        existing.quickbooksItemId != null && this.qboFieldsChanged(existing, updated);
+      if (!updated.isDraft && (published || linkedAndChanged)) {
+        return await this.queueQuickBooksPush(tenantId, updated);
+      }
+      return updated;
     } catch (err) {
       throw this.mapWriteError(err);
     }
@@ -171,8 +184,13 @@ export class ProductsService {
 
   /** Soft-delete: deactivate rather than remove (sale history references it). */
   async deactivate(tenantId: string, id: string): Promise<Product> {
-    await this.getById(tenantId, id);
-    return this.productsRepository.update(id, { isActive: false });
+    const existing = await this.getById(tenantId, id);
+    const updated = await this.productsRepository.update(id, { isActive: false });
+    // Deactivating a QBO-linked product marks the QBO item inactive too.
+    if (!updated.isDraft && existing.quickbooksItemId != null) {
+      return this.queueQuickBooksPush(tenantId, updated);
+    }
+    return updated;
   }
 
   async setImage(
@@ -199,10 +217,40 @@ export class ProductsService {
     return this.productsRepository.update(id, { imageUrl: null });
   }
 
-  /** Queue a product for QuickBooks (stub — real QBO item writes come later). */
+  /** Queue a product push to QuickBooks; the sync worker creates/updates the Item. */
   async syncToQuickBooks(tenantId: string, id: string): Promise<Product> {
-    await this.getById(tenantId, id);
-    return this.productsRepository.queueQuickBooksSync(tenantId, id);
+    const product = await this.getById(tenantId, id);
+    if (product.isDraft) {
+      throw new BadRequestException('Draft products cannot be pushed to QuickBooks');
+    }
+    const queued = await this.syncQueue.enqueueProductSync(tenantId, id);
+    if (!queued) {
+      throw new BadRequestException('QuickBooks is not connected');
+    }
+    return this.productsRepository.update(id, { syncStatus: 'PENDING' });
+  }
+
+  /**
+   * Best-effort enqueue of an outbound product push. Returns the product with
+   * PENDING sync status when queued; unchanged when QuickBooks is not connected.
+   */
+  private async queueQuickBooksPush(tenantId: string, product: Product): Promise<Product> {
+    const queued = await this.syncQueue.enqueueProductSync(tenantId, product.id);
+    if (!queued) return product;
+    return this.productsRepository.update(product.id, { syncStatus: 'PENDING' });
+  }
+
+  /** Did any field that QuickBooks mirrors change between the two rows? */
+  private qboFieldsChanged(before: Product, after: Product): boolean {
+    const num = (v: unknown): number | null => (v == null ? null : Number(v));
+    return (
+      before.name !== after.name ||
+      before.sku !== after.sku ||
+      before.description !== after.description ||
+      num(before.unitPrice) !== num(after.unitPrice) ||
+      num(before.costPrice) !== num(after.costPrice) ||
+      before.isActive !== after.isActive
+    );
   }
 
   /**
