@@ -57,7 +57,9 @@ export function Dialog({ open, onClose, title, description, children, footer, cl
         </div>
         <div className="p-6 pt-2">{children}</div>
         {footer ? (
-          <div className="flex justify-end gap-2 border-t border-border p-4">{footer}</div>
+          // flex-wrap: wide button sets (long labels, formatted amounts) wrap
+          // onto extra lines instead of overflowing past the card edge.
+          <div className="flex flex-wrap justify-end gap-2 border-t border-border p-4">{footer}</div>
         ) : null}
       </div>
     </div>
