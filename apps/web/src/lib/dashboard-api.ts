@@ -21,3 +21,105 @@ export async function fetchDashboardStats(session: Session): Promise<DashboardSt
   });
   return { ...s, todaySalesTotal: Number(s.todaySalesTotal) };
 }
+
+// ── aggregation endpoints (real replacements for the old demo adapters) ──────
+
+export interface RangedMetric {
+  value: number;
+  prevValue: number;
+  /** Per-day values across the window (sparkline material). */
+  series: number[];
+}
+
+export interface DashboardSummary {
+  from: string;
+  to: string;
+  prevFrom: string;
+  prevTo: string;
+  netSales: RangedMetric;
+  transactions: RangedMetric;
+  grossProfit: RangedMetric;
+  avgSale: { value: number; prevValue: number };
+}
+
+export interface PaymentMethodTotal {
+  method: string;
+  amount: number;
+}
+
+export interface RankedCategoryApi {
+  label: string;
+  amount: number;
+}
+
+export interface RankedProductApi {
+  productId: string | null;
+  name: string;
+  imageUrl: string | null;
+  quantity: number;
+  amount: number;
+}
+
+export interface ShiftSummaryApi {
+  startedAt: string | null;
+  transactions: number;
+  cashSales: number;
+  cardSales: number;
+  bankQrSales: number;
+  otherSales: number;
+  refunds: number;
+  expectedCash: number;
+}
+
+export interface SeriesPointApi {
+  bucket: string;
+  value: number;
+}
+
+function auth(session: Session): { token: string; tenantId: string } {
+  return { token: session.token, tenantId: session.user.tenantId };
+}
+
+export function fetchDashboardSummary(session: Session): Promise<DashboardSummary> {
+  return api.get<DashboardSummary>('/dashboard/summary', auth(session));
+}
+
+export function fetchPaymentMethods(
+  session: Session,
+  opts: { mine?: boolean } = {},
+): Promise<PaymentMethodTotal[]> {
+  return api.get<PaymentMethodTotal[]>(
+    `/dashboard/payment-methods${opts.mine ? '?mine=true' : ''}`,
+    auth(session),
+  );
+}
+
+export function fetchTopCategories(session: Session, limit = 5): Promise<RankedCategoryApi[]> {
+  return api.get<RankedCategoryApi[]>(`/dashboard/top-categories?limit=${limit}`, auth(session));
+}
+
+export function fetchTopProducts(
+  session: Session,
+  opts: { limit?: number; mine?: boolean } = {},
+): Promise<RankedProductApi[]> {
+  const params = new URLSearchParams();
+  params.set('limit', String(opts.limit ?? 6));
+  if (opts.mine) params.set('mine', 'true');
+  return api.get<RankedProductApi[]>(`/dashboard/top-products?${params.toString()}`, auth(session));
+}
+
+export function fetchShiftSummary(session: Session): Promise<ShiftSummaryApi> {
+  return api.get<ShiftSummaryApi>('/dashboard/shift-summary', auth(session));
+}
+
+export function fetchSalesSeries(
+  session: Session,
+  opts: { from?: Date; to?: Date; interval?: 'day' | 'hour' } = {},
+): Promise<SeriesPointApi[]> {
+  const params = new URLSearchParams();
+  if (opts.from) params.set('from', opts.from.toISOString());
+  if (opts.to) params.set('to', opts.to.toISOString());
+  if (opts.interval) params.set('interval', opts.interval);
+  const qs = params.toString();
+  return api.get<SeriesPointApi[]>(`/dashboard/sales-series${qs ? `?${qs}` : ''}`, auth(session));
+}

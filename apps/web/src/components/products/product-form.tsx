@@ -35,7 +35,7 @@ import {
   type ProductInput,
 } from '@/lib/products-api';
 import { variantValidationIssues } from '@/lib/variations/variation-combination-utils';
-import { useVariationStore, variationMockService } from '@/lib/variations/variation-store';
+import { useVariationStore, variationService } from '@/lib/variations/variation-store';
 
 /** The simplified flow is always three steps; variations live inside `pricing`. */
 const STEPS: StepKey[] = ['details', 'pricing', 'review'];
@@ -324,9 +324,8 @@ export function ProductForm({
         router.push(`/products/${product.id}`);
       } else {
         const created = await createProduct(session, input);
-        // Move draft variation setup onto the new product id + clear the form draft.
-        // TODO(backend): POST generated variants to a real /products/:id/variants endpoint.
-        variationMockService.promoteDraft(created.id);
+        // Push the draft variation setup to the server under the new product id.
+        await variationService.promoteDraft(created.id);
         productDraftService.clear(null);
         if (pendingFile) {
           try {

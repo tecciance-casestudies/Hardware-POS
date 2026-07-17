@@ -1,21 +1,19 @@
 'use client';
 
 /**
- * Frontend-only variation persistence + a React store hook.
+ * Product-variation persistence + a React store hook.
  *
- * Three layers, mirroring `categoryAssignmentService`, so components NEVER touch
- * localStorage directly:
- *   productExtensionAdapter  – raw namespaced localStorage IO, keyed per product
- *   variationMockService     – load / persist / generate operations
- *   variationStore           – `useVariationStore` React hook (in-memory + persist)
- *
- * TODO(backend): replace the adapter/service with real endpoints:
- *   GET/PUT /products/:id/variation-config   (attributes, price mode, group pref)
- *   GET/POST/PATCH/DELETE /products/:id/variants
- * Until then everything here is local to the browser/tenant.
+ * Saved products persist their wizard state server-side via
+ * GET/PUT /products/:id/variation-config (the `Product.variationConfig`
+ * column); localStorage only carries the not-yet-created draft and doubles as
+ * an offline read fallback. Follow-up: materialize sellable variants as real
+ * child products through the batch-grouping mechanism (baseSku/batchCode).
  */
 
 import * as React from 'react';
+
+import { api } from '@/lib/api';
+import { loadSession } from '@/lib/session-store';
 
 import {
   analyzeAttributes,
@@ -97,24 +95,62 @@ export const productExtensionAdapter = {
 };
 
 // ---------------------------------------------------------------------------
-// variationMockService — operations on top of the adapter
+// variationService — server persistence (Product.variationConfig) for saved
+// products; localStorage only holds the not-yet-created draft (null id).
 // ---------------------------------------------------------------------------
 
-export const variationMockService = {
-  load(productId: string | null | undefined): ProductVariationData {
-    return productExtensionAdapter.read(productId) ?? emptyVariationData();
+function sessionAuth(): { token: string; tenantId: string } | null {
+  const session = loadSession();
+  return session ? { token: session.token, tenantId: session.user.tenantId } : null;
+}
+
+export const variationService = {
+  async load(productId: string | null | undefined): Promise<ProductVariationData> {
+    if (!productId) {
+      return productExtensionAdapter.read(null) ?? emptyVariationData();
+    }
+    const auth = sessionAuth();
+    if (!auth) return emptyVariationData();
+    try {
+      const res = await api.get<{ config: Partial<ProductVariationData> | null }>(
+        `/products/${productId}/variation-config`,
+        auth,
+      );
+      return res.config ? { ...emptyVariationData(), ...res.config } : emptyVariationData();
+    } catch {
+      // Offline / transient failure: any stale local copy beats an empty form.
+      return productExtensionAdapter.read(productId) ?? emptyVariationData();
+    }
   },
 
-  persist(
+  async persist(
     productId: string | null | undefined,
     data: ProductVariationData,
-  ): { ok: boolean; savedAt: string } {
+  ): Promise<{ ok: boolean; savedAt: string }> {
     const savedAt = new Date().toISOString();
-    const ok = productExtensionAdapter.write(productId, { ...data, updatedAt: savedAt });
-    return { ok, savedAt };
+    const stamped = { ...data, updatedAt: savedAt };
+    if (!productId) {
+      return { ok: productExtensionAdapter.write(null, stamped), savedAt };
+    }
+    const auth = sessionAuth();
+    if (!auth) return { ok: false, savedAt };
+    try {
+      await api.put(`/products/${productId}/variation-config`, { config: stamped }, auth);
+      return { ok: true, savedAt };
+    } catch {
+      return { ok: false, savedAt };
+    }
   },
 
-  promoteDraft: productExtensionAdapter.promoteDraft,
+  /** Push the local draft onto a freshly-created product, then clear it. */
+  async promoteDraft(productId: string): Promise<void> {
+    const draft = productExtensionAdapter.read(null);
+    if (draft) {
+      await this.persist(productId, draft);
+      productExtensionAdapter.remove(null);
+    }
+  },
+
   clear: productExtensionAdapter.remove,
 };
 
@@ -186,10 +222,16 @@ export function useVariationStore(
 
   // Load once on mount / when the product id changes.
   React.useEffect(() => {
-    const initial = variationMockService.load(productId);
-    skipNextPersist.current = true;
-    setData(initial);
-    setLastSavedAt(initial.updatedAt);
+    let cancelled = false;
+    void variationService.load(productId).then((initial) => {
+      if (cancelled) return;
+      skipNextPersist.current = true;
+      setData(initial);
+      setLastSavedAt(initial.updatedAt);
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [productId]);
 
   // Persist on change (skip the load itself). Debounced to avoid thrashing.
@@ -200,9 +242,10 @@ export function useVariationStore(
     }
     setSaving(true);
     const t = setTimeout(() => {
-      const { savedAt } = variationMockService.persist(productId, data);
-      setLastSavedAt(savedAt);
-      setSaving(false);
+      void variationService.persist(productId, data).then(({ savedAt }) => {
+        setLastSavedAt(savedAt);
+        setSaving(false);
+      });
     }, 350);
     return () => clearTimeout(t);
   }, [data, productId]);

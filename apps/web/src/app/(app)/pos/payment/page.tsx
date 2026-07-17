@@ -31,8 +31,7 @@ import { usePosCart } from '@/lib/pos-cart';
 import { printCustomerReceipt, type ReceiptContext } from '@/lib/receipt-print';
 import {
   completeSale,
-  DEV_BRANCH_ID,
-  DEV_REGISTER_ID,
+  saleLocation,
   type CompletedSale,
   type CompleteSaleDto,
   type PaymentMethodCode,
@@ -209,8 +208,7 @@ export default function PaymentPage() {
     setError(null);
     try {
       const dto: CompleteSaleDto = {
-        branchId: DEV_BRANCH_ID,
-        registerId: DEV_REGISTER_ID,
+        ...saleLocation(session!),
         customerId: cart.customerId || undefined,
         items: cart.items.map((it) => ({
           productId: it.product.id,

@@ -18,15 +18,26 @@ const FILTERS: { key: 'ALL' | SyncState; label: string }[] = [
 const TYPE_LABEL: Record<string, string> = {
   PRODUCT_PULL: 'Product pull',
   SALE_PUSH: 'Sale push',
+  RETURN_PUSH: 'Return push',
   CUSTOMER_PULL: 'Customer pull',
   CONNECTION: 'Connection',
 };
 
 export default function QuickBooksSyncLogPage() {
-  const { state } = useQuickBooks();
+  const { state, loading } = useQuickBooks();
   const [filter, setFilter] = React.useState<'ALL' | SyncState>('ALL');
 
   const rows = state.log.filter((l) => filter === 'ALL' || l.status === filter);
+
+  if (loading) {
+    return (
+      <Card>
+        <CardContent className="py-16 text-center text-sm text-muted-foreground">
+          Loading sync log…
+        </CardContent>
+      </Card>
+    );
+  }
 
   if (!state.connected) {
     return (

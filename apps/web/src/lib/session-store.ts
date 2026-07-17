@@ -20,6 +20,9 @@ export interface Session {
   /** Long-lived rotating token used to mint new access tokens on 401. */
   refreshToken?: string;
   user: SessionUser;
+  /** Selling location for this session, as stated by the server at login. */
+  branchId: string | null;
+  registerId: string | null;
   branchName: string;
   registerName: string;
 }

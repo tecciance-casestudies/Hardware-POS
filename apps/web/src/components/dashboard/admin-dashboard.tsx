@@ -21,15 +21,13 @@ import * as React from 'react';
 
 import { buttonVariants } from '@/components/ui/button';
 import type { Session } from '@/lib/auth';
-import { paymentStatusMeta } from '@/lib/dashboard/adapters';
 import {
-  demoComparison,
-  demoGrossProfit,
-  demoPaymentBreakdown,
-  demoSalesSeries,
-  demoSpark,
-  demoTopCategories,
-} from '@/lib/dashboard/demo';
+  buildComparison,
+  buildPaymentBreakdown,
+  buildTopCategoryRows,
+  paymentStatusMeta,
+} from '@/lib/dashboard/adapters';
+import { fetchSalesSeries } from '@/lib/dashboard-api';
 import { useDashboardData } from '@/lib/dashboard/use-dashboard-data';
 import type { AlertItem, DashboardMetric } from '@/lib/dashboard/types';
 import { Permission, type UserRole } from '@/lib/permissions';
@@ -37,7 +35,6 @@ import { formatMoney, cn } from '@/lib/utils';
 
 import {
   CardSkeleton,
-  DemoBadge,
   EmptyState,
   KpiSkeleton,
   KPIGrid,
@@ -66,6 +63,7 @@ export function AdminDashboard({
   const netSales = data.stats?.todaySalesTotal ?? 0;
   const txns = data.stats?.todayTransactions ?? 0;
   const aov = txns > 0 ? netSales / txns : 0;
+  const summary = data.summary;
 
   const kpis: MetricSpec[] = [
     {
@@ -75,10 +73,11 @@ export function AdminDashboard({
         label: 'Net Sales',
         value: formatMoney(netSales),
         helpText: "Total value of today's completed sales.",
-        comparison: demoComparison(18.4, 'vs last period'),
-        spark: demoSpark('up'),
+        comparison: summary
+          ? buildComparison(summary.netSales.value, summary.netSales.prevValue)
+          : undefined,
+        spark: summary?.netSales.series,
         destination: '/sales',
-        isDemo: true,
       },
     },
     ...(canReport
@@ -88,12 +87,14 @@ export function AdminDashboard({
             metric: {
               id: 'gross-profit',
               label: 'Gross Profit',
-              value: formatMoney(demoGrossProfit(netSales)),
-              helpText: 'Estimated margin. Requires verified product cost data.',
-              comparison: demoComparison(15.7, 'vs last period'),
-              spark: demoSpark('up'),
+              value: formatMoney(summary?.grossProfit.value ?? 0),
+              helpText:
+                'Last 7 days: revenue minus known product costs (items without a cost price count at full margin).',
+              comparison: summary
+                ? buildComparison(summary.grossProfit.value, summary.grossProfit.prevValue)
+                : undefined,
+              spark: summary?.grossProfit.series,
               destination: '/sales',
-              isDemo: true,
             } satisfies DashboardMetric,
           },
         ]
@@ -159,7 +160,7 @@ export function AdminDashboard({
       {/* Analytics row: sales performance | quickbooks | alerts */}
       <div className="grid min-w-0 gap-4 xl:grid-cols-3">
         <div className="xl:col-span-1 2xl:col-span-1">
-          <SalesPerformance />
+          <SalesPerformance session={session} />
         </div>
         <QuickBooksHealthCard health={data.quickbooks} />
         <AdminAlerts alerts={alerts} loading={data.loading && !data.stats} />
@@ -167,8 +168,8 @@ export function AdminDashboard({
 
       {/* Secondary analytics row */}
       <div className="grid min-w-0 gap-4 xl:grid-cols-2 2xl:grid-cols-4">
-        <PaymentMethodsCard />
-        <TopCategoriesCard />
+        <PaymentMethodsCard rows={buildPaymentBreakdown(data.paymentMethods)} />
+        <TopCategoriesCard rows={buildTopCategoryRows(data.topCategories)} />
         <QuotationPipelineCard
           pipeline={data.pipeline}
           loading={data.loading && !data.quotations.length}
@@ -241,14 +242,45 @@ function AdminHeader({
   );
 }
 
-function SalesPerformance() {
+const RANGE_DAYS: Record<Range, number> = { '7D': 7, '30D': 30, '3M': 90, '6M': 180, '1Y': 365 };
+
+function SalesPerformance({ session }: { session: Session }) {
   const [range, setRange] = React.useState<Range>('7D');
-  const series = demoSalesSeries();
+  const [series, setSeries] = React.useState<{ label: string; value: number }[]>([]);
+  const [comparisonLabel, setComparisonLabel] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    const days = RANGE_DAYS[range];
+    const from = new Date();
+    from.setHours(0, 0, 0, 0);
+    from.setDate(from.getDate() - (days - 1));
+    fetchSalesSeries(session, { from })
+      .then((points) => {
+        if (cancelled) return;
+        setSeries(
+          points.map((p) => ({
+            label: new Date(p.bucket).toLocaleDateString('en-LK', {
+              day: '2-digit',
+              month: 'short',
+            }),
+            value: p.value,
+          })),
+        );
+        setComparisonLabel(`this ${range}`);
+      })
+      .catch(() => {
+        if (!cancelled) setSeries([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [session, range]);
+
   const total = series.reduce((s, d) => s + d.value, 0);
   return (
     <SectionCard
       title="Sales Performance"
-      badge={<DemoBadge />}
       className="h-full"
       action={
         <div role="tablist" aria-label="Sales performance range" className="flex gap-1">
@@ -271,12 +303,15 @@ function SalesPerformance() {
     >
       <div className="mb-3 flex items-baseline gap-2">
         <span className="text-xl font-bold tracking-tight">{formatMoney(total)}</span>
-        <span className="flex items-center gap-1 text-xs font-medium text-success">
-          <TrendingUp className="h-3.5 w-3.5" /> +18.4%{' '}
-          <span className="font-normal text-muted-foreground">this {range}</span>
-        </span>
+        {comparisonLabel ? (
+          <span className="text-xs font-normal text-muted-foreground">{comparisonLabel}</span>
+        ) : null}
       </div>
-      <MiniBarChart data={series} ariaLabel={`Net sales for the selected ${range} period`} />
+      {series.length === 0 ? (
+        <EmptyState message="No sales in this period — Completed sales will chart here." />
+      ) : (
+        <MiniBarChart data={series} ariaLabel={`Net sales for the selected ${range} period`} />
+      )}
     </SectionCard>
   );
 }
@@ -390,10 +425,16 @@ function AdminAlerts({ alerts, loading }: { alerts: AlertItem[]; loading: boolea
   );
 }
 
-function PaymentMethodsCard() {
-  const rows = demoPaymentBreakdown();
+function PaymentMethodsCard({ rows }: { rows: ReturnType<typeof buildPaymentBreakdown> }) {
+  if (rows.length === 0) {
+    return (
+      <SectionCard title="Payment Methods" className="h-full">
+        <EmptyState message="No payments yet — Payment splits appear as sales come in." />
+      </SectionCard>
+    );
+  }
   return (
-    <SectionCard title="Payment Methods" badge={<DemoBadge />} className="h-full">
+    <SectionCard title="Payment Methods" className="h-full">
       <ul className="space-y-3">
         {rows.map((r) => (
           <li key={r.key} className="space-y-1.5">
@@ -411,12 +452,17 @@ function PaymentMethodsCard() {
   );
 }
 
-function TopCategoriesCard() {
-  const rows = demoTopCategories();
+function TopCategoriesCard({ rows }: { rows: ReturnType<typeof buildTopCategoryRows> }) {
+  if (rows.length === 0) {
+    return (
+      <SectionCard title="Top Categories" className="h-full" action={<ViewAllLink href="/products" />}>
+        <EmptyState message="No category sales yet — Rankings build as sales complete." />
+      </SectionCard>
+    );
+  }
   return (
     <SectionCard
       title="Top Categories"
-      badge={<DemoBadge />}
       className="h-full"
       action={<ViewAllLink href="/products" />}
     >

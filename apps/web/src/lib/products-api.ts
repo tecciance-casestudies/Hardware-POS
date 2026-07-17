@@ -28,6 +28,7 @@ export interface ManagedProduct {
   isActive: boolean;
   quickbooksItemId: string | null;
   syncStatus: ProductSyncStatus;
+  lastSyncedAt: string | null;
 }
 
 export interface ProductsPage {

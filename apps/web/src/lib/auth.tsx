@@ -20,6 +20,8 @@ interface LoginResponse {
   token: string;
   refreshToken: string;
   user: Omit<SessionUser, 'permissions'>;
+  branch: { id: string; name: string } | null;
+  register: { id: string; name: string } | null;
 }
 
 interface AuthContextValue {
@@ -39,8 +41,10 @@ function toSession(res: LoginResponse): Session {
     token: res.token,
     refreshToken: res.refreshToken,
     user: { ...res.user, permissions: permissionsForRole(res.user.role) },
-    branchName: 'Main Branch',
-    registerName: 'Register 1',
+    branchId: res.branch?.id ?? null,
+    registerId: res.register?.id ?? null,
+    branchName: res.branch?.name ?? 'No branch assigned',
+    registerName: res.register?.name ?? '—',
   };
 }
 

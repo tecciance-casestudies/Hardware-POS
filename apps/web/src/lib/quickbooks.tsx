@@ -2,20 +2,25 @@
 
 import * as React from 'react';
 
+import { api } from './api';
+import { useAuth, type Session } from './auth';
+import { fetchProducts } from './products-api';
+import { syncQuickBooksProducts, type SyncProductsSummary } from './quickbooks-api';
+
 export type SyncState = 'SYNCED' | 'SYNCING' | 'FAILED' | 'PENDING' | 'NOT_SYNCED';
 
 export interface QbCompany {
   name: string;
   realmId: string;
   environment: string;
-  /** ISO currency code configured on the connected QuickBooks company. */
-  currency: string;
+  /** ISO currency code configured on the connected QuickBooks company (null while unknown). */
+  currency: string | null;
 }
 
 export interface QbProduct {
   id: string;
   name: string;
-  sku: string;
+  sku: string | null;
   quickbooksItemId: string;
   unitPrice: number;
   quantityOnHand: number;
@@ -23,7 +28,7 @@ export interface QbProduct {
   lastSyncISO: string | null;
 }
 
-export type QbLogType = 'PRODUCT_PULL' | 'SALE_PUSH' | 'CUSTOMER_PULL' | 'CONNECTION';
+export type QbLogType = 'PRODUCT_PULL' | 'SALE_PUSH' | 'RETURN_PUSH' | 'CUSTOMER_PULL' | 'CONNECTION';
 
 export interface QbLogEntry {
   id: string;
@@ -46,59 +51,6 @@ export interface QbState {
   products: QbProduct[];
 }
 
-const STORAGE_KEY = 'hpos.quickbooks';
-
-// Simulated QBO catalog (mirrors the dev seed). This whole provider is a
-// client-side simulation pending a rewire to the real /quickbooks API.
-const SEED_PRODUCTS: QbProduct[] = (
-  [
-    ['p1', 'Cement 50kg Bag', 'CEM-50', 2650, 120],
-    ['p2', 'PVC Pipe 2 inch', 'PVC-2IN', 1450, 200],
-    ['p3', 'Paint Brush 2 inch', 'BRSH-2IN', 380, 350],
-    ['p4', 'Door Lock Set', 'LOCK-STD', 4850, 60],
-    ['p5', 'Electrical Wire 1mm', 'WIRE-1MM', 95, 5000],
-    ['p6', 'Tile Adhesive 20kg', 'ADH-20', 3400, 90],
-    ['p7', 'Screw Box 1 inch', 'SCRW-1IN', 1050, 240],
-    ['p8', 'Safety Gloves', 'GLOV-STD', 640, 300],
-    ['p9', 'Water Tap', 'TAP-STD', 2100, 150],
-    ['p10', 'Wall Paint 4L', 'PAINT-4L', 6750, 80],
-  ] as const
-).map(([id, name, sku, unitPrice, quantityOnHand], i) => ({
-  id,
-  name,
-  sku,
-  quickbooksItemId: `QBO-ITEM-${1001 + i}`,
-  unitPrice,
-  quantityOnHand,
-  syncStatus: 'SYNCED' as const,
-  lastSyncISO: '2026-07-09T09:42:00Z',
-}));
-
-const SEED_LOG: QbLogEntry[] = [
-  { id: 'l1', tsISO: '2026-07-09T09:42:00Z', type: 'PRODUCT_PULL', direction: 'INBOUND', status: 'SYNCED', message: 'Pulled 10 products, prices and stock' },
-  { id: 'l2', tsISO: '2026-07-09T09:40:00Z', type: 'SALE_PUSH', direction: 'OUTBOUND', status: 'SYNCED', message: 'Sales Receipt QBO-SR-S-000012 created' },
-  { id: 'l3', tsISO: '2026-07-09T09:38:00Z', type: 'SALE_PUSH', direction: 'OUTBOUND', status: 'FAILED', message: 'Invoice sync failed: token refresh required (will retry)' },
-  { id: 'l4', tsISO: '2026-07-09T08:15:00Z', type: 'CONNECTION', direction: 'INBOUND', status: 'SYNCED', message: 'Connected to Hardware Store Demo Co.' },
-];
-
-/** Default (seeded connected) state — deterministic so SSR and first client render match. */
-const CONNECTED_STATE: QbState = {
-  connected: true,
-  company: {
-    name: 'Hardware Store Demo Co.',
-    realmId: '9341452786538291',
-    environment: 'Sandbox',
-    currency: 'LKR',
-  },
-  connectedAtISO: '2026-07-09T08:15:00Z',
-  lastSyncISO: '2026-07-09T09:42:00Z',
-  productSync: { status: 'SYNCED', count: 10, lastSyncISO: '2026-07-09T09:42:00Z' },
-  salesSync: { status: 'SYNCED', pushed: 24, lastSyncISO: '2026-07-09T09:40:00Z' },
-  errorsCount: 1,
-  log: SEED_LOG,
-  products: SEED_PRODUCTS,
-};
-
 const DISCONNECTED_STATE: QbState = {
   connected: false,
   company: null,
@@ -111,92 +63,227 @@ const DISCONNECTED_STATE: QbState = {
   products: [],
 };
 
-function rid(): string {
-  return Math.random().toString(36).slice(2, 10);
+// ── API response shapes ──────────────────────────────────────────────────────
+
+interface ConnectionStatus {
+  connected: boolean;
+  realmId: string | null;
+  environment: string | null;
+  tokenExpiresAt: string | null;
+  connectedAt: string | null;
+  companyName: string | null;
+  currency: string | null;
+}
+
+interface QueueStatus {
+  pendingCount: number;
+  failedCount: number;
+  pushedSalesCount: number;
+  lastSyncedAt: string | null;
+  quickbooksConnected: boolean;
+}
+
+interface SyncLogRow {
+  id: string;
+  entityType: string;
+  direction: string;
+  status: SyncState;
+  message: string | null;
+  createdAt: string;
+}
+
+const LOG_TYPE_BY_ENTITY: Record<string, QbLogType> = {
+  PRODUCT: 'PRODUCT_PULL',
+  SALE: 'SALE_PUSH',
+  RETURN: 'RETURN_PUSH',
+  CUSTOMER: 'CUSTOMER_PULL',
+  CONNECTION: 'CONNECTION',
+};
+
+function auth(session: Session): { token: string; tenantId: string } {
+  return { token: session.token, tenantId: session.user.tenantId };
+}
+
+function latestOf(a: string | null, b: string | null): string | null {
+  if (!a) return b;
+  if (!b) return a;
+  return a > b ? a : b;
+}
+
+function buildState(
+  connection: ConnectionStatus,
+  queue: QueueStatus | null,
+  logs: SyncLogRow[],
+  products: QbProduct[],
+): QbState {
+  if (!connection.connected || !connection.realmId) {
+    return DISCONNECTED_STATE;
+  }
+
+  const log: QbLogEntry[] = logs.map((row) => ({
+    id: row.id,
+    tsISO: row.createdAt,
+    type: LOG_TYPE_BY_ENTITY[row.entityType] ?? 'CONNECTION',
+    direction: row.direction === 'OUTBOUND' ? 'OUTBOUND' : 'INBOUND',
+    status: row.status,
+    message: row.message ?? '',
+  }));
+
+  const lastProductPull = log.find((l) => l.type === 'PRODUCT_PULL');
+  const productSyncStatus: SyncState =
+    lastProductPull?.status ?? (products.length > 0 ? 'SYNCED' : 'NOT_SYNCED');
+
+  const salesSyncStatus: SyncState = !queue
+    ? 'NOT_SYNCED'
+    : queue.failedCount > 0
+      ? 'FAILED'
+      : queue.pendingCount > 0
+        ? 'PENDING'
+        : queue.pushedSalesCount > 0
+          ? 'SYNCED'
+          : 'NOT_SYNCED';
+
+  const environment = connection.environment
+    ? connection.environment.charAt(0).toUpperCase() + connection.environment.slice(1)
+    : 'Sandbox';
+
+  return {
+    connected: true,
+    company: {
+      name: connection.companyName ?? `QuickBooks company ${connection.realmId}`,
+      realmId: connection.realmId,
+      environment,
+      currency: connection.currency,
+    },
+    connectedAtISO: connection.connectedAt,
+    lastSyncISO: latestOf(lastProductPull?.tsISO ?? null, queue?.lastSyncedAt ?? null),
+    productSync: {
+      status: productSyncStatus,
+      count: products.length,
+      lastSyncISO: lastProductPull?.tsISO ?? null,
+    },
+    salesSync: {
+      status: salesSyncStatus,
+      pushed: queue?.pushedSalesCount ?? 0,
+      lastSyncISO: queue?.lastSyncedAt ?? null,
+    },
+    errorsCount: queue?.failedCount ?? 0,
+    log,
+    products,
+  };
 }
 
 interface QuickBooksContextValue {
   state: QbState;
-  connect: () => void;
-  disconnect: () => void;
-  syncProducts: () => void;
+  loading: boolean;
+  error: string | null;
+  refresh: () => Promise<void>;
+  /** Fetch the Intuit authorization URL and navigate the browser to it. */
+  connect: () => Promise<void>;
+  disconnect: () => Promise<void>;
+  /** Trigger a product pull; resolves with the summary (null on failure). */
+  syncProducts: () => Promise<SyncProductsSummary | null>;
 }
 
 const QuickBooksContext = React.createContext<QuickBooksContextValue | null>(null);
 
 export function QuickBooksProvider({ children }: { children: React.ReactNode }) {
-  const [state, setState] = React.useState<QbState>(CONNECTED_STATE);
+  const { session } = useAuth();
+  const [state, setState] = React.useState<QbState>(DISCONNECTED_STATE);
+  const [loading, setLoading] = React.useState(true);
+  const [syncing, setSyncing] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+
+  const refresh = React.useCallback(async () => {
+    if (!session) {
+      setState(DISCONNECTED_STATE);
+      setLoading(false);
+      return;
+    }
+    try {
+      const connection = await api.get<ConnectionStatus>('/quickbooks/status', auth(session));
+      if (!connection.connected) {
+        setState(DISCONNECTED_STATE);
+        setError(null);
+        return;
+      }
+      // Secondary data is best-effort: a failed piece degrades to empty, not a dead page.
+      const [queue, logs, products] = await Promise.allSettled([
+        api.get<QueueStatus>('/sync/status', auth(session)),
+        api.get<{ items: SyncLogRow[] }>('/sync/logs?page=1&pageSize=50', auth(session)),
+        fetchProducts(session, { pageSize: 200 }),
+      ]);
+      setState(
+        buildState(
+          connection,
+          queue.status === 'fulfilled' ? queue.value : null,
+          logs.status === 'fulfilled' ? logs.value.items : [],
+          products.status === 'fulfilled'
+            ? products.value.items
+                .filter((p) => p.quickbooksItemId != null)
+                .map((p) => ({
+                  id: p.id,
+                  name: p.name,
+                  sku: p.sku,
+                  quickbooksItemId: p.quickbooksItemId as string,
+                  unitPrice: p.unitPrice,
+                  quantityOnHand: p.quantityOnHand,
+                  syncStatus: p.syncStatus,
+                  lastSyncISO: p.lastSyncedAt,
+                }))
+            : [],
+        ),
+      );
+      setError(null);
+    } catch (err) {
+      setState(DISCONNECTED_STATE);
+      setError(err instanceof Error ? err.message : 'Could not load QuickBooks status');
+    } finally {
+      setLoading(false);
+    }
+  }, [session]);
 
   React.useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const connect = React.useCallback(async () => {
+    if (!session) return;
+    const { url } = await api.get<{ url: string }>('/quickbooks/connect', auth(session));
+    window.location.assign(url);
+  }, [session]);
+
+  const disconnect = React.useCallback(async () => {
+    if (!session) return;
     try {
-      const raw = window.localStorage.getItem(STORAGE_KEY);
-      if (raw) setState(JSON.parse(raw) as QbState);
-    } catch {
-      /* ignore */
+      await api.post('/quickbooks/disconnect', undefined, auth(session));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Disconnect failed');
     }
-  }, []);
+    await refresh();
+  }, [session, refresh]);
 
-  React.useEffect(() => {
+  const syncProducts = React.useCallback(async (): Promise<SyncProductsSummary | null> => {
+    if (!session) return null;
+    setSyncing(true);
     try {
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-    } catch {
-      /* ignore */
+      const summary = await syncQuickBooksProducts(session);
+      await refresh();
+      return summary;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Product sync failed');
+      return null;
+    } finally {
+      setSyncing(false);
     }
-  }, [state]);
+  }, [session, refresh]);
 
-  const runProductSync = React.useCallback(() => {
-    setState((s) => ({ ...s, productSync: { ...s.productSync, status: 'SYNCING' } }));
-    window.setTimeout(() => {
-      const nowISO = new Date().toISOString();
-      setState((s) => ({
-        ...s,
-        lastSyncISO: nowISO,
-        productSync: { status: 'SYNCED', count: s.products.length, lastSyncISO: nowISO },
-        products: s.products.map((p) => ({ ...p, syncStatus: 'SYNCED', lastSyncISO: nowISO })),
-        log: [
-          {
-            id: rid(),
-            tsISO: nowISO,
-            type: 'PRODUCT_PULL',
-            direction: 'INBOUND',
-            status: 'SYNCED',
-            message: `Pulled ${s.products.length} products, prices and stock`,
-          },
-          ...s.log,
-        ],
-      }));
-    }, 1200);
-  }, []);
-
-  const connect = React.useCallback(() => {
-    const nowISO = new Date().toISOString();
-    setState({
-      ...CONNECTED_STATE,
-      connectedAtISO: nowISO,
-      lastSyncISO: nowISO,
-      errorsCount: 0,
-      log: [
-        {
-          id: rid(),
-          tsISO: nowISO,
-          type: 'CONNECTION',
-          direction: 'INBOUND',
-          status: 'SYNCED',
-          message: 'Connected to Hardware Store Demo Co. (simulated)',
-        },
-      ],
-      products: SEED_PRODUCTS.map((p) => ({ ...p, lastSyncISO: nowISO })),
-      productSync: { status: 'SYNCED', count: SEED_PRODUCTS.length, lastSyncISO: nowISO },
-      salesSync: { status: 'PENDING', pushed: 0, lastSyncISO: null },
-    });
-  }, []);
-
-  const disconnect = React.useCallback(() => setState(DISCONNECTED_STATE), []);
-
-  const value = React.useMemo(
-    () => ({ state, connect, disconnect, syncProducts: runProductSync }),
-    [state, connect, disconnect, runProductSync],
-  );
+  const value = React.useMemo(() => {
+    const visibleState = syncing
+      ? { ...state, productSync: { ...state.productSync, status: 'SYNCING' as SyncState } }
+      : state;
+    return { state: visibleState, loading, error, refresh, connect, disconnect, syncProducts };
+  }, [state, syncing, loading, error, refresh, connect, disconnect, syncProducts]);
 
   return <QuickBooksContext.Provider value={value}>{children}</QuickBooksContext.Provider>;
 }

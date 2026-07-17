@@ -4,9 +4,19 @@ import { api, authorizedFetch } from './api';
 import type { Session } from './auth';
 import type { DiscountType } from './cart';
 
-/** Seeded dev branch/register (the app targets the demo tenant). */
-export const DEV_BRANCH_ID = 'brn_dev';
-export const DEV_REGISTER_ID = 'reg_dev';
+import type { Session as LocationSession } from './session-store';
+
+/**
+ * The branch/register a sale is recorded against — the session's real
+ * location as stated by the server at login. Throws when the user has no
+ * branch (misconfigured tenant) so a sale is never invented against one.
+ */
+export function saleLocation(session: LocationSession): { branchId: string; registerId?: string } {
+  if (!session.branchId) {
+    throw new Error('No branch is assigned to this account — ask an admin to set one up.');
+  }
+  return { branchId: session.branchId, registerId: session.registerId ?? undefined };
+}
 
 function auth(session: Session): { token: string; tenantId: string } {
   return { token: session.token, tenantId: session.user.tenantId };
@@ -160,13 +170,26 @@ export interface SaleDetailPayment {
   syncStatus: SyncStatusCode;
 }
 
+export interface SaleCustomerContact {
+  id: string;
+  name: string;
+  companyName?: string | null;
+  email?: string | null;
+  phone?: string | null;
+  billingAddress?: string | null;
+  taxNumber?: string | null;
+}
+
 export interface SaleDetail {
   id: string;
   saleNumber: string;
   status: SaleStatusCode;
   createdAt: string;
   completedAt: string | null;
-  customer: { id: string; name: string } | null;
+  customer: SaleCustomerContact | null;
+  branch: { id: string; name: string; code: string; address: string | null; phone: string | null } | null;
+  register: { id: string; name: string; code: string } | null;
+  cashier: { id: string; name: string } | null;
   subtotal: number;
   totalDiscount: number;
   orderDiscountType: DiscountType | null;
@@ -194,7 +217,10 @@ interface ApiSaleDetail {
   status: SaleStatusCode;
   createdAt: string;
   completedAt: string | null;
-  customer: { id: string; name: string } | null;
+  customer: SaleCustomerContact | null;
+  branch: SaleDetail['branch'];
+  register: SaleDetail['register'];
+  cashier: SaleDetail['cashier'];
   subtotal: string | number;
   totalDiscount: string | number;
   orderDiscountType: DiscountType | null;
@@ -301,6 +327,9 @@ export async function fetchSale(session: Session, id: string): Promise<SaleDetai
     createdAt: s.createdAt,
     completedAt: s.completedAt,
     customer: s.customer,
+    branch: s.branch ?? null,
+    register: s.register ?? null,
+    cashier: s.cashier ?? null,
     subtotal: Number(s.subtotal),
     totalDiscount: Number(s.totalDiscount),
     orderDiscountType: s.orderDiscountType,

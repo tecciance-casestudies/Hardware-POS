@@ -29,7 +29,7 @@ import {
   type QuotationDetail,
   type QuotationRevisionSummary,
 } from '@/lib/quotations';
-import { DEV_BRANCH_ID, DEV_REGISTER_ID } from '@/lib/sales';
+import { saleLocation } from '@/lib/sales';
 import { formatMoney } from '@/lib/utils';
 
 const STATUS_BADGE: Record<QuotationStatusCode, 'neutral' | 'primary' | 'success' | 'warning' | 'danger'> = {
@@ -120,8 +120,7 @@ export default function QuotationDetailPage() {
   async function convert(withPayment: boolean) {
     const res = await withBusy(() =>
       convertQuotationToSale(session!, q!.id, {
-        branchId: DEV_BRANCH_ID,
-        registerId: DEV_REGISTER_ID,
+        ...saleLocation(session!),
         payments: withPayment ? [{ method: 'CASH', amount: q!.grandTotal }] : [],
       }),
     );

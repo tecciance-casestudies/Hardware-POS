@@ -21,22 +21,20 @@ import { buttonVariants } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Tooltip } from '@/components/ui/tooltip';
 import type { Session } from '@/lib/auth';
-import { paymentStatusMeta } from '@/lib/dashboard/adapters';
 import {
-  demoFrequentItems,
-  demoPaymentBreakdown,
-  demoShiftSummary,
-  demoSpark,
-  demoTopCategories,
-} from '@/lib/dashboard/demo';
-import type { DashboardMetric } from '@/lib/dashboard/types';
+  buildFrequentItems,
+  buildPaymentBreakdown,
+  buildShiftSummary,
+  buildTopCategoryRows,
+  paymentStatusMeta,
+} from '@/lib/dashboard/adapters';
+import type { DashboardMetric, ShiftSummary } from '@/lib/dashboard/types';
 import { useDashboardData } from '@/lib/dashboard/use-dashboard-data';
 import { Permission } from '@/lib/permissions';
 import { cn, formatMoney } from '@/lib/utils';
 
 import {
   CardSkeleton,
-  DemoBadge,
   EmptyState,
   KpiSkeleton,
   MetricCard,
@@ -53,7 +51,7 @@ export function CashierDashboard({
   session: Session;
   hasPermission: (p: Permission) => boolean;
 }) {
-  const data = useDashboardData(session);
+  const data = useDashboardData(session, 'cashier');
   const canReturn = hasPermission(Permission.RETURN_CREATE);
   const canQuote = hasPermission(Permission.QUOTATION_CREATE);
   const canAddCustomer = hasPermission(Permission.CUSTOMER_MANAGE);
@@ -61,7 +59,8 @@ export function CashierDashboard({
   const todaySales = data.stats?.todaySalesTotal ?? 0;
   const txns = data.stats?.todayTransactions ?? 0;
   const avgBill = txns > 0 ? todaySales / txns : 0;
-  const shift = demoShiftSummary();
+  const shift = buildShiftSummary(data.shift);
+  const spark = data.summary?.netSales.series;
 
   const kpis: { metric: DashboardMetric; icon: LucideIcon }[] = [
     {
@@ -71,7 +70,7 @@ export function CashierDashboard({
         label: "Today's Sales",
         value: formatMoney(todaySales),
         helpText: 'Total value of sales you completed today.',
-        spark: demoSpark('up'),
+        spark,
         destination: '/sales',
       },
     },
@@ -82,7 +81,6 @@ export function CashierDashboard({
         label: 'Transactions Today',
         value: txns.toLocaleString(),
         helpText: 'Number of sales completed today.',
-        spark: demoSpark('steady'),
         destination: '/sales',
       },
     },
@@ -99,10 +97,9 @@ export function CashierDashboard({
       icon: Banknote,
       metric: {
         id: 'drawer',
-        label: 'Cash Drawer Balance',
-        value: formatMoney(shift.drawerBalance),
-        helpText: 'Current expected cash in your drawer.',
-        isDemo: true,
+        label: 'Expected Cash',
+        value: formatMoney(shift.expectedCash),
+        helpText: 'Cash received today minus refunds (no drawer counts yet).',
       },
     },
   ];
@@ -125,14 +122,14 @@ export function CashierDashboard({
         </div>
         <div className="flex min-w-0 flex-col gap-4">
           <QuickAccessCard canAddCustomer={canAddCustomer} canQuote={canQuote} />
-          <PaymentMethodsCard />
+          <PaymentMethodsCard rows={buildPaymentBreakdown(data.paymentMethods)} />
         </div>
         <ShiftSummaryCard shift={shift} />
       </div>
 
       <div className="grid min-w-0 gap-4 xl:grid-cols-2">
-        <TopCategoriesCard />
-        <FrequentlySoldItemsCard />
+        <TopCategoriesCard rows={buildTopCategoryRows(data.topCategories)} />
+        <FrequentlySoldItemsCard items={buildFrequentItems(data.frequentItems)} />
       </div>
 
       <p className="pb-2 text-center text-xs text-muted-foreground">
@@ -331,7 +328,7 @@ function QuickAccessCard({
   );
 }
 
-function ShiftSummaryCard({ shift }: { shift: ReturnType<typeof demoShiftSummary> }) {
+function ShiftSummaryCard({ shift }: { shift: ShiftSummary }) {
   const diff = shift.difference;
   const diffLabel =
     diff === 0
@@ -343,7 +340,6 @@ function ShiftSummaryCard({ shift }: { shift: ReturnType<typeof demoShiftSummary
   return (
     <SectionCard
       title="Shift Summary"
-      badge={<DemoBadge />}
       className="h-full"
       action={
         <Badge variant={shift.isOpen ? 'success' : 'neutral'}>
@@ -402,10 +398,16 @@ function SummaryRow({
   );
 }
 
-function PaymentMethodsCard() {
-  const rows = demoPaymentBreakdown();
+function PaymentMethodsCard({ rows }: { rows: ReturnType<typeof buildPaymentBreakdown> }) {
+  if (rows.length === 0) {
+    return (
+      <SectionCard title="Payment Methods">
+        <EmptyState message="No payments yet — Your payment mix appears as you sell." />
+      </SectionCard>
+    );
+  }
   return (
-    <SectionCard title="Payment Methods" badge={<DemoBadge />}>
+    <SectionCard title="Payment Methods">
       <ul className="space-y-2.5">
         {rows.map((r) => (
           <li key={r.key} className="space-y-1">
@@ -423,12 +425,17 @@ function PaymentMethodsCard() {
   );
 }
 
-function TopCategoriesCard() {
-  const rows = demoTopCategories();
+function TopCategoriesCard({ rows }: { rows: ReturnType<typeof buildTopCategoryRows> }) {
+  if (rows.length === 0) {
+    return (
+      <SectionCard title="Top Categories" action={<ViewAllLink href="/products" />}>
+        <EmptyState message="No category sales yet — Rankings build as sales complete." />
+      </SectionCard>
+    );
+  }
   return (
     <SectionCard
       title="Top Categories"
-      badge={<DemoBadge />}
       action={<ViewAllLink href="/products" />}
     >
       <ol className="grid gap-2.5 sm:grid-cols-2">
@@ -450,12 +457,17 @@ function TopCategoriesCard() {
   );
 }
 
-function FrequentlySoldItemsCard() {
-  const items = demoFrequentItems();
+function FrequentlySoldItemsCard({ items }: { items: ReturnType<typeof buildFrequentItems> }) {
+  if (items.length === 0) {
+    return (
+      <SectionCard title="Frequently Sold Items" action={<ViewAllLink href="/products" />}>
+        <EmptyState message="No sales yet — Your most-sold items will collect here." />
+      </SectionCard>
+    );
+  }
   return (
     <SectionCard
       title="Frequently Sold Items"
-      badge={<DemoBadge />}
       action={<ViewAllLink href="/products" />}
     >
       <ul className="grid gap-2.5 sm:grid-cols-2">

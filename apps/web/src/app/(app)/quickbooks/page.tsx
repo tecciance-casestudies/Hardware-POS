@@ -1,5 +1,6 @@
 'use client';
 
+import * as React from 'react';
 import Link from 'next/link';
 import { Building2, Link2, Link2Off, RefreshCw, ScrollText } from 'lucide-react';
 
@@ -14,12 +15,59 @@ import { formatQbTime, useQuickBooks } from '@/lib/quickbooks';
 import { cn } from '@/lib/utils';
 
 export default function QuickBooksOverviewPage() {
-  const { state, disconnect, syncProducts } = useQuickBooks();
+  const { state, loading, error, disconnect, syncProducts } = useQuickBooks();
   const { hasPermission } = useAuth();
   const canManage = hasPermission(Permission.QUICKBOOKS_MANAGE);
 
+  // Result of the OAuth round-trip: the API callback redirects here with
+  // ?connected=1 or ?error=… — surface it once and clean the URL.
+  const [notice, setNotice] = React.useState<{ tone: 'success' | 'danger'; text: string } | null>(
+    null,
+  );
+  React.useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const failure = params.get('error');
+    if (params.get('connected') === '1') {
+      setNotice({ tone: 'success', text: 'QuickBooks connected successfully.' });
+    } else if (failure) {
+      setNotice({ tone: 'danger', text: `QuickBooks connection failed: ${failure}` });
+    }
+    if (params.has('connected') || params.has('error')) {
+      window.history.replaceState(null, '', window.location.pathname);
+    }
+  }, []);
+
+  if (loading) {
+    return (
+      <Card>
+        <CardContent className="py-16 text-center text-sm text-muted-foreground">
+          Loading QuickBooks status…
+        </CardContent>
+      </Card>
+    );
+  }
+
   return (
     <div className="space-y-6">
+      {notice ? (
+        <div
+          role="status"
+          className={cn(
+            'rounded-xl border p-4 text-sm',
+            notice.tone === 'success'
+              ? 'border-success/40 bg-success-soft/50 text-success'
+              : 'border-danger/40 bg-danger-soft/50 text-danger',
+          )}
+        >
+          {notice.text}
+        </div>
+      ) : null}
+      {error ? (
+        <div role="alert" className="rounded-xl border border-danger/40 bg-danger-soft/50 p-4 text-sm text-danger">
+          {error}
+        </div>
+      ) : null}
+
       {/* Connection */}
       <Card>
         <CardHeader className="flex-row items-center justify-between">
@@ -45,7 +93,7 @@ export default function QuickBooksOverviewPage() {
               <div className="grid gap-4 sm:grid-cols-3">
                 <Field label="Connected company" value={state.company.name} icon />
                 <Field label="Realm ID" value={state.company.realmId} />
-                <Field label="Company currency" value={state.company.currency} />
+                <Field label="Company currency" value={state.company.currency ?? '—'} />
                 <Field label="Last sync" value={formatQbTime(state.lastSyncISO)} />
               </div>
               <div className="mt-4">

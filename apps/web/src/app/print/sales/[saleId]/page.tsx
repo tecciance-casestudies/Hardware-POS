@@ -48,7 +48,7 @@ export default function SalePrintPage() {
         if (!active) return;
         setSale(saleData);
         setProfile(prof);
-        setMeta(saleMetaFromSession(s, prof));
+        setMeta(saleMetaFromSession(s, prof, saleData));
       } catch (e) {
         if (active) setError(e instanceof Error ? e.message : 'Could not load the sale');
       } finally {

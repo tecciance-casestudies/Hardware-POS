@@ -91,12 +91,24 @@ export function getCachedDocumentProfile(): DocumentProfile {
   return readCache() ?? DEFAULT_DOCUMENT_PROFILE;
 }
 
-/** Build the branch/register/cashier meta for a sale from the current session. */
-export function saleMetaFromSession(session: Session, profile: DocumentProfile): SaleDocumentMeta {
+/**
+ * Build the branch/register/cashier meta for a sale document. The sale's own
+ * recorded location/cashier (now returned by GET /sales/:id) is the truth —
+ * the session is only a fallback for sales predating that data.
+ */
+export function saleMetaFromSession(
+  session: Session,
+  profile: DocumentProfile,
+  sale?: {
+    branch?: { name: string } | null;
+    register?: { name: string } | null;
+    cashier?: { name: string } | null;
+  },
+): SaleDocumentMeta {
   return {
     businessName: profile.companyName || 'Hardware POS',
-    branchName: session.branchName,
-    registerName: session.registerName,
-    cashierName: session.user.name,
+    branchName: sale?.branch?.name ?? session.branchName,
+    registerName: sale?.register?.name ?? session.registerName,
+    cashierName: sale?.cashier?.name ?? session.user.name,
   };
 }

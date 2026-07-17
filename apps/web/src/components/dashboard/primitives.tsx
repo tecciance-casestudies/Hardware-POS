@@ -75,17 +75,6 @@ const TREND_TONE = {
   neutral: 'text-muted-foreground',
 } as const;
 
-/** "Demo data" marker for panels backed by the dev-only adapter. */
-export function DemoBadge() {
-  return (
-    <Tooltip label="Demo data — awaiting a backend endpoint">
-      <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-        Demo
-      </span>
-    </Tooltip>
-  );
-}
-
 function InfoDot({ label }: { label: string }) {
   return (
     <Tooltip label={label}>
@@ -120,7 +109,6 @@ export function MetricCard({ metric, icon: Icon }: { metric: DashboardMetric; ic
       </div>
       <div className="mt-2 flex items-baseline gap-2">
         <span className="text-2xl font-bold tracking-tight">{metric.value}</span>
-        {metric.isDemo ? <DemoBadge /> : null}
       </div>
       {cmp ? (
         <div className="mt-1 flex min-h-5 items-center gap-2">

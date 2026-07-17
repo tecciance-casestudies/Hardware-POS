@@ -104,8 +104,10 @@ export function SaleA4Document({
           <div className="a4-party">
             <h3>Bill to</h3>
             <div className="a4-name">{sale.customer?.name ?? 'Walk-in customer'}</div>
-            {/* TODO(backend): SaleDetail.customer only carries id+name; company/
-                phone/email/address are not returned per-sale yet. */}
+            {sale.customer?.companyName ? <div>{sale.customer.companyName}</div> : null}
+            {sale.customer?.billingAddress ? <div>{sale.customer.billingAddress}</div> : null}
+            {sale.customer?.phone ? <div>{sale.customer.phone}</div> : null}
+            {sale.customer?.email ? <div>{sale.customer.email}</div> : null}
           </div>
           <div className="a4-meta-list">
             <div>
