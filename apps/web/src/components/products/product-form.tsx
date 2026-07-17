@@ -23,6 +23,7 @@ import {
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Dialog } from '@/components/ui/dialog';
+import { ApiError } from '@/lib/api';
 import type { Session } from '@/lib/auth';
 import { productDraftService } from '@/lib/product-draft';
 import {
@@ -70,6 +71,10 @@ export function ProductForm({
   const [imageBusy, setImageBusy] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const [draftSavedAt, setDraftSavedAt] = React.useState<string | null>(null);
+  const [draftSaving, setDraftSaving] = React.useState(false);
+  // Server-side draft product created by "Save draft" (create mode only —
+  // edit mode always works on the real product id).
+  const [serverDraftId, setServerDraftId] = React.useState<string | null>(null);
   const [confirmCancel, setConfirmCancel] = React.useState(false);
   const dirty = React.useRef(false);
 
@@ -98,6 +103,7 @@ export function ProductForm({
       setForm({ ...initialFormState(), ...draft.fields });
       setStep(draft.step >= 0 ? (STEPS[draft.step] ?? 'details') : 'details');
       setDraftSavedAt(draft.savedAt);
+      setServerDraftId(draft.serverProductId ?? null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -258,13 +264,72 @@ export function ProductForm({
   };
 
   // ---- draft ----
-  const saveDraft = () => {
-    const savedAt = productDraftService.save(productId, {
-      fields: form,
-      productType,
-      step: stepIndex,
-    });
-    setDraftSavedAt(savedAt);
+  const saveDraft = async () => {
+    setDraftSaving(true);
+    setError(null);
+    try {
+      // A draft is a real (hidden) product row, so partial fields get safe
+      // fallbacks that publishing will overwrite.
+      const draftInput: ProductInput = {
+        ...buildInput(),
+        name: form.name.trim() || 'Untitled product',
+        isDraft: true,
+      };
+
+      let id = editing && product ? product.id : serverDraftId;
+      if (id) {
+        try {
+          await updateProduct(session, id, draftInput);
+        } catch (err) {
+          // The stored draft id can go stale (deleted elsewhere) — start over.
+          if (!editing && err instanceof ApiError && err.status === 404) {
+            id = null;
+          } else {
+            throw err;
+          }
+        }
+      }
+      if (!id) {
+        const created = await createProduct(session, draftInput);
+        id = created.id;
+        setServerDraftId(id);
+      }
+
+      // Keep the draft's image and variation setup alongside it on the server.
+      if (pendingFile) {
+        try {
+          const updated = await uploadProductImage(session, id, pendingFile);
+          setImageUrl(updated.imageUrl);
+          setPendingFile(null);
+          if (pendingPreview) {
+            URL.revokeObjectURL(pendingPreview);
+            setPendingPreview(null);
+          }
+        } catch {
+          /* image can be retried on publish */
+        }
+      }
+      if (variations.data.enabled) {
+        await variationService.persist(id, variations.data);
+      }
+
+      if (!editing) {
+        // Wizard progress + server-draft link, so /products/new resumes here.
+        const savedAt = productDraftService.save(null, {
+          fields: form,
+          productType,
+          step: stepIndex,
+          serverProductId: id,
+        });
+        setDraftSavedAt(savedAt);
+      } else {
+        setDraftSavedAt(new Date().toISOString()); // edit mode is fully server-backed
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not save draft');
+    } finally {
+      setDraftSaving(false);
+    }
   };
 
   // ---- submit ----
@@ -289,6 +354,7 @@ export function ProductForm({
     taxable: form.taxable,
     requiresWarehousePickup: form.requiresWarehousePickup,
     isActive: form.isActive,
+    isDraft: false, // create/save is always a publish; only saveDraft keeps drafts
   });
 
   const submit = async () => {
@@ -323,7 +389,22 @@ export function ProductForm({
         productDraftService.clear(productId);
         router.push(`/products/${product.id}`);
       } else {
-        const created = await createProduct(session, input);
+        // Publishing a saved draft updates it in place; otherwise create fresh.
+        let created: ManagedProduct;
+        if (serverDraftId) {
+          try {
+            created = await updateProduct(session, serverDraftId, input);
+          } catch (err) {
+            // Stale draft pointer (deleted elsewhere) — fall back to creating.
+            if (err instanceof ApiError && err.status === 404) {
+              created = await createProduct(session, input);
+            } else {
+              throw err;
+            }
+          }
+        } else {
+          created = await createProduct(session, input);
+        }
         // Push the draft variation setup to the server under the new product id.
         await variationService.promoteDraft(created.id);
         productDraftService.clear(null);
@@ -392,7 +473,9 @@ export function ProductForm({
   const nextIsReview = !isLast && STEPS[stepIndex + 1] === 'review';
   const primaryLabel = isLast
     ? editing
-      ? 'Save changes'
+      ? product?.isDraft
+        ? 'Publish product'
+        : 'Save changes'
       : 'Create product'
     : nextIsReview
       ? 'Review product'
@@ -431,8 +514,18 @@ export function ProductForm({
               )}
             </p>
           </div>
-          <Badge variant={editing ? (form.isActive ? 'success' : 'neutral') : 'primary'}>
-            {editing ? (form.isActive ? 'Active' : 'Inactive') : 'New'}
+          <Badge
+            variant={
+              editing
+                ? product?.isDraft
+                  ? 'warning'
+                  : form.isActive
+                    ? 'success'
+                    : 'neutral'
+                : 'primary'
+            }
+          >
+            {editing ? (product?.isDraft ? 'Draft' : form.isActive ? 'Active' : 'Inactive') : 'New'}
           </Badge>
         </div>
         <div className="rounded-2xl border border-border bg-surface p-2 shadow-sm">
@@ -505,8 +598,8 @@ export function ProductForm({
             <Button variant="ghost" onClick={stepIndex === 0 ? cancel : goBack}>
               <ArrowLeft className="h-4 w-4" /> {stepIndex === 0 ? 'Cancel' : 'Back'}
             </Button>
-            {!editing ? (
-              <Button variant="outline" onClick={saveDraft}>
+            {!editing || product?.isDraft ? (
+              <Button variant="outline" onClick={saveDraft} isLoading={draftSaving} disabled={draftSaving}>
                 Save draft
               </Button>
             ) : null}
@@ -514,7 +607,7 @@ export function ProductForm({
           <div className="flex items-center gap-3">
             {draftSavedAt ? (
               <span className="hidden text-xs text-muted-foreground sm:inline">
-                Draft saved locally
+                Draft saved
               </span>
             ) : null}
             <Button
@@ -548,7 +641,8 @@ export function ProductForm({
         }
       >
         <p className="text-sm text-muted-foreground">
-          Tip: use <strong>Save draft</strong> to keep your progress locally before leaving.
+          Tip: use <strong>Save draft</strong> to save your progress before leaving — drafts appear
+          in the products list until published.
         </p>
       </Dialog>
     </div>

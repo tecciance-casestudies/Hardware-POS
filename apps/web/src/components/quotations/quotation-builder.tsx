@@ -112,7 +112,7 @@ export function QuotationBuilder({ mode, initial }: Props) {
 
   React.useEffect(() => {
     if (!session) return;
-    void fetchProducts(session, { pageSize: 200 }).then((r) =>
+    void fetchProducts(session, { pageSize: 200, isDraft: 'false' }).then((r) =>
       setProducts(r.items.filter((p) => p.isActive !== false)),
     );
     void fetchCustomers(session, { pageSize: 200 }).then((r) => setCustomers(r.items));

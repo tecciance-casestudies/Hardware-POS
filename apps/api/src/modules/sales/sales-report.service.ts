@@ -246,17 +246,20 @@ export class SalesReportService {
       const bottomY = doc.page.height - doc.page.margins.bottom;
 
       const drawHeaderRow = () => {
-        let x = startX;
         doc.font('Helvetica-Bold').fontSize(8);
+        // Pin the row's y: doc.text() advances doc.y after every call, so
+        // re-reading it per cell staggers the labels diagonally.
+        const y = doc.y;
+        let x = startX;
         for (const col of cols) {
-          doc.text(col.label, x, doc.y, {
-            width: col.width,
+          doc.text(col.label, x, y, {
+            width: col.width - 6,
             align: col.align ?? 'left',
             lineBreak: false,
           });
           x += col.width;
         }
-        doc.moveDown(0.6);
+        doc.y = y + 12;
         doc
           .moveTo(startX, doc.y)
           .lineTo(startX + cols.reduce((s, c) => s + c.width, 0), doc.y)
@@ -317,10 +320,11 @@ export class SalesReportService {
         doc.y = y + rowHeight;
       }
 
-      // Summary block
+      // Summary block (position explicitly — doc.x still points at the last
+      // table cell after the positioned text() calls above).
       if (doc.y + 110 > bottomY) doc.addPage();
       doc.moveDown(1);
-      doc.font('Helvetica-Bold').fontSize(11).text('Summary');
+      doc.font('Helvetica-Bold').fontSize(11).text('Summary', startX, doc.y);
       doc.moveDown(0.3);
       doc.font('Helvetica').fontSize(9);
       const s = data.summary;

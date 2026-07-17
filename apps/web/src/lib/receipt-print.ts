@@ -50,14 +50,23 @@ ${ctx.orderDiscount > 0 ? `<div class="row"><span>Order discount</span><span>-${
 </div></body></html>`;
 }
 
+let printTimer: number | null = null;
+
 function openPrintWindow(html: string): void {
-  const win = window.open('', '_blank', 'width=420,height=680');
+  // One *named* popup, reused across prints: repeated clicks replace the
+  // receipt in place instead of stacking new windows and print dialogs
+  // (which eventually hangs the tab).
+  const win = window.open('', 'hpos-receipt-print', 'width=420,height=680');
   if (!win) return;
+  if (printTimer != null) window.clearTimeout(printTimer);
   win.document.open();
   win.document.write(html);
   win.document.close();
   win.focus();
-  window.setTimeout(() => win.print(), 400);
+  printTimer = window.setTimeout(() => {
+    printTimer = null;
+    win.print();
+  }, 400);
 }
 
 /** Print the customer receipt: server-rendered, with a client-side fallback. */
@@ -80,12 +89,22 @@ export async function printCustomerReceipt(
   openPrintWindow(clientReceiptHtml(sale, ctx));
 }
 
+let reprintInFlight = false;
+
 /** Reprint a persisted sale's customer receipt from the Sales section. */
 export async function reprintCustomerReceipt(session: Session, saleId: string): Promise<void> {
-  const res = await api.post<{ printJob: { html: string } }>(
-    `/receipts/${saleId}/customer`,
-    undefined,
-    { token: session.token, tenantId: session.user.tenantId },
-  );
-  openPrintWindow(res.printJob.html);
+  // Drop clicks that land before the previous reprint finished — the button's
+  // disabled state only takes effect after the next React render.
+  if (reprintInFlight) return;
+  reprintInFlight = true;
+  try {
+    const res = await api.post<{ printJob: { html: string } }>(
+      `/receipts/${saleId}/customer`,
+      undefined,
+      { token: session.token, tenantId: session.user.tenantId },
+    );
+    openPrintWindow(res.printJob.html);
+  } finally {
+    reprintInFlight = false;
+  }
 }

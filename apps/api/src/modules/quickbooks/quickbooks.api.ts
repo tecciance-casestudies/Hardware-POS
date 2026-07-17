@@ -6,9 +6,12 @@ export interface QboItem {
   Sku?: string;
   Description?: string;
   UnitPrice?: number;
+  PurchaseCost?: number;
   QtyOnHand?: number;
   Type?: string;
   Active?: boolean;
+  SubItem?: boolean;
+  ParentRef?: { value: string; name?: string };
 }
 
 interface QueryResponse {

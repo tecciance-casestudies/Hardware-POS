@@ -23,6 +23,7 @@ export interface ProductListFilters {
   categoryId?: string;
   subcategoryId?: string;
   isActive?: boolean;
+  isDraft?: boolean;
   syncStatus?: Prisma.ProductWhereInput['syncStatus'];
   stockStatus?: 'IN' | 'OUT';
 }
@@ -73,6 +74,7 @@ export class ProductsRepository {
   ): Promise<[Product[], number]> {
     const where: Prisma.ProductWhereInput = {
       tenantId,
+      isDraft: false, // lookup/selling path — unfinished drafts never match
       ...(filters.name ? { name: { contains: filters.name, mode: 'insensitive' } } : {}),
       ...(filters.sku ? { sku: { contains: filters.sku, mode: 'insensitive' } } : {}),
       ...(filters.barcode ? { barcode: { contains: filters.barcode, mode: 'insensitive' } } : {}),
@@ -103,7 +105,8 @@ export class ProductsRepository {
   }
 
   findByBarcode(tenantId: string, barcode: string): Promise<Product | null> {
-    return this.prisma.product.findFirst({ where: { tenantId, barcode } });
+    // Scanning is a selling path — a draft's barcode must not resolve.
+    return this.prisma.product.findFirst({ where: { tenantId, barcode, isDraft: false } });
   }
 
   /** Management list: search + category / active / sync / stock filters. */
@@ -127,6 +130,7 @@ export class ProductsRepository {
       ...(filters.categoryId ? { categoryId: filters.categoryId } : {}),
       ...(filters.subcategoryId ? { subcategoryId: filters.subcategoryId } : {}),
       ...(filters.isActive !== undefined ? { isActive: filters.isActive } : {}),
+      ...(filters.isDraft !== undefined ? { isDraft: filters.isDraft } : {}),
       ...(filters.syncStatus ? { syncStatus: filters.syncStatus } : {}),
       ...(filters.stockStatus === 'OUT'
         ? { quantityOnHand: { lte: 0 } }

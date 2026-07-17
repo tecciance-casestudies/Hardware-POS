@@ -352,6 +352,7 @@ export default function QuotationDetailPage() {
       <Dialog
         open={convertOpen}
         onClose={() => setConvertOpen(false)}
+        className="sm:max-w-xl"
         title="Convert to sale"
         description="Create a sale from this quotation. The sale is linked back to the quotation."
         footer={

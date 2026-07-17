@@ -99,6 +99,7 @@ export default function ProductDetailPage() {
       </div>
 
       <div className="flex flex-wrap items-center gap-2">
+        {product.isDraft ? <Badge variant="warning">Draft</Badge> : null}
         {product.isActive ? <Badge variant="success">Active</Badge> : <Badge variant="danger">Inactive</Badge>}
         {product.quickbooksItemId ? (
           <Badge variant="primary">QuickBooks-managed</Badge>

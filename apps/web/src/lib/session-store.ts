@@ -4,7 +4,7 @@
  * AuthProvider can observe the change without a circular import.
  */
 
-import { Permission, type UserRole } from './permissions';
+import { Permission, permissionsForRole, type UserRole } from './permissions';
 
 export interface SessionUser {
   id: string;
@@ -43,6 +43,10 @@ export function loadSession(): Session | null {
       window.localStorage.removeItem(STORAGE_KEY);
       return null;
     }
+    // Permissions are derived from the role, never trusted from storage: a
+    // session saved before a permission was added to ROLE_PERMISSIONS would
+    // otherwise hide new features (e.g. nav items) until re-login.
+    parsed.user.permissions = permissionsForRole(parsed.user.role);
     return parsed;
   } catch {
     return null;

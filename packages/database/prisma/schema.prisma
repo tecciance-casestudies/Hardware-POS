@@ -454,6 +454,8 @@ model Product {
   taxable                 Boolean    @default(true)
   type                    String?
   isActive                Boolean    @default(true)
+  /// Unfinished product saved from the creation wizard — hidden from the POS.
+  isDraft                 Boolean    @default(false)
   requiresWarehousePickup Boolean    @default(false)
   lastSyncedAt            DateTime?
   syncStatus              SyncStatus @default(NOT_SYNCED)
