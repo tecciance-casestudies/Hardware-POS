@@ -44,6 +44,10 @@ export class QuickBooksSyncService {
 
     const items = await queryItems({ apiBase, realmId: connection.realmId, accessToken });
 
+    // QBO product categories are Item rows too (Type=Category) — mirror them
+    // locally first so products can link to them via ParentRef.
+    const categoryByQboId = await this.syncCategories(tenantId, items);
+
     let created = 0;
     let updated = 0;
     let skipped = 0;
@@ -55,7 +59,8 @@ export class QuickBooksSyncService {
         continue;
       }
       try {
-        const outcome = await this.upsertItem(tenantId, item);
+        const categoryId = item.ParentRef ? (categoryByQboId.get(item.ParentRef.value) ?? null) : null;
+        const outcome = await this.upsertItem(tenantId, item, categoryId);
         if (outcome === 'created') created++;
         else updated++;
       } catch (err) {
@@ -81,7 +86,11 @@ export class QuickBooksSyncService {
     return summary;
   }
 
-  private async upsertItem(tenantId: string, item: QboItem): Promise<'created' | 'updated'> {
+  private async upsertItem(
+    tenantId: string,
+    item: QboItem,
+    categoryId: string | null,
+  ): Promise<'created' | 'updated'> {
     const quickbooksItemId = String(item.Id);
     const existing = await this.prisma.product.findUnique({
       where: { tenantId_quickbooksItemId: { tenantId, quickbooksItemId } },
@@ -92,9 +101,12 @@ export class QuickBooksSyncService {
       sku: item.Sku ?? null,
       description: item.Description ?? null,
       unitPrice: item.UnitPrice ?? 0,
+      costPrice: item.PurchaseCost ?? null,
       quantityOnHand: item.QtyOnHand ?? 0,
       type: item.Type ?? null,
       isActive: item.Active ?? true,
+      // Only assign when QBO names a known category — never wipe a manual one.
+      ...(categoryId ? { categoryId } : {}),
       syncStatus: 'SYNCED' as const,
       lastSyncedAt: new Date(),
     };
@@ -106,5 +118,35 @@ export class QuickBooksSyncService {
     });
 
     return existing ? 'updated' : 'created';
+  }
+
+  /**
+   * Mirror QBO Category items as local ProductCategory rows (matched by their
+   * QBO item id, falling back to name for pre-existing local categories).
+   * Returns QBO category id → local category id.
+   */
+  private async syncCategories(tenantId: string, items: QboItem[]): Promise<Map<string, string>> {
+    const localIdByQboId = new Map<string, string>();
+    for (const item of items) {
+      if (item.Type !== 'Category') continue;
+      const qboId = String(item.Id);
+      let category = await this.prisma.productCategory.findFirst({
+        where: { tenantId, OR: [{ quickbooksItemId: qboId }, { name: item.Name }] },
+      });
+      if (category) {
+        if (category.quickbooksItemId !== qboId || !category.isActive) {
+          category = await this.prisma.productCategory.update({
+            where: { id: category.id },
+            data: { quickbooksItemId: qboId, isActive: true },
+          });
+        }
+      } else {
+        category = await this.prisma.productCategory.create({
+          data: { tenantId, quickbooksItemId: qboId, name: item.Name },
+        });
+      }
+      localIdByQboId.set(qboId, category.id);
+    }
+    return localIdByQboId;
   }
 }
