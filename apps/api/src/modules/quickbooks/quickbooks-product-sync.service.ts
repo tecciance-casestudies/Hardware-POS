@@ -53,15 +53,6 @@ export class QuickBooksProductSyncService {
     if (!product) {
       throw new NotFoundException(`Product ${productId} not found`);
     }
-    if (product.isDraft) {
-      // Draft rows are invisible to selling and must stay out of the books.
-      return {
-        productId,
-        status: 'SKIPPED',
-        quickbooksItemId: product.quickbooksItemId,
-        message: `Product "${product.name}" is a draft — not pushed to QuickBooks`,
-      };
-    }
 
     const connection = await this.connections.find(tenantId);
     if (!connection || !connection.isActive) {
@@ -72,6 +63,9 @@ export class QuickBooksProductSyncService {
       const accessToken = await this.oauth.getValidAccessToken(tenantId);
       const { apiBase } = this.config.resolve();
       const params = { apiBase, realmId: connection.realmId, accessToken };
+
+      const isInventory = product.type === 'Inventory';
+      const accounts = await this.resolveAccounts(tenantId, params);
 
       let quickbooksItemId = product.quickbooksItemId;
       let action: 'created' | 'updated';
@@ -90,30 +84,31 @@ export class QuickBooksProductSyncService {
           Name: product.name,
           ...(product.sku ? { Sku: product.sku } : {}),
           ...(product.description ? { Description: product.description } : {}),
+          ...(product.purchaseDescription ? { PurchaseDesc: product.purchaseDescription } : {}),
           UnitPrice: Number(product.unitPrice),
           ...(product.costPrice != null ? { PurchaseCost: Number(product.costPrice) } : {}),
           Active: product.isActive,
         });
         action = 'updated';
       } else {
-        const accounts = await this.resolveAccounts(tenantId, params);
         const body: Record<string, unknown> = {
           Name: product.name,
           ...(product.sku ? { Sku: product.sku } : {}),
           ...(product.description ? { Description: product.description } : {}),
+          ...(product.purchaseDescription ? { PurchaseDesc: product.purchaseDescription } : {}),
           UnitPrice: Number(product.unitPrice),
           ...(product.costPrice != null ? { PurchaseCost: Number(product.costPrice) } : {}),
           IncomeAccountRef: { value: accounts.income.Id },
           ExpenseAccountRef: { value: accounts.cogs.Id },
-          ...(product.trackInventory
+          ...(isInventory
             ? {
                 Type: 'Inventory',
                 TrackQtyOnHand: true,
                 QtyOnHand: Number(product.quantityOnHand),
-                InvStartDate: new Date().toISOString().slice(0, 10),
+                InvStartDate: (product.quantityAsOfDate ?? new Date()).toISOString().slice(0, 10),
                 AssetAccountRef: { value: accounts.asset.Id },
               }
-            : { Type: 'NonInventory' }),
+            : { Type: product.type === 'Service' ? 'Service' : 'NonInventory' }),
         };
         const created = await createItem(params, body);
         quickbooksItemId = created.Id;
@@ -123,7 +118,15 @@ export class QuickBooksProductSyncService {
       await this.prisma.$transaction([
         this.prisma.product.update({
           where: { id: product.id },
-          data: { quickbooksItemId, syncStatus: 'SYNCED', lastSyncedAt: new Date() },
+          data: {
+            quickbooksItemId,
+            // Mirror the resolved account names for read-only display.
+            incomeAccount: accounts.income.Name,
+            expenseAccount: accounts.cogs.Name,
+            ...(isInventory ? { inventoryAssetAccount: accounts.asset.Name } : {}),
+            syncStatus: 'SYNCED',
+            lastSyncedAt: new Date(),
+          },
         }),
         this.prisma.syncLog.create({
           data: {

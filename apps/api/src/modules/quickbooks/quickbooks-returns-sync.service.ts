@@ -261,7 +261,7 @@ export class QuickBooksReturnsSyncService {
       );
       for (const it of restockable) {
         await tx.product.updateMany({
-          where: { id: it.productId, tenantId: ret.tenantId, trackInventory: true },
+          where: { id: it.productId, tenantId: ret.tenantId, type: 'Inventory' },
           data: { quantityOnHand: { increment: Number(it.returnQuantity) } },
         });
       }

@@ -3,30 +3,44 @@ import type { Session } from './auth';
 
 export type ProductSyncStatus = 'NOT_SYNCED' | 'PENDING' | 'SYNCING' | 'SYNCED' | 'FAILED';
 
-/** A product as managed in the POS (mirrors the API Product, decimals as numbers). */
+/** QuickBooks item types (mirrors the QBO Products & Services template). */
+export type ProductItemType = 'Inventory' | 'NonInventory' | 'Service';
+
+/**
+ * A product as managed in the POS. Mirrors the QuickBooks Products & Services
+ * fields (name, category, item type, SKU, sales description/price, purchase
+ * description/cost, accounts, quantity on hand + as-of date, reorder point)
+ * plus system fields (active flag, sync metadata).
+ */
 export interface ManagedProduct {
   id: string;
   name: string;
+  type: ProductItemType;
   sku: string | null;
-  barcode: string | null;
-  baseSku: string | null;
-  batchCode: string | null;
+  /** Sales description — appears on sales forms and receipts. */
   description: string | null;
-  brand: string | null;
   categoryId: string | null;
   subcategoryId: string | null;
-  unitType: string | null;
+  /** Sales price/rate. */
   unitPrice: number;
+  /** QBO income account name (auto-resolved on sync; read-only). */
+  incomeAccount: string | null;
+  /** Purchase description — what vendors see on purchase forms. */
+  purchaseDescription: string | null;
+  /** Purchase cost. */
   costPrice: number | null;
+  /** QBO expense account name (auto-resolved on sync; read-only). */
+  expenseAccount: string | null;
   quantityOnHand: number;
+  /** The date the quantity on hand was counted. */
+  quantityAsOfDate: string | null;
+  /** Reorder point. */
   reorderLevel: number | null;
+  /** QBO inventory asset account name (auto-resolved; read-only). */
+  inventoryAssetAccount: string | null;
+  /** POS-side product photo (S3) — never pushed to QuickBooks. */
   imageUrl: string | null;
-  imageAltText: string | null;
-  trackInventory: boolean;
-  taxable: boolean;
-  requiresWarehousePickup: boolean;
   isActive: boolean;
-  isDraft: boolean;
   quickbooksItemId: string | null;
   syncStatus: ProductSyncStatus;
   lastSyncedAt: string | null;
@@ -46,32 +60,25 @@ export interface ProductsQuery {
   categoryId?: string;
   subcategoryId?: string;
   isActive?: 'true' | 'false';
-  isDraft?: 'true' | 'false';
+  type?: ProductItemType;
   syncStatus?: ProductSyncStatus;
-  stockStatus?: 'IN' | 'OUT';
+  stockStatus?: 'IN' | 'OUT' | 'LOW';
 }
 
 export interface ProductInput {
   name: string;
+  type?: ProductItemType;
   sku?: string | null;
-  barcode?: string | null;
-  baseSku?: string | null;
-  batchCode?: string | null;
   description?: string | null;
-  brand?: string | null;
   categoryId?: string | null;
   subcategoryId?: string | null;
-  unitType?: string | null;
   unitPrice: number;
+  purchaseDescription?: string | null;
   costPrice?: number | null;
   quantityOnHand?: number;
+  quantityAsOfDate?: string | null;
   reorderLevel?: number | null;
-  imageAltText?: string | null;
-  trackInventory?: boolean;
-  taxable?: boolean;
-  requiresWarehousePickup?: boolean;
   isActive?: boolean;
-  isDraft?: boolean;
 }
 
 export interface Category {
@@ -184,7 +191,7 @@ function buildQuery(q: ProductsQuery): string {
   if (q.categoryId) params.set('categoryId', q.categoryId);
   if (q.subcategoryId) params.set('subcategoryId', q.subcategoryId);
   if (q.isActive) params.set('isActive', q.isActive);
-  if (q.isDraft) params.set('isDraft', q.isDraft);
+  if (q.type) params.set('type', q.type);
   if (q.syncStatus) params.set('syncStatus', q.syncStatus);
   if (q.stockStatus) params.set('stockStatus', q.stockStatus);
   return params.toString();
@@ -249,6 +256,75 @@ export async function uploadProductImage(
 
 export async function deleteProductImage(session: Session, id: string): Promise<ManagedProduct> {
   return toManaged(await api.del<ApiProduct>(`/products/${id}/image`, auth(session)));
+}
+
+export type ReportFormat = 'pdf' | 'xlsx';
+
+/**
+ * Download a stock report (PDF or Excel) covering ALL products that match the
+ * given filters — not just the currently visible page. Triggers a browser
+ * file download.
+ */
+export async function downloadProductsReport(
+  session: Session,
+  query: Omit<ProductsQuery, 'page' | 'pageSize'>,
+  format: ReportFormat,
+): Promise<void> {
+  const params = new URLSearchParams();
+  params.set('format', format);
+  if (query.search) params.set('search', query.search);
+  if (query.categoryId) params.set('categoryId', query.categoryId);
+  if (query.subcategoryId) params.set('subcategoryId', query.subcategoryId);
+  if (query.isActive) params.set('isActive', query.isActive);
+  if (query.type) params.set('type', query.type);
+  if (query.syncStatus) params.set('syncStatus', query.syncStatus);
+  if (query.stockStatus) params.set('stockStatus', query.stockStatus);
+
+  const res = await authorizedFetch(`/products/report?${params.toString()}`, session);
+  if (!res.ok) {
+    const json = await res.json().catch(() => null);
+    const message = json?.message ?? 'Export failed';
+    throw new Error(Array.isArray(message) ? message.join(', ') : message);
+  }
+  const blob = await res.blob();
+  const disposition = res.headers.get('Content-Disposition') ?? '';
+  const filename = /filename="([^"]+)"/.exec(disposition)?.[1] ?? `stock-report.${format}`;
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+export interface ImportRowError {
+  row: number;
+  message: string;
+}
+
+export interface ImportSummary {
+  total: number;
+  created: number;
+  updated: number;
+  skipped: number;
+  failed: number;
+  errors: ImportRowError[];
+}
+
+/** Bulk import from the QuickBooks Products & Services template (.xlsx / .csv). */
+export async function importProducts(session: Session, file: File): Promise<ImportSummary> {
+  const form = new FormData();
+  form.append('file', file);
+  const res = await authorizedFetch('/products/import', session, { method: 'POST', body: form });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) {
+    const message =
+      json?.message ?? (res.status === 413 ? 'File is too large (max 10MB)' : 'Import failed');
+    throw new Error(Array.isArray(message) ? message.join(', ') : message);
+  }
+  return (json?.data ?? json) as ImportSummary;
 }
 
 export async function syncProductToQuickBooks(

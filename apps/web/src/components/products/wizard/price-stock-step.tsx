@@ -2,85 +2,167 @@
 
 import * as React from 'react';
 
-import { VariationBuilder } from '@/components/products/variations/variation-builder';
-import type { VariationStore } from '@/lib/variations/variation-store';
+import { Input } from '@/components/ui/input';
+import { Textarea } from '@/components/ui/textarea';
+import type { ManagedProduct } from '@/lib/products-api';
 
-import { ToggleRow, StepHeader } from './fields';
-import { PricingInventoryStep } from './pricing-inventory-step';
-import type { FieldErrors, FormState, ProductType, SetField } from './types';
+import { Field, InfoPanel, StepHeader } from './fields';
+import type { FieldErrors, FormState, SetField } from './types';
 
 /**
- * Step 2 of the simplified flow — price & stock, plus an optional, progressively
- * revealed variation setup. Enabling "This product has different options" shows
- * the existing guided VariationBuilder inline (no separate wizard step), so
- * simple products stay short while variation power remains one toggle away.
+ * Step 2 — the money half of the QuickBooks Products & Services template:
+ * sales price, purchase description/cost, and (for Inventory items) quantity
+ * on hand, its as-of date, and the reorder point. The three QBO accounts are
+ * assigned automatically during sync and shown read-only.
  */
 export function PriceStockStep({
   form,
   set,
   errors,
-  productType,
   stockLocked,
-  computedVariantStock,
-  variations,
-  baseSku,
-  basePrice,
+  product,
 }: {
   form: FormState;
   set: SetField;
   errors: FieldErrors;
-  productType: ProductType;
   stockLocked: boolean;
-  computedVariantStock: number | null;
-  variations: VariationStore;
-  baseSku: string;
-  basePrice: number;
+  /** Existing product (edit mode) — source of the read-only account names. */
+  product?: ManagedProduct;
 }) {
-  const enabled = variations.data.enabled;
+  const isInventory = form.type === 'Inventory';
 
   return (
     <div className="space-y-6">
       <StepHeader
         eyebrow="Step 2 of 3"
         title="Price and stock"
-        description="Enter the selling price and the quantity currently available."
+        description="What customers pay, what you pay your suppliers, and the stock you hold."
       />
 
-      <PricingInventoryStep
-        form={form}
-        set={set}
-        errors={errors}
-        productType={productType}
-        stockLocked={stockLocked}
-        computedVariantStock={computedVariantStock}
-        embedded
-      />
+      <div className="grid gap-4 sm:grid-cols-2">
+        <Field
+          label="Sales price/rate"
+          htmlFor="field-price"
+          required
+          error={errors.unitPrice}
+          help="The price or rate your customers will pay."
+        >
+          <Input
+            id="field-price"
+            inputMode="decimal"
+            value={form.unitPrice}
+            onChange={(e) => set('unitPrice', e.target.value)}
+            placeholder="0.00"
+            aria-invalid={!!errors.unitPrice || undefined}
+          />
+        </Field>
 
-      {/* Optional variation setup — progressive disclosure. */}
-      <div className="space-y-4 rounded-2xl border border-border bg-surface p-5">
-        <ToggleRow
-          label="This product has different options"
-          hint="Enable this when the product is sold in different colors, sizes, finishes, materials, or pack sizes."
-          checked={enabled}
-          onChange={(v) => variations.setEnabled(v)}
-        />
+        <Field
+          label="Purchase cost"
+          htmlFor="field-cost"
+          help="The price you pay when you buy this from your suppliers."
+        >
+          <Input
+            id="field-cost"
+            inputMode="decimal"
+            value={form.costPrice}
+            onChange={(e) => set('costPrice', e.target.value)}
+            placeholder="0.00"
+          />
+        </Field>
 
-        {enabled ? (
-          <div className="space-y-2">
-            <div>
-              <h3 className="text-sm font-semibold">Product options</h3>
-              <p className="text-xs text-muted-foreground">
-                Add options, create combinations, then set price and stock. Everything saves with
-                the product.
-              </p>
-            </div>
-            <VariationBuilder store={variations} baseSku={baseSku} basePrice={basePrice} embedded />
+        <Field
+          label="Purchase description"
+          htmlFor="field-purchase-description"
+          help="What vendors see when you purchase this product."
+          className="sm:col-span-2"
+        >
+          <Textarea
+            id="field-purchase-description"
+            value={form.purchaseDescription}
+            onChange={(e) => set('purchaseDescription', e.target.value)}
+            placeholder="Optional purchase description"
+            rows={2}
+          />
+        </Field>
+      </div>
+
+      {isInventory ? (
+        <div className="space-y-4 rounded-2xl border border-border bg-surface p-5">
+          <h3 className="text-sm font-semibold">Inventory</h3>
+          <div className="grid gap-4 sm:grid-cols-3">
+            <Field
+              label="Quantity on hand"
+              htmlFor="field-qty"
+              hint={stockLocked ? 'Managed by QuickBooks' : undefined}
+            >
+              <Input
+                id="field-qty"
+                inputMode="decimal"
+                value={form.quantityOnHand}
+                onChange={(e) => set('quantityOnHand', e.target.value)}
+                disabled={stockLocked}
+              />
+            </Field>
+
+            <Field
+              label="Quantity as of date"
+              htmlFor="field-qty-date"
+              help="The date this quantity was counted."
+            >
+              <Input
+                id="field-qty-date"
+                type="date"
+                value={form.quantityAsOfDate}
+                onChange={(e) => set('quantityAsOfDate', e.target.value)}
+                disabled={stockLocked}
+              />
+            </Field>
+
+            <Field
+              label="Reorder point"
+              htmlFor="field-reorder"
+              help="We'll flag the product as low stock at or below this quantity."
+            >
+              <Input
+                id="field-reorder"
+                inputMode="decimal"
+                value={form.reorderLevel}
+                onChange={(e) => set('reorderLevel', e.target.value)}
+                placeholder="e.g. 5"
+              />
+            </Field>
           </div>
-        ) : (
-          <p className="text-xs text-muted-foreground">
-            Off — this product uses one SKU, one price, and one stock quantity.
-          </p>
-        )}
+        </div>
+      ) : (
+        <InfoPanel>
+          {form.type === 'Service'
+            ? 'Services have no stock — quantity fields are not applicable.'
+            : 'Non-Inventory products are not stock-tracked — quantity fields are not applicable.'}
+        </InfoPanel>
+      )}
+
+      <div className="space-y-2 rounded-2xl border border-border bg-surface p-5">
+        <h3 className="text-sm font-semibold">QuickBooks accounts</h3>
+        <p className="text-xs text-muted-foreground">
+          Assigned automatically when the product syncs to QuickBooks.
+        </p>
+        <dl className="grid gap-3 text-sm sm:grid-cols-3">
+          <div>
+            <dt className="text-xs text-muted-foreground">Income account</dt>
+            <dd className="mt-0.5 font-medium">{product?.incomeAccount ?? 'Auto-assigned'}</dd>
+          </div>
+          <div>
+            <dt className="text-xs text-muted-foreground">Expense account</dt>
+            <dd className="mt-0.5 font-medium">{product?.expenseAccount ?? 'Auto-assigned'}</dd>
+          </div>
+          <div>
+            <dt className="text-xs text-muted-foreground">Inventory asset account</dt>
+            <dd className="mt-0.5 font-medium">
+              {isInventory ? (product?.inventoryAssetAccount ?? 'Auto-assigned') : '—'}
+            </dd>
+          </div>
+        </dl>
       </div>
     </div>
   );

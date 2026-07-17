@@ -39,3 +39,4 @@ coverage/
 # Uploaded product images (local dev storage)
 apps/api/uploads/
 uploads/
+.~lock.*#

@@ -192,10 +192,6 @@ export class SalesService {
         if (!product.isActive) {
           throw new BadRequestException(`Product ${product.name} is inactive`);
         }
-        if (product.isDraft) {
-          throw new BadRequestException(`Product ${product.name} is a draft and cannot be sold`);
-        }
-
         const cachedPrice = Number(product.unitPrice);
         if (item.unitPrice != null && round2(item.unitPrice) !== round2(cachedPrice)) {
           throw new BadRequestException(
@@ -205,7 +201,7 @@ export class SalesService {
 
         const quantity = item.quantity;
         const onHand = Number(product.quantityOnHand);
-        if (product.trackInventory && quantity > onHand) {
+        if (product.type === 'Inventory' && quantity > onHand) {
           throw new BadRequestException(
             `Insufficient stock for ${product.name} (on hand ${onHand}, requested ${quantity})`,
           );
@@ -235,7 +231,7 @@ export class SalesService {
           productId: product.id,
           productName: product.name,
           sku: product.sku,
-          trackInventory: product.trackInventory,
+          trackInventory: product.type === 'Inventory',
           unitPrice: cachedPrice,
           quantity,
           discountType: item.discountType ?? null,

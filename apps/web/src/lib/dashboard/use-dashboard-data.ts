@@ -94,7 +94,7 @@ export function useDashboardData(
         fetchDashboardStats(session),
         fetchSales(session, { pageSize: 8 }),
         fetchQuotations(session, { pageSize: 100 }),
-        fetchProducts(session, { pageSize: 200, isDraft: 'false' }),
+        fetchProducts(session, { pageSize: 200 }),
         fetchDashboardSummary(session),
         fetchPaymentMethods(session, { mine }),
         fetchTopCategories(session, 5),

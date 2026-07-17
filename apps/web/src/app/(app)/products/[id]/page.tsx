@@ -3,9 +3,10 @@
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import * as React from 'react';
-import { ArrowLeft, Pencil, RefreshCw, Warehouse } from 'lucide-react';
+import { ArrowLeft, Pencil, RefreshCw } from 'lucide-react';
 
 import { ProductImage } from '@/components/product-image';
+
 import { SyncBadge } from '@/components/quickbooks/sync-badge';
 import { Badge } from '@/components/ui/badge';
 import { Button, buttonVariants } from '@/components/ui/button';
@@ -14,6 +15,7 @@ import { useAuth } from '@/lib/auth';
 import { Permission } from '@/lib/permissions';
 import {
   fetchProduct,
+  resolveImageUrl,
   syncProductToQuickBooks,
   type ManagedProduct,
 } from '@/lib/products-api';
@@ -99,7 +101,6 @@ export default function ProductDetailPage() {
       </div>
 
       <div className="flex flex-wrap items-center gap-2">
-        {product.isDraft ? <Badge variant="warning">Draft</Badge> : null}
         {product.isActive ? <Badge variant="success">Active</Badge> : <Badge variant="danger">Inactive</Badge>}
         {product.quickbooksItemId ? (
           <Badge variant="primary">QuickBooks-managed</Badge>
@@ -107,17 +108,16 @@ export default function ProductDetailPage() {
           <Badge variant="neutral">Local (not synced)</Badge>
         )}
         <SyncBadge status={product.syncStatus} />
-        {product.requiresWarehousePickup ? (
-          <Badge variant="warning">
-            <Warehouse className="h-3.5 w-3.5" /> Warehouse pickup
-          </Badge>
-        ) : null}
       </div>
 
       <div className="grid gap-6 lg:grid-cols-[280px_1fr]">
         <Card>
           <CardContent className="p-4">
-            <ProductImage src={product.imageUrl} alt={product.imageAltText ?? product.name} className="aspect-square w-full" />
+            <ProductImage
+              src={resolveImageUrl(product.imageUrl)}
+              alt={product.name}
+              className="aspect-square w-full"
+            />
           </CardContent>
         </Card>
 
@@ -126,14 +126,26 @@ export default function ProductDetailPage() {
             <CardTitle>Details</CardTitle>
           </CardHeader>
           <CardContent className="grid gap-x-6 gap-y-3 text-sm sm:grid-cols-2">
-            <Detail label="Selling price" value={formatMoney(product.unitPrice)} />
-            <Detail label="Cost price" value={product.costPrice != null ? formatMoney(product.costPrice) : '—'} />
-            <Detail label="Quantity on hand" value={`${product.quantityOnHand}${product.unitType ? ` ${product.unitType}` : ''}`} />
-            <Detail label="Reorder level" value={product.reorderLevel != null ? String(product.reorderLevel) : '—'} />
-            <Detail label="Brand" value={product.brand ?? '—'} />
-            <Detail label="Barcode" value={product.barcode ?? '—'} />
-            <Detail label="Track inventory" value={product.trackInventory ? 'Yes' : 'No'} />
-            <Detail label="Taxable" value={product.taxable ? 'Yes' : 'No'} />
+            <Detail label="Item type" value={product.type === 'NonInventory' ? 'Non-Inventory' : product.type} />
+            <Detail label="SKU" value={product.sku ?? '—'} />
+            <Detail label="Sales price/rate" value={formatMoney(product.unitPrice)} />
+            <Detail label="Purchase cost" value={product.costPrice != null ? formatMoney(product.costPrice) : '—'} />
+            <Detail label="Purchase description" value={product.purchaseDescription ?? '—'} />
+            <Detail
+              label="Quantity on hand"
+              value={product.type === 'Inventory' ? String(product.quantityOnHand) : 'Not tracked'}
+            />
+            <Detail
+              label="Quantity as of date"
+              value={product.quantityAsOfDate ? product.quantityAsOfDate.slice(0, 10) : '—'}
+            />
+            <Detail label="Reorder point" value={product.reorderLevel != null ? String(product.reorderLevel) : '—'} />
+            <Detail label="Income account" value={product.incomeAccount ?? 'Auto-assigned on sync'} />
+            <Detail label="Expense account" value={product.expenseAccount ?? 'Auto-assigned on sync'} />
+            <Detail
+              label="Inventory asset account"
+              value={product.type === 'Inventory' ? (product.inventoryAssetAccount ?? 'Auto-assigned on sync') : '—'}
+            />
             <Detail label="QuickBooks item ID" value={product.quickbooksItemId ?? 'Not synced'} />
             {product.description ? (
               <div className="sm:col-span-2">

@@ -55,8 +55,8 @@ function lineFromProduct(p: ManagedProduct): Line {
     productId: p.id,
     productName: p.name,
     sku: p.sku,
-    imageUrl: p.imageUrl,
-    unitType: p.unitType,
+    imageUrl: null,
+    unitType: null,
     quantity: 1,
     unitPrice: p.unitPrice,
     discountType: '',
@@ -112,7 +112,7 @@ export function QuotationBuilder({ mode, initial }: Props) {
 
   React.useEffect(() => {
     if (!session) return;
-    void fetchProducts(session, { pageSize: 200, isDraft: 'false' }).then((r) =>
+    void fetchProducts(session, { pageSize: 200 }).then((r) =>
       setProducts(r.items.filter((p) => p.isActive !== false)),
     );
     void fetchCustomers(session, { pageSize: 200 }).then((r) => setCustomers(r.items));
@@ -259,12 +259,6 @@ export function QuotationBuilder({ mode, initial }: Props) {
               onClick={() => addProduct(p)}
               className="group flex flex-col overflow-hidden rounded-xl border border-border bg-card text-left shadow-sm transition-all hover:border-primary hover:shadow"
             >
-              <ProductImage
-                src={p.imageUrl}
-                alt={p.name}
-                rounded="rounded-none"
-                className="aspect-square w-full border-0"
-              />
               <div className="flex flex-1 flex-col p-2">
                 <div className="line-clamp-2 min-h-8 text-xs font-medium leading-tight">{p.name}</div>
                 <div className="mt-0.5 truncate text-[11px] text-muted-foreground">{p.sku ?? ''}</div>

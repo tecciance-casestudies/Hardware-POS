@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Delete,
@@ -8,14 +9,15 @@ import {
   Param,
   Patch,
   Post,
-  Put,
   Query,
+  Res,
   UploadedFile,
   UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { Product } from '@hardware-pos/database';
 import type { Paginated } from '@hardware-pos/shared';
+import type { Response } from 'express';
 
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { RequirePermissions } from '../../common/decorators/permissions.decorator';
@@ -23,22 +25,28 @@ import { TenantId } from '../../common/decorators/tenant-id.decorator';
 import { AuthenticatedUser } from '../auth/auth.types';
 import { Permission } from '../auth/permissions';
 import { MockSyncSummary } from './products.repository';
+import { ImportSummary, ProductsImportService } from './products-import.service';
+import { ProductsReportService } from './products-report.service';
 import { ProductsService } from './products.service';
+import { QueryProductsReportDto } from './dto/query-products-report.dto';
 import { CreateProductDto } from './dto/create-product.dto';
 import { QueryProductsDto } from './dto/query-products.dto';
-import { SaveVariationConfigDto } from './dto/save-variation-config.dto';
 import { SearchProductsDto } from './dto/search-products.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
 
-/** Uploaded file shape from multer (memory storage). */
-interface UploadedImage {
+/** Uploaded spreadsheet from multer (memory storage). */
+interface UploadedSpreadsheet {
   buffer: Buffer;
-  mimetype: string;
+  originalname?: string;
 }
 
 @Controller('products')
 export class ProductsController {
-  constructor(private readonly productsService: ProductsService) {}
+  constructor(
+    private readonly productsService: ProductsService,
+    private readonly productsImportService: ProductsImportService,
+    private readonly productsReportService: ProductsReportService,
+  ) {}
 
   @Get()
   @RequirePermissions(Permission.PRODUCT_READ)
@@ -56,16 +64,43 @@ export class ProductsController {
     return this.productsService.search(tenantId, query);
   }
 
-  @Get('barcode/:barcode')
-  @RequirePermissions(Permission.PRODUCT_READ)
-  getByBarcode(@TenantId() tenantId: string, @Param('barcode') barcode: string): Promise<Product> {
-    return this.productsService.getByBarcode(tenantId, barcode);
-  }
-
   @Post()
   @RequirePermissions(Permission.PRODUCT_MANAGE)
   create(@TenantId() tenantId: string, @Body() dto: CreateProductDto): Promise<Product> {
     return this.productsService.create(tenantId, dto);
+  }
+
+  /**
+   * Export the products matching the list filters as a PDF or Excel stock
+   * report. Declared before `:id` so the literal segment isn't captured.
+   */
+  @Get('report')
+  @RequirePermissions(Permission.PRODUCT_READ)
+  async report(
+    @TenantId() tenantId: string,
+    @Query() query: QueryProductsReportDto,
+    @Res() res: Response,
+  ): Promise<void> {
+    const report = await this.productsReportService.generate(tenantId, query);
+    res.setHeader('Content-Type', report.contentType);
+    res.setHeader('Content-Disposition', `attachment; filename="${report.filename}"`);
+    res.send(report.buffer);
+  }
+
+  /** Bulk import from the QuickBooks Products & Services template (.xlsx / .csv). */
+  @Post('import')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermissions(Permission.PRODUCT_MANAGE)
+  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 10 * 1024 * 1024 } }))
+  import(
+    @TenantId() tenantId: string,
+    @CurrentUser() user: AuthenticatedUser,
+    @UploadedFile() file: UploadedSpreadsheet | undefined,
+  ): Promise<ImportSummary> {
+    if (!file) {
+      throw new BadRequestException('No file uploaded');
+    }
+    return this.productsImportService.import(tenantId, user.role, file);
   }
 
   /** Refresh the product cache from a mock QuickBooks pull. Owner/admin only. */
@@ -80,26 +115,6 @@ export class ProductsController {
   @RequirePermissions(Permission.PRODUCT_READ)
   getById(@TenantId() tenantId: string, @Param('id') id: string): Promise<Product> {
     return this.productsService.getById(tenantId, id);
-  }
-
-  /** The product-variation wizard state (attributes, price mode, variants). */
-  @Get(':id/variation-config')
-  @RequirePermissions(Permission.PRODUCT_READ)
-  getVariationConfig(
-    @TenantId() tenantId: string,
-    @Param('id') id: string,
-  ): Promise<{ config: unknown | null }> {
-    return this.productsService.getVariationConfig(tenantId, id);
-  }
-
-  @Put(':id/variation-config')
-  @RequirePermissions(Permission.PRODUCT_MANAGE)
-  saveVariationConfig(
-    @TenantId() tenantId: string,
-    @Param('id') id: string,
-    @Body() dto: SaveVariationConfigDto,
-  ): Promise<{ config: unknown | null }> {
-    return this.productsService.saveVariationConfig(tenantId, id, dto.config);
   }
 
   @Patch(':id')
@@ -120,6 +135,7 @@ export class ProductsController {
     return this.productsService.deactivate(tenantId, id);
   }
 
+  /** Upload the POS-side product photo (stored in S3; never sent to QuickBooks). */
   @Post(':id/image')
   @RequirePermissions(Permission.PRODUCT_MANAGE)
   // Nest's FileInterceptor defaults to multer memory storage, so the file has `.buffer`.
@@ -127,7 +143,7 @@ export class ProductsController {
   uploadImage(
     @TenantId() tenantId: string,
     @Param('id') id: string,
-    @UploadedFile() file: UploadedImage | undefined,
+    @UploadedFile() file: { buffer: Buffer; mimetype: string } | undefined,
   ): Promise<Product> {
     return this.productsService.setImage(tenantId, id, file);
   }

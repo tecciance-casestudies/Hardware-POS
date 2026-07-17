@@ -592,7 +592,7 @@ function buildAdminAlerts(data: ReturnType<typeof useDashboardData>): AlertItem[
       description: `${data.stock.outOfStock} products are out of stock`,
       badge: String(data.stock.outOfStock),
       actionLabel: 'Review products',
-      destination: '/products',
+      destination: '/products?stockStatus=OUT',
     });
   }
   if (data.stock.lowStock > 0) {
@@ -603,7 +603,7 @@ function buildAdminAlerts(data: ReturnType<typeof useDashboardData>): AlertItem[
       description: `${data.stock.lowStock} products need attention`,
       badge: String(data.stock.lowStock),
       actionLabel: 'Review products',
-      destination: '/products',
+      destination: '/products?stockStatus=LOW',
     });
   }
   if (data.quickbooks.failedSyncs > 0) {

@@ -1,5 +1,5 @@
 import { Controller, Get, HttpCode, HttpStatus, Param, Post } from '@nestjs/common';
-import { PrintJob, Receipt } from '@hardware-pos/database';
+import { Receipt } from '@hardware-pos/database';
 
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { RequirePermissions } from '../../common/decorators/permissions.decorator';
@@ -12,7 +12,7 @@ import { CustomerReceiptResult, ReceiptsService } from './receipts.service';
 export class ReceiptsController {
   constructor(private readonly receiptsService: ReceiptsService) {}
 
-  /** Generate the customer receipt (+ warehouse copy if any item needs pickup). */
+  /** Generate the customer receipt. */
   @Post(':saleId/customer')
   @HttpCode(HttpStatus.CREATED)
   @RequirePermissions(Permission.SALE_CREATE)
@@ -22,18 +22,6 @@ export class ReceiptsController {
     @Param('saleId') saleId: string,
   ): Promise<CustomerReceiptResult> {
     return this.receiptsService.generateCustomer(tenantId, saleId, user.id);
-  }
-
-  /** Generate (or reprint) the warehouse picking copy. */
-  @Post(':saleId/warehouse')
-  @HttpCode(HttpStatus.CREATED)
-  @RequirePermissions(Permission.SALE_CREATE)
-  warehouse(
-    @TenantId() tenantId: string,
-    @CurrentUser() user: AuthenticatedUser,
-    @Param('saleId') saleId: string,
-  ): Promise<PrintJob> {
-    return this.receiptsService.generateWarehouse(tenantId, saleId, user.id);
   }
 
   @Get('sale/:saleId')

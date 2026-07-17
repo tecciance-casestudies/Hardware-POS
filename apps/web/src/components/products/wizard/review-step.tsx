@@ -3,49 +3,40 @@
 import { AlertTriangle, CheckCircle2, ChevronRight } from 'lucide-react';
 import * as React from 'react';
 
-import { ProductImage } from '@/components/product-image';
-import { formatLkr } from '@/components/products/variations/shared';
+import { formatMoney } from '@/lib/utils';
 import { StepHeader } from './fields';
-import type { FormState, ProductType, StepKey } from './types';
+import type { FormState, StepKey } from './types';
 
 export interface ReviewIssue {
   label: string;
   step: StepKey;
 }
 
-export interface VariationSummary {
-  attributes: number;
-  combinations: number;
-  priceModeLabel: string;
-  totalStock: number;
-  outOfStock: number;
-  missingSku: number;
-  needAttention: number;
-}
+const TYPE_LABEL: Record<FormState['type'], string> = {
+  Inventory: 'Inventory',
+  NonInventory: 'Non-Inventory',
+  Service: 'Service',
+};
 
 export function ReviewStep({
   form,
-  productType,
   categoryName,
   subcategoryName,
-  imageSrc,
-  variation,
   completed,
   issues,
   onGoTo,
   stepLabel,
 }: {
   form: FormState;
-  productType: ProductType;
   categoryName: string | null;
   subcategoryName: string | null;
-  imageSrc: string | null;
-  variation: VariationSummary | null;
   completed: string[];
   issues: ReviewIssue[];
   onGoTo: (step: StepKey) => void;
   stepLabel: string;
 }) {
+  const isInventory = form.type === 'Inventory';
+
   return (
     <div className="space-y-5">
       <StepHeader
@@ -101,59 +92,41 @@ export function ReviewStep({
         </div>
       </div>
 
-      {/* Summary */}
-      <div className="grid gap-4 lg:grid-cols-[200px_1fr]">
-        <ProductImage
-          src={imageSrc}
-          alt={form.name || 'Product'}
-          className="aspect-square w-full rounded-2xl"
-        />
-        <div className="grid gap-4 sm:grid-cols-2">
-          <SummaryCard title="Basic" onEdit={() => onGoTo('details')}>
-            <Row label="Name" value={form.name || '—'} />
-            <Row label="SKU" value={form.sku || '—'} />
-            <Row label="Brand" value={form.brand || '—'} />
-            <Row label="Unit" value={form.unitType || '—'} />
-          </SummaryCard>
+      {/* Summary — mirrors the QuickBooks Products & Services columns */}
+      <div className="grid gap-4 sm:grid-cols-2">
+        <SummaryCard title="Details" onEdit={() => onGoTo('details')}>
+          <Row label="Name" value={form.name || '—'} />
+          <Row label="Item type" value={TYPE_LABEL[form.type]} />
+          <Row label="SKU" value={form.sku || '—'} />
+          <Row label="Category" value={categoryName ?? 'Uncategorized'} />
+          <Row label="Subcategory" value={subcategoryName ?? '—'} />
+          <Row label="Sales description" value={form.description || '—'} />
+        </SummaryCard>
 
-          <SummaryCard title="Category" onEdit={() => onGoTo('details')}>
-            <Row label="Category" value={categoryName ?? 'Uncategorized'} />
-            <Row label="Subcategory" value={subcategoryName ?? '—'} />
-          </SummaryCard>
+        <SummaryCard title="Pricing" onEdit={() => onGoTo('pricing')}>
+          <Row
+            label="Sales price/rate"
+            value={form.unitPrice ? formatMoney(Number(form.unitPrice)) : '—'}
+          />
+          <Row
+            label="Purchase cost"
+            value={form.costPrice ? formatMoney(Number(form.costPrice)) : '—'}
+          />
+          <Row label="Purchase description" value={form.purchaseDescription || '—'} />
+        </SummaryCard>
 
-          <SummaryCard title="Pricing" onEdit={() => onGoTo('pricing')}>
-            <Row
-              label={productType === 'variations' ? 'Base price' : 'Selling price'}
-              value={form.unitPrice ? formatLkr(Number(form.unitPrice)) : '—'}
-            />
-            <Row
-              label="Cost price"
-              value={form.costPrice ? formatLkr(Number(form.costPrice)) : '—'}
-            />
-            <Row label="Tax" value={form.taxable ? 'Taxable' : 'Not taxable'} />
-          </SummaryCard>
-
-          <SummaryCard title="Inventory" onEdit={() => onGoTo('pricing')}>
-            <Row label="Tracking" value={form.trackInventory ? 'On' : 'Off'} />
-            <Row label="Warehouse pickup" value={form.requiresWarehousePickup ? 'Yes' : 'No'} />
-            <Row label="Status" value={form.isActive ? 'Active' : 'Inactive'} />
-          </SummaryCard>
-
-          {variation ? (
-            <SummaryCard
-              title="Variations"
-              onEdit={() => onGoTo('pricing')}
-              className="sm:col-span-2"
-            >
-              <Row label="Options" value={String(variation.attributes)} />
-              <Row label="Combinations" value={String(variation.combinations)} />
-              <Row label="Price strategy" value={variation.priceModeLabel} />
-              <Row label="Total stock" value={String(variation.totalStock)} />
-              <Row label="Out of stock" value={String(variation.outOfStock)} />
-              <Row label="Missing SKU" value={String(variation.missingSku)} />
-            </SummaryCard>
-          ) : null}
-        </div>
+        <SummaryCard title="Inventory" onEdit={() => onGoTo('pricing')} className="sm:col-span-2">
+          {isInventory ? (
+            <>
+              <Row label="Quantity on hand" value={form.quantityOnHand || '0'} />
+              <Row label="Quantity as of date" value={form.quantityAsOfDate || '—'} />
+              <Row label="Reorder point" value={form.reorderLevel || '—'} />
+            </>
+          ) : (
+            <Row label="Stock tracking" value={`Not applicable for ${TYPE_LABEL[form.type]}`} />
+          )}
+          <Row label="Status" value={form.isActive ? 'Active' : 'Inactive'} />
+        </SummaryCard>
       </div>
     </div>
   );

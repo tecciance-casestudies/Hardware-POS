@@ -3,10 +3,10 @@ import { IsEnum, IsIn, IsOptional, IsString } from 'class-validator';
 
 import { PaginationQueryDto } from '../../../common/dto/pagination-query.dto';
 
-export type StockStatus = 'IN' | 'OUT';
+export type StockStatus = 'IN' | 'OUT' | 'LOW';
 
 export class QueryProductsDto extends PaginationQueryDto {
-  /** Free-text search across name, SKU, and barcode. */
+  /** Free-text search across name and SKU. */
   @IsString()
   @IsOptional()
   search?: string;
@@ -27,17 +27,17 @@ export class QueryProductsDto extends PaginationQueryDto {
   @IsOptional()
   isActive?: string;
 
-  /** Filter drafts in ('true') or out ('false'); omit to include both. */
-  @IsIn(['true', 'false'])
+  /** QuickBooks item type filter. */
+  @IsIn(['Inventory', 'NonInventory', 'Service'])
   @IsOptional()
-  isDraft?: string;
+  type?: string;
 
   @IsEnum(SyncStatus)
   @IsOptional()
   syncStatus?: SyncStatus;
 
-  /** Stock status: IN (on hand > 0) or OUT (on hand <= 0). */
-  @IsIn(['IN', 'OUT'])
+  /** Stock status: IN (> 0), OUT (<= 0), or LOW (> 0 but at/below reorder point). */
+  @IsIn(['IN', 'OUT', 'LOW'])
   @IsOptional()
   stockStatus?: StockStatus;
 }

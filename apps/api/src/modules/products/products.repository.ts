@@ -12,7 +12,6 @@ import { PrismaService } from '../../prisma/prisma.service';
 export interface ProductSearchFilters {
   name?: string;
   sku?: string;
-  barcode?: string;
   categoryId?: string;
   subcategoryId?: string;
   isActive?: boolean;
@@ -23,9 +22,9 @@ export interface ProductListFilters {
   categoryId?: string;
   subcategoryId?: string;
   isActive?: boolean;
-  isDraft?: boolean;
+  type?: string;
   syncStatus?: Prisma.ProductWhereInput['syncStatus'];
-  stockStatus?: 'IN' | 'OUT';
+  stockStatus?: 'IN' | 'OUT' | 'LOW';
 }
 
 export interface MockSyncSummary {
@@ -39,7 +38,7 @@ export interface MockSyncSummary {
 export class ProductsRepository {
   constructor(private readonly prisma: PrismaService) {}
 
-  /** Free-text search across name / sku / barcode (used by GET /products). */
+  /** Free-text search across name / sku (used by GET /products). */
   async search(
     tenantId: string,
     search: string | undefined,
@@ -53,7 +52,6 @@ export class ProductsRepository {
             OR: [
               { name: { contains: search, mode: 'insensitive' } },
               { sku: { contains: search, mode: 'insensitive' } },
-              { barcode: { contains: search, mode: 'insensitive' } },
             ],
           }
         : {}),
@@ -65,7 +63,7 @@ export class ProductsRepository {
     ]);
   }
 
-  /** Structured search combining name / sku / barcode / category / active status. */
+  /** Structured search combining name / sku / category / active status. */
   async advancedSearch(
     tenantId: string,
     filters: ProductSearchFilters,
@@ -74,10 +72,8 @@ export class ProductsRepository {
   ): Promise<[Product[], number]> {
     const where: Prisma.ProductWhereInput = {
       tenantId,
-      isDraft: false, // lookup/selling path — unfinished drafts never match
       ...(filters.name ? { name: { contains: filters.name, mode: 'insensitive' } } : {}),
       ...(filters.sku ? { sku: { contains: filters.sku, mode: 'insensitive' } } : {}),
-      ...(filters.barcode ? { barcode: { contains: filters.barcode, mode: 'insensitive' } } : {}),
       ...(filters.categoryId ? { categoryId: filters.categoryId } : {}),
       ...(filters.subcategoryId ? { subcategoryId: filters.subcategoryId } : {}),
       ...(filters.isActive !== undefined ? { isActive: filters.isActive } : {}),
@@ -104,11 +100,6 @@ export class ProductsRepository {
     return this.prisma.product.findFirst({ where: { id, tenantId } });
   }
 
-  findByBarcode(tenantId: string, barcode: string): Promise<Product | null> {
-    // Scanning is a selling path — a draft's barcode must not resolve.
-    return this.prisma.product.findFirst({ where: { tenantId, barcode, isDraft: false } });
-  }
-
   /** Management list: search + category / active / sync / stock filters. */
   async listManaged(
     tenantId: string,
@@ -123,20 +114,26 @@ export class ProductsRepository {
             OR: [
               { name: { contains: filters.search, mode: 'insensitive' } },
               { sku: { contains: filters.search, mode: 'insensitive' } },
-              { barcode: { contains: filters.search, mode: 'insensitive' } },
             ],
           }
         : {}),
       ...(filters.categoryId ? { categoryId: filters.categoryId } : {}),
       ...(filters.subcategoryId ? { subcategoryId: filters.subcategoryId } : {}),
       ...(filters.isActive !== undefined ? { isActive: filters.isActive } : {}),
-      ...(filters.isDraft !== undefined ? { isDraft: filters.isDraft } : {}),
+      ...(filters.type ? { type: filters.type } : {}),
       ...(filters.syncStatus ? { syncStatus: filters.syncStatus } : {}),
+      // Stock filters only make sense for stock-tracked (Inventory) items.
       ...(filters.stockStatus === 'OUT'
-        ? { quantityOnHand: { lte: 0 } }
+        ? { type: 'Inventory', quantityOnHand: { lte: 0 } }
         : filters.stockStatus === 'IN'
-          ? { quantityOnHand: { gt: 0 } }
-          : {}),
+          ? { type: 'Inventory', quantityOnHand: { gt: 0 } }
+          : filters.stockStatus === 'LOW'
+            ? {
+                type: 'Inventory',
+                reorderLevel: { not: null },
+                quantityOnHand: { gt: 0, lte: this.prisma.product.fields.reorderLevel },
+              }
+            : {}),
     };
 
     return this.prisma.$transaction([
@@ -183,14 +180,12 @@ export class ProductsRepository {
         const data = {
           name: p.name,
           sku: p.sku,
-          barcode: p.barcode,
           description: p.description ?? null,
           categoryId: mockCategoryId(tenantId, p.category),
-          unitType: p.unitType,
           unitPrice: p.unitPrice,
           quantityOnHand: p.quantityOnHand,
+          quantityAsOfDate: now,
           type: p.type,
-          requiresWarehousePickup: p.requiresWarehousePickup ?? false,
           isActive: true,
           syncStatus: 'SYNCED' as const,
           lastSyncedAt: now,
