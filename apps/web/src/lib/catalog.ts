@@ -17,6 +17,7 @@ export interface ClientProduct {
   subcategoryName: string | null;
   unitPrice: number;
   quantityOnHand: number;
+  imageUrl: string | null;
 }
 
 export interface ClientCustomer {
@@ -50,6 +51,7 @@ interface ApiProduct {
   subcategoryId: string | null;
   unitPrice: string | number;
   quantityOnHand: string | number;
+  imageUrl: string | null;
 }
 
 interface ApiSubcategory {
@@ -99,6 +101,7 @@ function normalizeApi(
     subcategoryName: (p.subcategoryId && subNames.get(p.subcategoryId)) || null,
     unitPrice: Number(p.unitPrice),
     quantityOnHand: Number(p.quantityOnHand),
+    imageUrl: p.imageUrl,
   };
 }
 

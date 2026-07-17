@@ -1,5 +1,5 @@
 import { Controller, Get, HttpCode, HttpStatus, Param, Post } from '@nestjs/common';
-import { PrintJob, Receipt } from '@hardware-pos/database';
+import { Receipt } from '@hardware-pos/database';
 
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { RequirePermissions } from '../../common/decorators/permissions.decorator';

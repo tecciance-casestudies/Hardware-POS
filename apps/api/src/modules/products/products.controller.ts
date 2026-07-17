@@ -10,12 +10,14 @@ import {
   Patch,
   Post,
   Query,
+  Res,
   UploadedFile,
   UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { Product } from '@hardware-pos/database';
 import type { Paginated } from '@hardware-pos/shared';
+import type { Response } from 'express';
 
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { RequirePermissions } from '../../common/decorators/permissions.decorator';
@@ -24,7 +26,9 @@ import { AuthenticatedUser } from '../auth/auth.types';
 import { Permission } from '../auth/permissions';
 import { MockSyncSummary } from './products.repository';
 import { ImportSummary, ProductsImportService } from './products-import.service';
+import { ProductsReportService } from './products-report.service';
 import { ProductsService } from './products.service';
+import { QueryProductsReportDto } from './dto/query-products-report.dto';
 import { CreateProductDto } from './dto/create-product.dto';
 import { QueryProductsDto } from './dto/query-products.dto';
 import { SearchProductsDto } from './dto/search-products.dto';
@@ -41,6 +45,7 @@ export class ProductsController {
   constructor(
     private readonly productsService: ProductsService,
     private readonly productsImportService: ProductsImportService,
+    private readonly productsReportService: ProductsReportService,
   ) {}
 
   @Get()
@@ -63,6 +68,23 @@ export class ProductsController {
   @RequirePermissions(Permission.PRODUCT_MANAGE)
   create(@TenantId() tenantId: string, @Body() dto: CreateProductDto): Promise<Product> {
     return this.productsService.create(tenantId, dto);
+  }
+
+  /**
+   * Export the products matching the list filters as a PDF or Excel stock
+   * report. Declared before `:id` so the literal segment isn't captured.
+   */
+  @Get('report')
+  @RequirePermissions(Permission.PRODUCT_READ)
+  async report(
+    @TenantId() tenantId: string,
+    @Query() query: QueryProductsReportDto,
+    @Res() res: Response,
+  ): Promise<void> {
+    const report = await this.productsReportService.generate(tenantId, query);
+    res.setHeader('Content-Type', report.contentType);
+    res.setHeader('Content-Disposition', `attachment; filename="${report.filename}"`);
+    res.send(report.buffer);
   }
 
   /** Bulk import from the QuickBooks Products & Services template (.xlsx / .csv). */
@@ -111,6 +133,25 @@ export class ProductsController {
   @RequirePermissions(Permission.PRODUCT_MANAGE)
   deactivate(@TenantId() tenantId: string, @Param('id') id: string): Promise<Product> {
     return this.productsService.deactivate(tenantId, id);
+  }
+
+  /** Upload the POS-side product photo (stored in S3; never sent to QuickBooks). */
+  @Post(':id/image')
+  @RequirePermissions(Permission.PRODUCT_MANAGE)
+  // Nest's FileInterceptor defaults to multer memory storage, so the file has `.buffer`.
+  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 5 * 1024 * 1024 } }))
+  uploadImage(
+    @TenantId() tenantId: string,
+    @Param('id') id: string,
+    @UploadedFile() file: { buffer: Buffer; mimetype: string } | undefined,
+  ): Promise<Product> {
+    return this.productsService.setImage(tenantId, id, file);
+  }
+
+  @Delete(':id/image')
+  @RequirePermissions(Permission.PRODUCT_MANAGE)
+  removeImage(@TenantId() tenantId: string, @Param('id') id: string): Promise<Product> {
+    return this.productsService.removeImage(tenantId, id);
   }
 
   @Post(':id/sync-to-quickbooks')

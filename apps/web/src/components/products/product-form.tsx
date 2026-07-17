@@ -26,7 +26,9 @@ import type { Session } from '@/lib/auth';
 import { productDraftService } from '@/lib/product-draft';
 import {
   createProduct,
+  deleteProductImage,
   updateProduct,
+  uploadProductImage,
   type CategoryNode,
   type ManagedProduct,
   type ProductInput,
@@ -56,6 +58,10 @@ export function ProductForm({
   const productId = product?.id ?? null;
 
   const [form, setForm] = React.useState<FormState>(() => initialFormState(product));
+  const [imageUrl, setImageUrl] = React.useState<string | null>(product?.imageUrl ?? null);
+  const [pendingFile, setPendingFile] = React.useState<File | null>(null);
+  const [pendingPreview, setPendingPreview] = React.useState<string | null>(null);
+  const [imageBusy, setImageBusy] = React.useState(false);
   const [step, setStep] = React.useState<StepKey>('details');
   const [errors, setErrors] = React.useState<FieldErrors>({});
   const [saving, setSaving] = React.useState(false);
@@ -76,6 +82,55 @@ export function ProductForm({
     dirty.current = true;
     setForm((f) => ({ ...f, categoryId, subcategoryId: '' }));
   }, []);
+
+  React.useEffect(() => {
+    return () => {
+      if (pendingPreview) URL.revokeObjectURL(pendingPreview);
+    };
+  }, [pendingPreview]);
+
+  // ---- image (POS-side photo; stored in S3, never sent to QuickBooks) ----
+  const onPickFile = async (file: File) => {
+    dirty.current = true;
+    setError(null);
+    if (editing && product) {
+      setImageBusy(true);
+      try {
+        const updated = await uploadProductImage(session, product.id, file);
+        setImageUrl(updated.imageUrl);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Image upload failed');
+      } finally {
+        setImageBusy(false);
+      }
+    } else {
+      if (pendingPreview) URL.revokeObjectURL(pendingPreview);
+      setPendingFile(file);
+      setPendingPreview(URL.createObjectURL(file));
+    }
+  };
+
+  const onRemoveImage = async () => {
+    dirty.current = true;
+    setError(null);
+    if (editing && product && imageUrl) {
+      setImageBusy(true);
+      try {
+        await deleteProductImage(session, product.id);
+        setImageUrl(null);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Could not remove image');
+      } finally {
+        setImageBusy(false);
+      }
+    } else {
+      if (pendingPreview) URL.revokeObjectURL(pendingPreview);
+      setPendingFile(null);
+      setPendingPreview(null);
+    }
+  };
+
+  const previewSrc = pendingPreview ?? imageUrl;
 
   // Restore a locally-saved draft (create mode only — edit mode trusts the server).
   React.useEffect(() => {
@@ -235,6 +290,13 @@ export function ProductForm({
       } else {
         const created = await createProduct(session, input);
         productDraftService.clear(null);
+        if (pendingFile) {
+          try {
+            await uploadProductImage(session, created.id, pendingFile);
+          } catch {
+            /* image can be added later from edit */
+          }
+        }
         router.push(`/products/${created.id}`);
       }
       router.refresh();
@@ -329,6 +391,10 @@ export function ProductForm({
             setCategory={setCategory}
             errors={errors}
             categories={categories}
+            imageSrc={previewSrc}
+            imageBusy={imageBusy}
+            onPickFile={(f) => void onPickFile(f)}
+            onRemoveImage={() => void onRemoveImage()}
           />
         ) : null}
         {step === 'pricing' ? (

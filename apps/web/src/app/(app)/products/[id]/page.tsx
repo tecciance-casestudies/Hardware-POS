@@ -5,6 +5,8 @@ import { useParams } from 'next/navigation';
 import * as React from 'react';
 import { ArrowLeft, Pencil, RefreshCw } from 'lucide-react';
 
+import { ProductImage } from '@/components/product-image';
+
 import { SyncBadge } from '@/components/quickbooks/sync-badge';
 import { Badge } from '@/components/ui/badge';
 import { Button, buttonVariants } from '@/components/ui/button';
@@ -13,6 +15,7 @@ import { useAuth } from '@/lib/auth';
 import { Permission } from '@/lib/permissions';
 import {
   fetchProduct,
+  resolveImageUrl,
   syncProductToQuickBooks,
   type ManagedProduct,
 } from '@/lib/products-api';
@@ -107,7 +110,17 @@ export default function ProductDetailPage() {
         <SyncBadge status={product.syncStatus} />
       </div>
 
-      <div className="grid gap-6">
+      <div className="grid gap-6 lg:grid-cols-[280px_1fr]">
+        <Card>
+          <CardContent className="p-4">
+            <ProductImage
+              src={resolveImageUrl(product.imageUrl)}
+              alt={product.name}
+              className="aspect-square w-full"
+            />
+          </CardContent>
+        </Card>
+
         <Card>
           <CardHeader>
             <CardTitle>Details</CardTitle>

@@ -24,7 +24,7 @@ export interface ProductListFilters {
   isActive?: boolean;
   type?: string;
   syncStatus?: Prisma.ProductWhereInput['syncStatus'];
-  stockStatus?: 'IN' | 'OUT';
+  stockStatus?: 'IN' | 'OUT' | 'LOW';
 }
 
 export interface MockSyncSummary {
@@ -122,11 +122,18 @@ export class ProductsRepository {
       ...(filters.isActive !== undefined ? { isActive: filters.isActive } : {}),
       ...(filters.type ? { type: filters.type } : {}),
       ...(filters.syncStatus ? { syncStatus: filters.syncStatus } : {}),
+      // Stock filters only make sense for stock-tracked (Inventory) items.
       ...(filters.stockStatus === 'OUT'
-        ? { quantityOnHand: { lte: 0 } }
+        ? { type: 'Inventory', quantityOnHand: { lte: 0 } }
         : filters.stockStatus === 'IN'
-          ? { quantityOnHand: { gt: 0 } }
-          : {}),
+          ? { type: 'Inventory', quantityOnHand: { gt: 0 } }
+          : filters.stockStatus === 'LOW'
+            ? {
+                type: 'Inventory',
+                reorderLevel: { not: null },
+                quantityOnHand: { gt: 0, lte: this.prisma.product.fields.reorderLevel },
+              }
+            : {}),
     };
 
     return this.prisma.$transaction([

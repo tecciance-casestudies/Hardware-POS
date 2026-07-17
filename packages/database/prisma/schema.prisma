@@ -455,6 +455,8 @@ model Product {
   reorderLevel     Decimal?   @db.Decimal(12, 3)
   /// QBO inventory asset account name (auto-resolved; read-only in the UI).
   inventoryAssetAccount String?
+  /// POS-side product photo (S3/LocalStack) — never pushed to QuickBooks.
+  imageUrl         String?
   isActive         Boolean    @default(true)
   lastSyncedAt     DateTime?
   syncStatus       SyncStatus @default(NOT_SYNCED)

@@ -38,6 +38,8 @@ export interface ManagedProduct {
   reorderLevel: number | null;
   /** QBO inventory asset account name (auto-resolved; read-only). */
   inventoryAssetAccount: string | null;
+  /** POS-side product photo (S3) — never pushed to QuickBooks. */
+  imageUrl: string | null;
   isActive: boolean;
   quickbooksItemId: string | null;
   syncStatus: ProductSyncStatus;
@@ -60,7 +62,7 @@ export interface ProductsQuery {
   isActive?: 'true' | 'false';
   type?: ProductItemType;
   syncStatus?: ProductSyncStatus;
-  stockStatus?: 'IN' | 'OUT';
+  stockStatus?: 'IN' | 'OUT' | 'LOW';
 }
 
 export interface ProductInput {
@@ -229,6 +231,72 @@ export async function setProductActive(
   isActive: boolean,
 ): Promise<ManagedProduct> {
   return updateProduct(session, id, { isActive });
+}
+
+/** Upload a product image (multipart). Returns the updated product. */
+export async function uploadProductImage(
+  session: Session,
+  id: string,
+  file: File,
+): Promise<ManagedProduct> {
+  const form = new FormData();
+  form.append('file', file);
+  const res = await authorizedFetch(`/products/${id}/image`, session, {
+    method: 'POST',
+    body: form,
+  });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) {
+    const message =
+      json?.message ?? (res.status === 413 ? 'Image is too large (max 5MB)' : 'Image upload failed');
+    throw new Error(Array.isArray(message) ? message.join(', ') : message);
+  }
+  return toManaged((json?.data ?? json) as ApiProduct);
+}
+
+export async function deleteProductImage(session: Session, id: string): Promise<ManagedProduct> {
+  return toManaged(await api.del<ApiProduct>(`/products/${id}/image`, auth(session)));
+}
+
+export type ReportFormat = 'pdf' | 'xlsx';
+
+/**
+ * Download a stock report (PDF or Excel) covering ALL products that match the
+ * given filters — not just the currently visible page. Triggers a browser
+ * file download.
+ */
+export async function downloadProductsReport(
+  session: Session,
+  query: Omit<ProductsQuery, 'page' | 'pageSize'>,
+  format: ReportFormat,
+): Promise<void> {
+  const params = new URLSearchParams();
+  params.set('format', format);
+  if (query.search) params.set('search', query.search);
+  if (query.categoryId) params.set('categoryId', query.categoryId);
+  if (query.subcategoryId) params.set('subcategoryId', query.subcategoryId);
+  if (query.isActive) params.set('isActive', query.isActive);
+  if (query.type) params.set('type', query.type);
+  if (query.syncStatus) params.set('syncStatus', query.syncStatus);
+  if (query.stockStatus) params.set('stockStatus', query.stockStatus);
+
+  const res = await authorizedFetch(`/products/report?${params.toString()}`, session);
+  if (!res.ok) {
+    const json = await res.json().catch(() => null);
+    const message = json?.message ?? 'Export failed';
+    throw new Error(Array.isArray(message) ? message.join(', ') : message);
+  }
+  const blob = await res.blob();
+  const disposition = res.headers.get('Content-Disposition') ?? '';
+  const filename = /filename="([^"]+)"/.exec(disposition)?.[1] ?? `stock-report.${format}`;
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
 }
 
 export interface ImportRowError {

@@ -3,7 +3,7 @@ import { IsEnum, IsIn, IsOptional, IsString } from 'class-validator';
 
 import { PaginationQueryDto } from '../../../common/dto/pagination-query.dto';
 
-export type StockStatus = 'IN' | 'OUT';
+export type StockStatus = 'IN' | 'OUT' | 'LOW';
 
 export class QueryProductsDto extends PaginationQueryDto {
   /** Free-text search across name and SKU. */
@@ -36,8 +36,8 @@ export class QueryProductsDto extends PaginationQueryDto {
   @IsOptional()
   syncStatus?: SyncStatus;
 
-  /** Stock status: IN (on hand > 0) or OUT (on hand <= 0). */
-  @IsIn(['IN', 'OUT'])
+  /** Stock status: IN (> 0), OUT (<= 0), or LOW (> 0 but at/below reorder point). */
+  @IsIn(['IN', 'OUT', 'LOW'])
   @IsOptional()
   stockStatus?: StockStatus;
 }

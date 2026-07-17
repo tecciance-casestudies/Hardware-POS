@@ -24,18 +24,28 @@ const PRESETS: { key: Exclude<DateRangePreset, 'CUSTOM'>; label: string }[] = [
   { key: 'YEAR', label: 'This year' },
 ];
 
+/**
+ * A well-formed calendar day: strictly YYYY-MM-DD with a 4-digit year. Date
+ * inputs happily emit 5–6-digit years mid-typing, which produce absurd
+ * timestamps the API (rightly) rejects — treat those as "not set".
+ */
+export function isValidYmd(v: string | undefined): v is string {
+  if (!v || !/^\d{4}-\d{2}-\d{2}$/.test(v)) return false;
+  return !Number.isNaN(Date.parse(`${v}T00:00:00`));
+}
+
 /** Resolve the selection to inclusive ISO bounds for the API. */
 export function resolveDateRange(value: DateRangeValue): { dateFrom?: string; dateTo?: string } {
   if (value.preset === 'ALL') return {};
 
   if (value.preset === 'CUSTOM') {
     const range: { dateFrom?: string; dateTo?: string } = {};
-    if (value.from) {
+    if (isValidYmd(value.from)) {
       const from = new Date(value.from);
       from.setHours(0, 0, 0, 0);
       range.dateFrom = from.toISOString();
     }
-    if (value.to) {
+    if (isValidYmd(value.to)) {
       // Inclusive upper bound: end of the selected day.
       const to = new Date(value.to);
       to.setHours(23, 59, 59, 999);
@@ -60,10 +70,13 @@ export function resolveDateRange(value: DateRangeValue): { dateFrom?: string; da
     start.setMonth(0, 1);
     start.setHours(0, 0, 0, 0);
   }
-  return { dateFrom: start.toISOString(), dateTo: now.toISOString() };
+  // No upper bound: presets are "from X onward", so sales completed while
+  // the page is open still appear on the next fetch.
+  return { dateFrom: start.toISOString() };
 }
 
 function formatDay(ymd: string): string {
+  if (!isValidYmd(ymd)) return '—';
   return new Date(`${ymd}T00:00:00`).toLocaleDateString('en-LK', {
     day: '2-digit',
     month: 'short',
@@ -122,7 +135,10 @@ export function DateRangeFilter({
     };
   }, [open]);
 
-  const invalidDraft = !!draftFrom && !!draftTo && draftFrom > draftTo;
+  const badFrom = !!draftFrom && !isValidYmd(draftFrom);
+  const badTo = !!draftTo && !isValidYmd(draftTo);
+  const invalidDraft =
+    badFrom || badTo || (!!draftFrom && !!draftTo && draftFrom > draftTo);
   const canApply = (!!draftFrom || !!draftTo) && !invalidDraft;
 
   const applyCustom = () => {
@@ -191,7 +207,8 @@ export function DateRangeFilter({
                   id="range-from"
                   type="date"
                   value={draftFrom}
-                  max={draftTo || undefined}
+                  min="1990-01-01"
+                  max={isValidYmd(draftTo) ? draftTo : '2099-12-31'}
                   onChange={(e) => setDraftFrom(e.target.value)}
                   className="h-9 flex-1"
                 />
@@ -204,13 +221,18 @@ export function DateRangeFilter({
                   id="range-to"
                   type="date"
                   value={draftTo}
-                  min={draftFrom || undefined}
+                  min={isValidYmd(draftFrom) ? draftFrom : '1990-01-01'}
+                  max="2099-12-31"
                   onChange={(e) => setDraftTo(e.target.value)}
                   className="h-9 flex-1"
                 />
               </div>
               {invalidDraft ? (
-                <p className="text-xs text-danger">The start date must be before the end date.</p>
+                <p className="text-xs text-danger">
+                  {badFrom || badTo
+                    ? 'Enter valid dates (4-digit year).'
+                    : 'The start date must be before the end date.'}
+                </p>
               ) : null}
               <Button size="sm" className="w-full" disabled={!canApply} onClick={applyCustom}>
                 Apply range

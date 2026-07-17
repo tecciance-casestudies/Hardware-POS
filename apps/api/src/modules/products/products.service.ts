@@ -9,6 +9,7 @@ import { Prisma, Product, UserRole } from '@hardware-pos/database';
 import type { Paginated } from '@hardware-pos/shared';
 
 import { paginate } from '../../common/pagination';
+import { StorageService } from '../../common/storage/storage.service';
 import { SyncQueueService } from '../sync/queue/sync-queue.service';
 import { MockSyncSummary, ProductsRepository } from './products.repository';
 import { CreateProductDto } from './dto/create-product.dto';
@@ -21,6 +22,7 @@ export class ProductsService {
   constructor(
     private readonly productsRepository: ProductsRepository,
     private readonly syncQueue: SyncQueueService,
+    private readonly storage: StorageService,
   ) {}
 
   async list(tenantId: string, query: QueryProductsDto): Promise<Paginated<Product>> {
@@ -167,6 +169,34 @@ export class ProductsService {
       return this.queueQuickBooksPush(tenantId, updated);
     }
     return updated;
+  }
+
+  /**
+   * Attach a POS-side product photo (S3 / LocalStack). Images are local to the
+   * POS and are never pushed to QuickBooks.
+   */
+  async setImage(
+    tenantId: string,
+    id: string,
+    file: { buffer: Buffer; mimetype: string } | undefined,
+  ): Promise<Product> {
+    if (!file) {
+      throw new BadRequestException('No image file provided');
+    }
+    const existing = await this.getById(tenantId, id);
+    const url = await this.storage.saveImage(file);
+    if (existing.imageUrl) {
+      await this.storage.remove(existing.imageUrl);
+    }
+    return this.productsRepository.update(id, { imageUrl: url });
+  }
+
+  async removeImage(tenantId: string, id: string): Promise<Product> {
+    const existing = await this.getById(tenantId, id);
+    if (existing.imageUrl) {
+      await this.storage.remove(existing.imageUrl);
+    }
+    return this.productsRepository.update(id, { imageUrl: null });
   }
 
   /** Queue a product push to QuickBooks; the sync worker creates/updates the Item. */

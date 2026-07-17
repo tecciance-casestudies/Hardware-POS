@@ -4,7 +4,9 @@ import Link from 'next/link';
 import * as React from 'react';
 import { Ban, FileUp, FolderTree, PackagePlus, Pencil, RotateCcw, Search } from 'lucide-react';
 
+import { ProductImage } from '@/components/product-image';
 import { ImportProductsDialog } from '@/components/products/import-products-dialog';
+import { ExportMenu } from '@/components/sales/export-menu';
 import { PageHeader } from '@/components/page-header';
 import { SyncBadge } from '@/components/quickbooks/sync-badge';
 import { Badge } from '@/components/ui/badge';
@@ -18,6 +20,7 @@ import { useAuth } from '@/lib/auth';
 import { Permission } from '@/lib/permissions';
 import {
   deactivateProduct,
+  downloadProductsReport,
   fetchCategoryTree,
   fetchProducts,
   setProductActive,
@@ -25,8 +28,10 @@ import {
   type ManagedProduct,
   type ProductsQuery,
   type ProductSyncStatus,
+  type ReportFormat,
 } from '@/lib/products-api';
 import { cn, formatMoney } from '@/lib/utils';
+import { resolveImageUrl } from '@/lib/products-api';
 
 const PAGE_SIZES = [20, 30, 40, 50];
 
@@ -42,9 +47,28 @@ export default function ProductsPage() {
   const [debouncedSearch, setDebouncedSearch] = React.useState('');
   const [categoryId, setCategoryId] = React.useState('');
   const [subcategoryId, setSubcategoryId] = React.useState('');
-  const [stockStatus, setStockStatus] = React.useState<'' | 'IN' | 'OUT'>('');
+  const [stockStatus, setStockStatus] = React.useState<'' | 'IN' | 'OUT' | 'LOW'>('');
   const [active, setActive] = React.useState<'' | 'true' | 'false'>('true');
   const [syncStatus, setSyncStatus] = React.useState<'' | ProductSyncStatus>('');
+  const [exporting, setExporting] = React.useState<ReportFormat | null>(null);
+
+  // Deep links (e.g. dashboard business alerts) pre-apply filters via the URL:
+  // /products?stockStatus=OUT|LOW|IN&syncStatus=FAILED&type=…
+  React.useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const stock = params.get('stockStatus');
+    if (stock === 'IN' || stock === 'OUT' || stock === 'LOW') setStockStatus(stock);
+    const sync = params.get('syncStatus');
+    if (sync && ['SYNCED', 'PENDING', 'NOT_SYNCED', 'FAILED', 'SYNCING'].includes(sync)) {
+      setSyncStatus(sync as ProductSyncStatus);
+    }
+    const activeParam = params.get('isActive');
+    if (activeParam === 'true' || activeParam === 'false' || activeParam === '') {
+      setActive(activeParam as '' | 'true' | 'false');
+    }
+    const q = params.get('search');
+    if (q) setSearch(q);
+  }, []);
   const [page, setPage] = React.useState(1);
   const [pageSize, setPageSize] = React.useState(20);
 
@@ -115,6 +139,30 @@ export default function ProductsPage() {
       setError(err instanceof Error ? err.message : 'Update failed');
     } finally {
       setBusyId(null);
+    }
+  };
+
+  const handleExport = async (format: ReportFormat) => {
+    if (!session) return;
+    setExporting(format);
+    setError(null);
+    try {
+      await downloadProductsReport(
+        session,
+        {
+          search: debouncedSearch || undefined,
+          categoryId: categoryId || undefined,
+          subcategoryId: subcategoryId || undefined,
+          stockStatus: stockStatus || undefined,
+          isActive: active || undefined,
+          syncStatus: syncStatus || undefined,
+        },
+        format,
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Export failed');
+    } finally {
+      setExporting(null);
     }
   };
 
@@ -194,11 +242,12 @@ export default function ProductsPage() {
         ) : null}
         <Select
           value={stockStatus}
-          onChange={(e) => setStockStatus(e.target.value as '' | 'IN' | 'OUT')}
+          onChange={(e) => setStockStatus(e.target.value as '' | 'IN' | 'OUT' | 'LOW')}
           className="w-auto"
         >
           <option value="">All stock</option>
           <option value="IN">In stock</option>
+          <option value="LOW">Low stock</option>
           <option value="OUT">Out of stock</option>
         </Select>
         <Select
@@ -221,6 +270,15 @@ export default function ProductsPage() {
           <option value="false">Inactive</option>
           <option value="">All</option>
         </Select>
+
+        {/* Stock report export — covers every product matching the filters. */}
+        <div className="ml-auto">
+          <ExportMenu
+            disabled={loading || total === 0}
+            exporting={exporting}
+            onExport={(format) => void handleExport(format)}
+          />
+        </div>
       </div>
 
       {error ? <p className="text-sm text-danger">{error}</p> : null}
@@ -256,15 +314,22 @@ export default function ProductsPage() {
                 rows.map((p) => (
                   <tr key={p.id} className="border-b border-border last:border-0 hover:bg-muted/30">
                     <td className="px-4 py-3">
-                      <div className="min-w-0">
-                        <Link
-                          href={`/products/${p.id}`}
-                          className="font-medium text-foreground hover:text-primary hover:underline"
-                        >
-                          {p.name}
-                        </Link>
-                        <div className="text-xs text-muted-foreground">
-                          {p.type === 'NonInventory' ? 'Non-Inventory' : p.type}
+                      <div className="flex items-center gap-3">
+                        <ProductImage
+                          src={resolveImageUrl(p.imageUrl)}
+                          alt={p.name}
+                          className="h-11 w-11 shrink-0"
+                        />
+                        <div className="min-w-0">
+                          <Link
+                            href={`/products/${p.id}`}
+                            className="font-medium text-foreground hover:text-primary hover:underline"
+                          >
+                            {p.name}
+                          </Link>
+                          <div className="text-xs text-muted-foreground">
+                            {p.type === 'NonInventory' ? 'Non-Inventory' : p.type}
+                          </div>
                         </div>
                       </div>
                     </td>

@@ -1,15 +1,17 @@
 'use client';
 
 import Link from 'next/link';
-import { Settings2 } from 'lucide-react';
+import { ImagePlus, Loader2, Settings2, Trash2, UploadCloud } from 'lucide-react';
 import * as React from 'react';
 
+import { ProductImage } from '@/components/product-image';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
 import type { CategoryNode } from '@/lib/products-api';
 import type { ProductItemType } from '@/lib/products-api';
+import { cn } from '@/lib/utils';
 
 import { Field, StepHeader } from './fields';
 import type { FieldErrors, FormState, SetField } from './types';
@@ -34,15 +36,29 @@ export function ProductDetailsStep({
   setCategory,
   errors,
   categories,
+  imageSrc,
+  imageBusy,
+  onPickFile,
+  onRemoveImage,
 }: {
   form: FormState;
   set: SetField;
   setCategory: (categoryId: string) => void;
   errors: FieldErrors;
   categories: CategoryNode[];
+  imageSrc: string | null;
+  imageBusy: boolean;
+  onPickFile: (file: File) => void;
+  onRemoveImage: () => void;
 }) {
   const subcategories = categories.find((c) => c.id === form.categoryId)?.subcategories ?? [];
   const typeHint = ITEM_TYPES.find((t) => t.value === form.type)?.hint;
+  const fileInput = React.useRef<HTMLInputElement>(null);
+  const [dragOver, setDragOver] = React.useState(false);
+  const handleFiles = (files: FileList | null) => {
+    const f = files?.[0];
+    if (f) onPickFile(f);
+  };
 
   return (
     <div className="space-y-6">
@@ -161,6 +177,88 @@ export function ProductDetailsStep({
             <Settings2 className="mr-1 h-3.5 w-3.5" /> Manage categories
           </Link>
         </Button>
+      </div>
+
+      {/* POS-side photo — stored in S3; never sent to QuickBooks. */}
+      <div className="space-y-3 rounded-2xl border border-border bg-surface p-5">
+        <div>
+          <h3 className="text-sm font-semibold">Product image</h3>
+          <p className="text-xs text-muted-foreground">
+            Shown on the POS tiles only — this photo is not sent to QuickBooks.
+          </p>
+        </div>
+
+        <input
+          ref={fileInput}
+          type="file"
+          accept="image/png,image/jpeg,image/webp,image/gif"
+          className="hidden"
+          onChange={(e) => handleFiles(e.target.files)}
+        />
+
+        {imageSrc ? (
+          <div className="flex items-start gap-4">
+            <ProductImage
+              src={imageSrc}
+              alt={form.name || 'Product image'}
+              className="h-40 w-40 shrink-0 rounded-xl"
+            />
+            <div className="flex flex-col gap-2">
+              <Button
+                variant="outline"
+                disabled={imageBusy}
+                leftIcon={
+                  imageBusy ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <ImagePlus className="h-4 w-4" />
+                  )
+                }
+                onClick={() => fileInput.current?.click()}
+              >
+                Replace
+              </Button>
+              <Button
+                variant="ghost"
+                className="text-danger"
+                disabled={imageBusy}
+                onClick={onRemoveImage}
+                leftIcon={<Trash2 className="h-4 w-4" />}
+              >
+                Remove
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <button
+            type="button"
+            onClick={() => fileInput.current?.click()}
+            onDragOver={(e) => {
+              e.preventDefault();
+              setDragOver(true);
+            }}
+            onDragLeave={() => setDragOver(false)}
+            onDrop={(e) => {
+              e.preventDefault();
+              setDragOver(false);
+              handleFiles(e.dataTransfer.files);
+            }}
+            className={cn(
+              'flex w-full flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed p-8 text-center transition-colors',
+              dragOver ? 'border-brand-600 bg-brand-50' : 'border-border bg-muted/30 hover:bg-muted',
+            )}
+          >
+            {imageBusy ? (
+              <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+            ) : (
+              <UploadCloud className="h-8 w-8 text-muted-foreground" />
+            )}
+            <span className="text-sm font-medium">Upload or drag &amp; drop an image</span>
+            <span className="text-xs text-muted-foreground">
+              Square image recommended · PNG, JPG or WebP · max 5 MB
+            </span>
+          </button>
+        )}
       </div>
     </div>
   );

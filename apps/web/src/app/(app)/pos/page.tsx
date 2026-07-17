@@ -25,6 +25,7 @@ import { ItemNoteDialog } from '@/components/pos/item-note-dialog';
 import { ManagerApprovalDialog } from '@/components/pos/manager-approval-dialog';
 import { OrderDiscountDialog } from '@/components/pos/order-discount-dialog';
 import { QuickAddCustomerDialog } from '@/components/pos/quick-add-customer-dialog';
+import { ProductImage } from '@/components/product-image';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { ChipRow } from '@/components/ui/chip-row';
@@ -34,6 +35,7 @@ import { useAuth } from '@/lib/auth';
 import { computeLine, computeTotals, type LineDiscount, type OrderDiscount } from '@/lib/cart';
 import { useCheckoutData, type ClientProduct } from '@/lib/catalog';
 import { ORDER_DISCOUNT_KEY, requestDiscountApproval } from '@/lib/discounts';
+import { resolveImageUrl } from '@/lib/products-api';
 import { Permission, discountLimitFor, withinDiscountLimit } from '@/lib/permissions';
 import { usePosCart } from '@/lib/pos-cart';
 import { cn, formatMoney, round2 } from '@/lib/utils';
@@ -617,20 +619,32 @@ export default function PosPage() {
                     title={p.name}
                     className="group flex flex-col overflow-hidden rounded-xl border border-border bg-card text-left shadow-sm transition-all hover:border-primary hover:shadow"
                   >
+                    <button
+                      type="button"
+                      onClick={() => addToCart(p)}
+                      disabled={outOfStock}
+                      aria-label={`Add ${p.name} to cart`}
+                      className="relative block text-left disabled:cursor-not-allowed"
+                    >
+                      <ProductImage
+                        src={resolveImageUrl(p.imageUrl)}
+                        alt={p.name}
+                        rounded="rounded-none"
+                        className={cn('aspect-[4/3] w-full border-0', outOfStock && 'opacity-60')}
+                      />
+                      {outOfStock ? (
+                        <span className="absolute right-1.5 top-1.5 rounded-md bg-danger px-1.5 py-0.5 text-[10px] font-semibold text-white">
+                          Out of Stock
+                        </span>
+                      ) : lowStock ? (
+                        <span className="absolute right-1.5 top-1.5 rounded-md bg-warning-soft px-1.5 py-0.5 text-[10px] font-semibold text-warning">
+                          Low Stock
+                        </span>
+                      ) : null}
+                    </button>
                     <div className="flex flex-1 flex-col p-2.5">
-                      <div className="flex items-start justify-between gap-1">
-                        <div className="line-clamp-2 min-h-8 text-xs font-medium leading-tight">
-                          {p.name}
-                        </div>
-                        {outOfStock ? (
-                          <span className="shrink-0 rounded-md bg-danger px-1.5 py-0.5 text-[10px] font-semibold text-white">
-                            Out
-                          </span>
-                        ) : lowStock ? (
-                          <span className="shrink-0 rounded-md bg-warning-soft px-1.5 py-0.5 text-[10px] font-semibold text-warning">
-                            Low
-                          </span>
-                        ) : null}
+                      <div className="line-clamp-2 min-h-8 text-xs font-medium leading-tight">
+                        {p.name}
                       </div>
                       <div className="mt-0.5 truncate text-[11px] text-muted-foreground">
                         {p.sku ?? ''}
