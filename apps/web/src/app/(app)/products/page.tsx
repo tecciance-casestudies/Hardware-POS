@@ -289,6 +289,7 @@ export default function ProductsPage() {
                     </td>
                     <td className="px-4 py-3">
                       <div className="flex flex-col items-start gap-1">
+                        {p.isDraft ? <Badge variant="warning">Draft</Badge> : null}
                         {!p.isActive ? <Badge variant="danger">Inactive</Badge> : null}
                         <SyncBadge status={p.syncStatus} />
                       </div>

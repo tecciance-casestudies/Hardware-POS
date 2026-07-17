@@ -143,7 +143,7 @@ export function useCheckoutData(session: Session): CheckoutData {
     (async () => {
       try {
         const [prod, cats, settings] = await Promise.all([
-          api.get<{ items: ApiProduct[] }>('/products?pageSize=200', auth),
+          api.get<{ items: ApiProduct[] }>('/products?pageSize=200&isDraft=false', auth),
           api.get<ApiCategory[]>('/categories', auth),
           api.get<PosSettings>('/settings', auth),
         ]);

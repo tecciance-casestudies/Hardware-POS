@@ -1,16 +1,14 @@
 'use client';
 
 /**
- * Frontend-only product-wizard draft persistence.
+ * Product-wizard draft persistence (wizard progress only).
  *
- * Saves the in-progress wizard (form fields + product type + current step) to
- * localStorage so a refresh or accidental navigation doesn't lose work. Mirrors
- * the `categoryAssignmentService` / `variationMockService` pattern — components
- * never touch localStorage directly. Variation data persists separately via
- * `variationMockService`; this only covers the plain product fields + wizard progress.
- *
- * TODO(backend): a real "save draft" would POST an unpublished product; until then
- * drafts live only in this browser.
+ * "Save draft" persists the product itself server-side (POST/PATCH /products
+ * with isDraft: true), so drafts survive across browsers and appear in the
+ * products table. This module only keeps the wizard's local progress — form
+ * fields, product type, current step, and the id of the server draft — so a
+ * refresh or accidental navigation resumes exactly where the user left off.
+ * Components never touch localStorage directly.
  */
 
 const LS_PREFIX = 'hpos.productDraft.';
@@ -42,6 +40,8 @@ export interface ProductDraft {
   productType: 'simple' | 'variations';
   step: number;
   savedAt: string;
+  /** Server product id created by "Save draft" — re-saves update it in place. */
+  serverProductId?: string | null;
 }
 
 function keyFor(productId: string | null | undefined): string {

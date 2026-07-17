@@ -97,4 +97,9 @@ export class CreateProductDto {
   @IsBoolean()
   @IsOptional()
   isActive?: boolean;
+
+  /** Save as an unfinished draft — hidden from the POS until published. */
+  @IsBoolean()
+  @IsOptional()
+  isDraft?: boolean;
 }

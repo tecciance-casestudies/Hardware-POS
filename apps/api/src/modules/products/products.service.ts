@@ -31,6 +31,7 @@ export class ProductsService {
         categoryId: query.categoryId,
         subcategoryId: query.subcategoryId,
         isActive: query.isActive === undefined ? undefined : query.isActive === 'true',
+        isDraft: query.isDraft === undefined ? undefined : query.isDraft === 'true',
         syncStatus: query.syncStatus,
         stockStatus: query.stockStatus,
       },
@@ -97,6 +98,7 @@ export class ProductsService {
       taxable: dto.taxable ?? true,
       requiresWarehousePickup: dto.requiresWarehousePickup ?? false,
       isActive: dto.isActive ?? true,
+      isDraft: dto.isDraft ?? false,
       syncStatus: 'NOT_SYNCED',
     };
     try {
@@ -158,6 +160,7 @@ export class ProductsService {
       taxable: dto.taxable,
       requiresWarehousePickup: dto.requiresWarehousePickup,
       isActive: dto.isActive,
+      isDraft: dto.isDraft,
     };
     try {
       return await this.productsRepository.update(id, data);

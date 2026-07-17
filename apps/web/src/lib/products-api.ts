@@ -26,6 +26,7 @@ export interface ManagedProduct {
   taxable: boolean;
   requiresWarehousePickup: boolean;
   isActive: boolean;
+  isDraft: boolean;
   quickbooksItemId: string | null;
   syncStatus: ProductSyncStatus;
   lastSyncedAt: string | null;
@@ -45,6 +46,7 @@ export interface ProductsQuery {
   categoryId?: string;
   subcategoryId?: string;
   isActive?: 'true' | 'false';
+  isDraft?: 'true' | 'false';
   syncStatus?: ProductSyncStatus;
   stockStatus?: 'IN' | 'OUT';
 }
@@ -69,6 +71,7 @@ export interface ProductInput {
   taxable?: boolean;
   requiresWarehousePickup?: boolean;
   isActive?: boolean;
+  isDraft?: boolean;
 }
 
 export interface Category {
@@ -181,6 +184,7 @@ function buildQuery(q: ProductsQuery): string {
   if (q.categoryId) params.set('categoryId', q.categoryId);
   if (q.subcategoryId) params.set('subcategoryId', q.subcategoryId);
   if (q.isActive) params.set('isActive', q.isActive);
+  if (q.isDraft) params.set('isDraft', q.isDraft);
   if (q.syncStatus) params.set('syncStatus', q.syncStatus);
   if (q.stockStatus) params.set('stockStatus', q.stockStatus);
   return params.toString();

@@ -27,6 +27,11 @@ export class QueryProductsDto extends PaginationQueryDto {
   @IsOptional()
   isActive?: string;
 
+  /** Filter drafts in ('true') or out ('false'); omit to include both. */
+  @IsIn(['true', 'false'])
+  @IsOptional()
+  isDraft?: string;
+
   @IsEnum(SyncStatus)
   @IsOptional()
   syncStatus?: SyncStatus;

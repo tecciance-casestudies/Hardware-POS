@@ -192,6 +192,9 @@ export class SalesService {
         if (!product.isActive) {
           throw new BadRequestException(`Product ${product.name} is inactive`);
         }
+        if (product.isDraft) {
+          throw new BadRequestException(`Product ${product.name} is a draft and cannot be sold`);
+        }
 
         const cachedPrice = Number(product.unitPrice);
         if (item.unitPrice != null && round2(item.unitPrice) !== round2(cachedPrice)) {
