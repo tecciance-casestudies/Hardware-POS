@@ -1,6 +1,8 @@
 import { Injectable, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
+import { canonicalWebOrigin } from '../../common/web-origins';
+
 const DEFAULT_AUTHORIZE_URL = 'https://appcenter.intuit.com/connect/oauth2';
 const DEFAULT_TOKEN_URL = 'https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer';
 const DEFAULT_REVOKE_URL = 'https://developer.api.intuit.com/v2/oauth2/tokens/revoke';
@@ -59,7 +61,9 @@ export class QuickBooksConfig {
       revokeUrl: this.config.get<string>('QUICKBOOKS_REVOKE_URL', DEFAULT_REVOKE_URL),
       apiBase: this.config.get<string>('QUICKBOOKS_API_BASE', defaultApiBase),
       encryptionKey: encryptionKey!,
-      webOrigin: this.config.get<string>('WEB_ORIGIN', 'http://localhost:3000'),
+      // WEB_ORIGIN may be a comma-separated list; use the canonical (first) one
+      // for the single redirect URL back to the app after OAuth.
+      webOrigin: canonicalWebOrigin(this.config.get<string>('WEB_ORIGIN')),
     };
   }
 

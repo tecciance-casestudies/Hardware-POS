@@ -7,6 +7,7 @@ import { API_VERSION } from '@hardware-pos/shared';
 
 import { AppModule } from './app.module';
 import { getUploadDir, UPLOAD_URL_PREFIX } from './common/storage/storage.util';
+import { parseWebOrigins } from './common/web-origins';
 
 async function bootstrap(): Promise<void> {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, { bufferLogs: false });
@@ -24,7 +25,9 @@ async function bootstrap(): Promise<void> {
     }),
   );
   app.enableCors({
-    origin: config.get<string>('WEB_ORIGIN', 'http://localhost:3000'),
+    // WEB_ORIGIN may list several allowed origins, comma-separated (e.g. apex +
+    // www). cors reflects whichever matches the request's Origin header.
+    origin: parseWebOrigins(config.get<string>('WEB_ORIGIN')),
     credentials: true,
     // Lets the browser read the filename of exported reports.
     exposedHeaders: ['Content-Disposition'],
