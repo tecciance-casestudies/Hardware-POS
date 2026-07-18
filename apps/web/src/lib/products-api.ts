@@ -209,6 +209,26 @@ export async function fetchProduct(session: Session, id: string): Promise<Manage
   return toManaged(await api.get<ApiProduct>(`/products/${id}`, auth(session)));
 }
 
+export interface StockCounts {
+  outOfStock: number;
+  lowStock: number;
+}
+
+/**
+ * Out-of-stock and low-stock counts straight from the server, using the same
+ * `stockStatus` filter the products table applies (Inventory items only; LOW
+ * uses each product's reorder point). pageSize=1 keeps it cheap — we only read
+ * the `total`. Keeps the dashboard alert counts in exact agreement with the
+ * filtered table, at any catalog size.
+ */
+export async function fetchStockCounts(session: Session): Promise<StockCounts> {
+  const [out, low] = await Promise.all([
+    fetchProducts(session, { stockStatus: 'OUT', isActive: 'true', pageSize: 1 }),
+    fetchProducts(session, { stockStatus: 'LOW', isActive: 'true', pageSize: 1 }),
+  ]);
+  return { outOfStock: out.total, lowStock: low.total };
+}
+
 export async function createProduct(session: Session, input: ProductInput): Promise<ManagedProduct> {
   return toManaged(await api.post<ApiProduct>('/products', input, auth(session)));
 }

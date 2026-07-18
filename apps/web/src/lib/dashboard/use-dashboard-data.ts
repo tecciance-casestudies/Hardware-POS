@@ -17,11 +17,11 @@ import {
   type RankedProductApi,
   type ShiftSummaryApi,
 } from '@/lib/dashboard-api';
-import { fetchProducts } from '@/lib/products-api';
+import { fetchStockCounts, type StockCounts } from '@/lib/products-api';
 import { fetchQuotations, type QuotationListItem } from '@/lib/quotations';
 import { fetchSales, type SaleListItem } from '@/lib/sales';
 
-import { buildQuickBooksHealth, buildQuotationPipeline, summarizeStock } from './adapters';
+import { buildQuickBooksHealth, buildQuotationPipeline } from './adapters';
 
 /** How often the dashboard re-fetches while the tab is visible. */
 const POLL_INTERVAL_MS = 30_000;
@@ -35,7 +35,8 @@ export interface DashboardData {
   stats: DashboardStats | null;
   recentSales: SaleListItem[];
   quotations: QuotationListItem[];
-  stock: ReturnType<typeof summarizeStock>;
+  /** Out-of-stock / low-stock counts, matching the products table filters. */
+  stock: StockCounts;
   pipeline: ReturnType<typeof buildQuotationPipeline>;
   quickbooks: ReturnType<typeof buildQuickBooksHealth>;
   /** 7-day KPI window with previous-period comparison (real aggregates). */
@@ -62,7 +63,7 @@ export function useDashboardData(
   const [stats, setStats] = React.useState<DashboardStats | null>(null);
   const [recentSales, setRecentSales] = React.useState<SaleListItem[]>([]);
   const [quotations, setQuotations] = React.useState<QuotationListItem[]>([]);
-  const [products, setProducts] = React.useState<{ quantityOnHand: number }[]>([]);
+  const [stock, setStock] = React.useState<StockCounts>({ outOfStock: 0, lowStock: 0 });
   const [summary, setSummary] = React.useState<DashboardSummary | null>(null);
   const [paymentMethods, setPaymentMethods] = React.useState<PaymentMethodTotal[]>([]);
   const [topCategories, setTopCategories] = React.useState<RankedCategoryApi[]>([]);
@@ -84,7 +85,7 @@ export function useDashboardData(
         statsRes,
         salesRes,
         quotesRes,
-        productsRes,
+        stockRes,
         summaryRes,
         paymentsRes,
         categoriesRes,
@@ -94,7 +95,7 @@ export function useDashboardData(
         fetchDashboardStats(session),
         fetchSales(session, { pageSize: 8 }),
         fetchQuotations(session, { pageSize: 100 }),
-        fetchProducts(session, { pageSize: 200 }),
+        fetchStockCounts(session),
         fetchDashboardSummary(session),
         fetchPaymentMethods(session, { mine }),
         fetchTopCategories(session, 5),
@@ -106,7 +107,7 @@ export function useDashboardData(
       if (statsRes.status === 'fulfilled') setStats(statsRes.value);
       if (salesRes.status === 'fulfilled') setRecentSales(salesRes.value.items);
       if (quotesRes.status === 'fulfilled') setQuotations(quotesRes.value.items);
-      if (productsRes.status === 'fulfilled') setProducts(productsRes.value.items);
+      if (stockRes.status === 'fulfilled') setStock(stockRes.value);
       if (summaryRes.status === 'fulfilled') setSummary(summaryRes.value);
       if (paymentsRes.status === 'fulfilled') setPaymentMethods(paymentsRes.value);
       if (categoriesRes.status === 'fulfilled') setTopCategories(categoriesRes.value);
@@ -115,7 +116,7 @@ export function useDashboardData(
 
       // Only surface an error banner when everything failed — a single failed
       // panel degrades to its own empty/error state instead.
-      const core = [statsRes, salesRes, quotesRes, productsRes, summaryRes];
+      const core = [statsRes, salesRes, quotesRes, stockRes, summaryRes];
       const allFailed = core.every((r) => r.status === 'rejected');
       if (allFailed) {
         const first = core.find((r) => r.status === 'rejected') as
@@ -149,7 +150,6 @@ export function useDashboardData(
     };
   }, [session, tick, variant]);
 
-  const stock = React.useMemo(() => summarizeStock(products), [products]);
   const pipeline = React.useMemo(() => buildQuotationPipeline(quotations), [quotations]);
   const failedSyncs = React.useMemo(
     () => recentSales.filter((s) => s.syncStatus === 'FAILED').length,

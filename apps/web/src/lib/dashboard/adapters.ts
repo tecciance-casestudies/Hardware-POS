@@ -22,23 +22,6 @@ import type {
   ShiftSummary,
 } from './types';
 
-export const LOW_STOCK_THRESHOLD = 5;
-
-export interface StockSummary {
-  lowStock: number;
-  outOfStock: number;
-}
-
-export function summarizeStock(products: { quantityOnHand: number }[]): StockSummary {
-  let lowStock = 0;
-  let outOfStock = 0;
-  for (const p of products) {
-    if (p.quantityOnHand <= 0) outOfStock += 1;
-    else if (p.quantityOnHand <= LOW_STOCK_THRESHOLD) lowStock += 1;
-  }
-  return { lowStock, outOfStock };
-}
-
 export interface QuotationPipeline {
   stages: PipelineStage[];
   /** DRAFT + SENT. */
