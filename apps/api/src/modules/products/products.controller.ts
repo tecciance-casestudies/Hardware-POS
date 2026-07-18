@@ -25,9 +25,14 @@ import { TenantId } from '../../common/decorators/tenant-id.decorator';
 import { AuthenticatedUser } from '../auth/auth.types';
 import { Permission } from '../auth/permissions';
 import { MockSyncSummary } from './products.repository';
-import { ImportSummary, ProductsImportService } from './products-import.service';
+import {
+  ImportCommitSummary,
+  ParsedProductRow,
+  ProductsImportService,
+} from './products-import.service';
 import { ProductsReportService } from './products-report.service';
 import { ProductsService } from './products.service';
+import { CommitImportDto } from './dto/commit-import.dto';
 import { QueryProductsReportDto } from './dto/query-products-report.dto';
 import { CreateProductDto } from './dto/create-product.dto';
 import { QueryProductsDto } from './dto/query-products.dto';
@@ -87,20 +92,47 @@ export class ProductsController {
     res.send(report.buffer);
   }
 
-  /** Bulk import from the QuickBooks Products & Services template (.xlsx / .csv). */
-  @Post('import')
+  /** Download the blank .xlsx template for the bulk product import. */
+  @Get('import/template')
+  @RequirePermissions(Permission.PRODUCT_MANAGE)
+  async importTemplate(@Res() res: Response): Promise<void> {
+    const buffer = await this.productsImportService.buildTemplate();
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    );
+    res.setHeader('Content-Disposition', 'attachment; filename="product-import-template.xlsx"');
+    res.send(buffer);
+  }
+
+  /**
+   * Parse + validate an uploaded sheet and return the rows for review — no
+   * products are created until the reviewed rows are sent to `import/commit`.
+   */
+  @Post('import/preview')
   @HttpCode(HttpStatus.OK)
   @RequirePermissions(Permission.PRODUCT_MANAGE)
   @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 10 * 1024 * 1024 } }))
-  import(
+  importPreview(
     @TenantId() tenantId: string,
-    @CurrentUser() user: AuthenticatedUser,
     @UploadedFile() file: UploadedSpreadsheet | undefined,
-  ): Promise<ImportSummary> {
+  ): Promise<ParsedProductRow[]> {
     if (!file) {
       throw new BadRequestException('No file uploaded');
     }
-    return this.productsImportService.import(tenantId, user.role, file);
+    return this.productsImportService.preview(tenantId, file);
+  }
+
+  /** Create/update the reviewed rows; returns each row's product id for images. */
+  @Post('import/commit')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermissions(Permission.PRODUCT_MANAGE)
+  importCommit(
+    @TenantId() tenantId: string,
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() dto: CommitImportDto,
+  ): Promise<ImportCommitSummary> {
+    return this.productsImportService.commit(tenantId, user.role, dto.rows);
   }
 
   /** Refresh the product cache from a mock QuickBooks pull. Owner/admin only. */

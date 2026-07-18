@@ -6,19 +6,46 @@ import { Readable } from 'node:stream';
 import { PrismaService } from '../../prisma/prisma.service';
 import { ProductsService } from './products.service';
 import { CreateProductDto, type ProductType } from './dto/create-product.dto';
+import { ImportProductRowDto } from './dto/commit-import.dto';
 
-export interface ImportRowError {
-  row: number;
-  message: string;
+/** A parsed + validated row returned by the preview step (no DB writes). */
+export interface ParsedProductRow {
+  /** 1-based source row in the sheet — the stable key through preview → commit. */
+  rowNumber: number;
+  name: string;
+  type: ProductType;
+  sku: string | null;
+  /** Raw "Parent:Sub" category path from the sheet (created on commit). */
+  categoryPath: string | null;
+  description: string | null;
+  unitPrice: number;
+  purchaseDescription: string | null;
+  costPrice: number | null;
+  quantityOnHand: number;
+  quantityAsOfDate: string | null;
+  reorderLevel: number | null;
+  incomeAccount: string | null;
+  expenseAccount: string | null;
+  inventoryAssetAccount: string | null;
+  /** Whether this row would create a new product or update an existing match. */
+  matchStatus: 'create' | 'update';
+  /** Validation problems; a row is committable only when this is empty. */
+  errors: string[];
 }
 
-export interface ImportSummary {
-  total: number;
+/** Outcome of committing one reviewed row. */
+export interface ImportCommitResult {
+  rowNumber: number;
+  productId: string | null;
+  outcome: 'created' | 'updated' | 'failed';
+  error?: string;
+}
+
+export interface ImportCommitSummary {
   created: number;
   updated: number;
-  skipped: number;
   failed: number;
-  errors: ImportRowError[];
+  results: ImportCommitResult[];
 }
 
 /** Header names exactly as in the QuickBooks Products & Services template. */
@@ -38,6 +65,31 @@ const H = {
   reorderPoint: 'Reorder point',
   inventoryAssetAccount: 'Inventory asset account',
 } as const;
+
+/** Column order for the downloadable template. */
+const TEMPLATE_HEADERS: string[] = [
+  H.name,
+  H.category,
+  H.type,
+  H.sku,
+  H.salesDescription,
+  H.salesPrice,
+  H.incomeAccount,
+  H.purchaseDescription,
+  H.purchaseCost,
+  H.expenseAccount,
+  H.quantityOnHand,
+  H.quantityAsOfDate,
+  H.reorderPoint,
+  H.inventoryAssetAccount,
+];
+
+/** Example rows shipped in the template so the expected shape is obvious. */
+const TEMPLATE_SAMPLES: Array<Array<string | number>> = [
+  ['Cordless Drill 18V', 'Power Tools', 'Inventory', 'DRL-18V', '18V lithium-ion cordless drill', 14500, 'Sales of Product Income', 'Cordless drill 18V', 9800, 'Cost of Goods Sold', 24, '', 5, 'Inventory Asset'],
+  ['Wall Plug Pack (100)', 'Fixings', 'Non-Inventory', 'WP-100', 'Pack of 100 wall plugs', 650, 'Sales of Product Income', 'Wall plugs x100', 380, 'Cost of Goods Sold', '', '', '', ''],
+  ['Tool Sharpening', 'Services', 'Service', 'SVC-SHARP', 'Bench tool sharpening service', 900, 'Sales', '', '', '', '', '', '', ''],
+];
 
 type CellValue = ExcelJS.CellValue;
 
@@ -60,21 +112,22 @@ function asText(v: string | number | Date): string {
   return String(v).trim();
 }
 
-function asNumber(v: string | number | Date): number | undefined {
+/** Parse a numeric cell; returns the value, or 'invalid' when non-empty but not a number. */
+function asNumberField(v: string | number | Date): number | null | 'invalid' {
   const s = asText(v).replace(/,/g, '');
-  if (s === '') return undefined;
+  if (s === '') return null;
   const n = Number(s);
-  return Number.isFinite(n) ? n : undefined;
+  return Number.isFinite(n) ? n : 'invalid';
 }
 
 /** Parse a "Quantity as of date" cell: a Date cell, M/D/YYYY, or YYYY-MM-DD. */
-function asDate(v: string | number | Date): string | undefined {
+function asDate(v: string | number | Date): string | null | 'invalid' {
   if (v instanceof Date && !Number.isNaN(v.getTime())) return v.toISOString();
   const s = asText(v);
-  if (!s) return undefined;
+  if (!s) return null;
   const mdY = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
   const date = mdY ? new Date(Number(mdY[3]), Number(mdY[1]) - 1, Number(mdY[2])) : new Date(s);
-  return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
+  return Number.isNaN(date.getTime()) ? 'invalid' : date.toISOString();
 }
 
 /** Normalise the "Item type" column: Inventory / Non-Inventory / Service. */
@@ -94,10 +147,11 @@ function slugify(name: string): string {
 
 /**
  * Bulk product import from the QuickBooks Products & Services template
- * (.xlsx or .csv). Rows are matched to existing products by SKU (or exact
- * name when the row has no SKU) and upserted through the products service, so
- * QuickBooks pushes queue exactly as they would for manual edits. Category
- * paths ("Clothing:Jackets") create the category and subcategory as needed.
+ * (.xlsx or .csv). A two-phase flow: {@link preview} parses and validates the
+ * sheet without writing anything, so the client can review (and attach images)
+ * before {@link commit} creates/updates the products through the products
+ * service (queuing QuickBooks pushes exactly as manual edits do). Category
+ * paths ("Clothing:Jackets") create the category and subcategory on commit.
  */
 @Injectable()
 export class ProductsImportService {
@@ -108,79 +162,153 @@ export class ProductsImportService {
     private readonly productsService: ProductsService,
   ) {}
 
-  async import(
+  /** A ready-to-fill .xlsx template with the QuickBooks headers + example rows. */
+  async buildTemplate(): Promise<Buffer> {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Products');
+    const header = ws.addRow(TEMPLATE_HEADERS);
+    header.font = { bold: true };
+    header.eachCell((cell) => {
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE5E7EB' } };
+      cell.border = { bottom: { style: 'thin' } };
+    });
+    for (const sample of TEMPLATE_SAMPLES) ws.addRow(sample);
+    TEMPLATE_HEADERS.forEach((h, i) => {
+      ws.getColumn(i + 1).width = Math.max(14, Math.min(34, h.length + 6));
+    });
+    return Buffer.from(await wb.xlsx.writeBuffer());
+  }
+
+  /** Parse + validate the sheet without writing anything (the review step). */
+  async preview(
+    tenantId: string,
+    file: { buffer: Buffer; originalname?: string },
+  ): Promise<ParsedProductRow[]> {
+    const rawRows = await this.parse(file);
+    const rows: ParsedProductRow[] = [];
+    const skuSeen = new Map<string, number>(); // lower(sku) → first rowNumber
+
+    for (const { rowNumber, cells } of rawRows) {
+      const get = (h: string) => cells.get(h) ?? '';
+      const name = asText(get(H.name));
+      if (!name) continue; // blank/padding row
+      if (name.startsWith('Guide (')) break; // template's trailing guide block
+
+      const errors: string[] = [];
+      const type = asItemType(get(H.type));
+      const sku = asText(get(H.sku)) || null;
+
+      const unitPrice = asNumberField(get(H.salesPrice));
+      if (unitPrice === 'invalid') errors.push('Sales price is not a number');
+      const costPrice = asNumberField(get(H.purchaseCost));
+      if (costPrice === 'invalid') errors.push('Purchase cost is not a number');
+      const quantityOnHand = asNumberField(get(H.quantityOnHand));
+      if (quantityOnHand === 'invalid') errors.push('Quantity on hand is not a number');
+      const reorderLevel = asNumberField(get(H.reorderPoint));
+      if (reorderLevel === 'invalid') errors.push('Reorder point is not a number');
+      const asOf = asDate(get(H.quantityAsOfDate));
+      if (asOf === 'invalid') errors.push('Quantity as of date is not a valid date');
+
+      if (sku) {
+        const key = sku.toLowerCase();
+        const firstAt = skuSeen.get(key);
+        if (firstAt) errors.push(`Duplicate SKU "${sku}" (also on row ${firstAt})`);
+        else skuSeen.set(key, rowNumber);
+      }
+
+      const existing = await this.prisma.product.findFirst({
+        where: sku ? { tenantId, sku } : { tenantId, name: { equals: name, mode: 'insensitive' } },
+        select: { id: true },
+      });
+
+      const isInventory = type === 'Inventory';
+      rows.push({
+        rowNumber,
+        name,
+        type,
+        sku,
+        categoryPath: asText(get(H.category)) || null,
+        description: asText(get(H.salesDescription)) || null,
+        unitPrice: typeof unitPrice === 'number' ? unitPrice : 0,
+        purchaseDescription: asText(get(H.purchaseDescription)) || null,
+        costPrice: typeof costPrice === 'number' ? costPrice : null,
+        quantityOnHand: isInventory && typeof quantityOnHand === 'number' ? quantityOnHand : 0,
+        quantityAsOfDate: isInventory && typeof asOf === 'string' ? asOf : null,
+        reorderLevel: isInventory && typeof reorderLevel === 'number' ? reorderLevel : null,
+        incomeAccount: asText(get(H.incomeAccount)) || null,
+        expenseAccount: asText(get(H.expenseAccount)) || null,
+        inventoryAssetAccount: asText(get(H.inventoryAssetAccount)) || null,
+        matchStatus: existing ? 'update' : 'create',
+        errors,
+      });
+    }
+
+    if (rows.length === 0) {
+      throw new BadRequestException('No product rows found in the sheet');
+    }
+    return rows;
+  }
+
+  /** Create/update the reviewed rows and report each row's outcome + product id. */
+  async commit(
     tenantId: string,
     actorRole: UserRole,
-    file: { buffer: Buffer; originalname?: string },
-  ): Promise<ImportSummary> {
-    const rows = await this.parse(file);
-    const summary: ImportSummary = {
-      total: 0,
-      created: 0,
-      updated: 0,
-      skipped: 0,
-      failed: 0,
-      errors: [],
-    };
+    rows: ImportProductRowDto[],
+  ): Promise<ImportCommitSummary> {
+    const summary: ImportCommitSummary = { created: 0, updated: 0, failed: 0, results: [] };
 
-    for (const { rowNumber, cells } of rows) {
-      const name = asText(cells.get(H.name) ?? '');
-      if (!name) continue; // blank/padding rows
-      // The template ships with a trailing guide section — stop when it starts.
-      if (name.startsWith('Guide (')) break;
-
-      summary.total++;
+    for (const row of rows) {
       try {
-        const outcome = await this.importRow(tenantId, actorRole, name, cells);
-        summary[outcome]++;
+        const result = await this.commitRow(tenantId, actorRole, row);
+        summary[result.outcome === 'created' ? 'created' : 'updated']++;
+        summary.results.push(result);
       } catch (err) {
         summary.failed++;
-        const message = err instanceof Error ? err.message : 'Could not import row';
-        summary.errors.push({ row: rowNumber, message: `${name}: ${message}` });
+        summary.results.push({
+          rowNumber: row.rowNumber,
+          productId: null,
+          outcome: 'failed',
+          error: err instanceof Error ? err.message : 'Could not import row',
+        });
       }
     }
 
     this.logger.log(
-      `Product import for ${tenantId}: ${summary.created} created, ${summary.updated} updated, ` +
-        `${summary.skipped} skipped, ${summary.failed} failed (${summary.total} rows)`,
+      `Product import commit for ${tenantId}: ${summary.created} created, ${summary.updated} updated, ${summary.failed} failed`,
     );
     return summary;
   }
 
-  private async importRow(
+  private async commitRow(
     tenantId: string,
     actorRole: UserRole,
-    name: string,
-    cells: Map<string, string | number | Date>,
-  ): Promise<'created' | 'updated'> {
-    const get = (h: string) => cells.get(h) ?? '';
-    const sku = asText(get(H.sku)) || undefined;
-    const type = asItemType(get(H.type));
+    row: ImportProductRowDto,
+  ): Promise<ImportCommitResult> {
     const { categoryId, subcategoryId } = await this.resolveCategoryPath(
       tenantId,
-      asText(get(H.category)),
+      row.categoryPath ?? '',
     );
+    const isInventory = row.type === 'Inventory';
 
     const dto: CreateProductDto = {
-      name,
-      type,
-      sku,
-      description: asText(get(H.salesDescription)) || undefined,
+      name: row.name,
+      type: row.type,
+      sku: row.sku ?? undefined,
+      description: row.description ?? undefined,
       categoryId,
       subcategoryId,
-      unitPrice: asNumber(get(H.salesPrice)) ?? 0,
-      purchaseDescription: asText(get(H.purchaseDescription)) || undefined,
-      costPrice: asNumber(get(H.purchaseCost)),
-      quantityOnHand: type === 'Inventory' ? (asNumber(get(H.quantityOnHand)) ?? 0) : 0,
-      quantityAsOfDate: type === 'Inventory' ? asDate(get(H.quantityAsOfDate)) : undefined,
-      reorderLevel: type === 'Inventory' ? asNumber(get(H.reorderPoint)) : undefined,
+      unitPrice: row.unitPrice ?? 0,
+      purchaseDescription: row.purchaseDescription ?? undefined,
+      costPrice: row.costPrice ?? undefined,
+      quantityOnHand: isInventory ? (row.quantityOnHand ?? 0) : 0,
+      quantityAsOfDate: isInventory ? (row.quantityAsOfDate ?? undefined) : undefined,
+      reorderLevel: isInventory ? (row.reorderLevel ?? undefined) : undefined,
     };
 
-    // Match an existing product by SKU first (unique per tenant), else by name.
     const existing = await this.prisma.product.findFirst({
-      where: sku
-        ? { tenantId, sku }
-        : { tenantId, name: { equals: name, mode: 'insensitive' } },
+      where: row.sku
+        ? { tenantId, sku: row.sku }
+        : { tenantId, name: { equals: row.name, mode: 'insensitive' } },
       select: { id: true },
     });
 
@@ -190,21 +318,22 @@ export class ProductsImportService {
 
     // Mirror the sheet's account names for display; syncs overwrite them with
     // the resolved QuickBooks accounts later.
-    const incomeAccount = asText(get(H.incomeAccount));
-    const expenseAccount = asText(get(H.expenseAccount));
-    const inventoryAssetAccount = asText(get(H.inventoryAssetAccount));
-    if (incomeAccount || expenseAccount || inventoryAssetAccount) {
+    if (row.incomeAccount || row.expenseAccount || row.inventoryAssetAccount) {
       await this.prisma.product.update({
         where: { id: saved.id },
         data: {
-          ...(incomeAccount ? { incomeAccount } : {}),
-          ...(expenseAccount ? { expenseAccount } : {}),
-          ...(inventoryAssetAccount ? { inventoryAssetAccount } : {}),
+          ...(row.incomeAccount ? { incomeAccount: row.incomeAccount } : {}),
+          ...(row.expenseAccount ? { expenseAccount: row.expenseAccount } : {}),
+          ...(row.inventoryAssetAccount ? { inventoryAssetAccount: row.inventoryAssetAccount } : {}),
         },
       });
     }
 
-    return existing ? 'updated' : 'created';
+    return {
+      rowNumber: row.rowNumber,
+      productId: saved.id,
+      outcome: existing ? 'updated' : 'created',
+    };
   }
 
   /**

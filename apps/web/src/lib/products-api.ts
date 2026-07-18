@@ -319,32 +319,88 @@ export async function downloadProductsReport(
   URL.revokeObjectURL(url);
 }
 
-export interface ImportRowError {
-  row: number;
-  message: string;
+/** Trigger a browser download of a fetched blob with a filename. */
+function saveBlob(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
 }
 
-export interface ImportSummary {
-  total: number;
+// ── Bulk import (two-phase: preview → review → commit) ────────────────────────
+
+/** A parsed + validated row from the uploaded sheet (nothing created yet). */
+export interface ParsedProductRow {
+  rowNumber: number;
+  name: string;
+  type: ProductItemType;
+  sku: string | null;
+  categoryPath: string | null;
+  description: string | null;
+  unitPrice: number;
+  purchaseDescription: string | null;
+  costPrice: number | null;
+  quantityOnHand: number;
+  quantityAsOfDate: string | null;
+  reorderLevel: number | null;
+  incomeAccount: string | null;
+  expenseAccount: string | null;
+  inventoryAssetAccount: string | null;
+  matchStatus: 'create' | 'update';
+  errors: string[];
+}
+
+export interface ImportCommitResult {
+  rowNumber: number;
+  productId: string | null;
+  outcome: 'created' | 'updated' | 'failed';
+  error?: string;
+}
+
+export interface ImportCommitSummary {
   created: number;
   updated: number;
-  skipped: number;
   failed: number;
-  errors: ImportRowError[];
+  results: ImportCommitResult[];
 }
 
-/** Bulk import from the QuickBooks Products & Services template (.xlsx / .csv). */
-export async function importProducts(session: Session, file: File): Promise<ImportSummary> {
+/** Download the blank .xlsx import template. */
+export async function downloadProductTemplate(session: Session): Promise<void> {
+  const res = await authorizedFetch('/products/import/template', session);
+  if (!res.ok) throw new Error('Could not download the template');
+  saveBlob(await res.blob(), 'product-import-template.xlsx');
+}
+
+/** Upload a sheet and get back the parsed rows to review (no products created). */
+export async function previewProductImport(
+  session: Session,
+  file: File,
+): Promise<ParsedProductRow[]> {
   const form = new FormData();
   form.append('file', file);
-  const res = await authorizedFetch('/products/import', session, { method: 'POST', body: form });
+  const res = await authorizedFetch('/products/import/preview', session, {
+    method: 'POST',
+    body: form,
+  });
   const json = await res.json().catch(() => null);
   if (!res.ok) {
     const message =
-      json?.message ?? (res.status === 413 ? 'File is too large (max 10MB)' : 'Import failed');
+      json?.message ?? (res.status === 413 ? 'File is too large (max 10MB)' : 'Could not read file');
     throw new Error(Array.isArray(message) ? message.join(', ') : message);
   }
-  return (json?.data ?? json) as ImportSummary;
+  return (json?.data ?? json) as ParsedProductRow[];
+}
+
+/** Commit the reviewed rows; returns each row's product id (for image upload). */
+export async function commitProductImport(
+  session: Session,
+  rows: ParsedProductRow[],
+): Promise<ImportCommitSummary> {
+  return api.post<ImportCommitSummary>('/products/import/commit', { rows }, auth(session));
 }
 
 export async function syncProductToQuickBooks(
