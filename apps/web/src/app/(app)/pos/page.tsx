@@ -41,9 +41,6 @@ import { usePosCart } from '@/lib/pos-cart';
 import { cn, formatMoney, round2 } from '@/lib/utils';
 
 const PAGE_SIZES = [20, 30, 40, 50];
-/** Below this on-hand count (but above zero) a card shows a "Low" badge. */
-const LOW_STOCK_THRESHOLD = 5;
-
 interface PendingLineApproval {
   productId: string;
   discount: LineDiscount;
@@ -611,8 +608,13 @@ export default function PosPage() {
             <div className="grid grid-cols-[repeat(auto-fill,minmax(9rem,1fr))] gap-2.5">
               {pageProducts.map((p) => {
                 const outOfStock = p.type === 'Inventory' && p.quantityOnHand <= 0;
+                // Low stock only when a reorder point is set and stock is at/below
+                // it — the same rule the products table and dashboard alert use.
                 const lowStock =
-                  p.type === 'Inventory' && !outOfStock && p.quantityOnHand <= LOW_STOCK_THRESHOLD;
+                  p.type === 'Inventory' &&
+                  !outOfStock &&
+                  p.reorderLevel != null &&
+                  p.quantityOnHand <= p.reorderLevel;
                 return (
                   <div
                     key={p.id}

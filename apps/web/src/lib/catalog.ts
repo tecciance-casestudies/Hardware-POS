@@ -17,6 +17,8 @@ export interface ClientProduct {
   subcategoryName: string | null;
   unitPrice: number;
   quantityOnHand: number;
+  /** Reorder point (null when not set) — drives the POS low-stock badge. */
+  reorderLevel: number | null;
   imageUrl: string | null;
 }
 
@@ -51,6 +53,7 @@ interface ApiProduct {
   subcategoryId: string | null;
   unitPrice: string | number;
   quantityOnHand: string | number;
+  reorderLevel: string | number | null;
   imageUrl: string | null;
 }
 
@@ -101,6 +104,7 @@ function normalizeApi(
     subcategoryName: (p.subcategoryId && subNames.get(p.subcategoryId)) || null,
     unitPrice: Number(p.unitPrice),
     quantityOnHand: Number(p.quantityOnHand),
+    reorderLevel: p.reorderLevel != null ? Number(p.reorderLevel) : null,
     imageUrl: p.imageUrl,
   };
 }
