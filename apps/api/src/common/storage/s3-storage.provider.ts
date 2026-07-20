@@ -1,9 +1,31 @@
 import { randomUUID } from 'crypto';
 
-import { DeleteObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import {
+  DeleteObjectCommand,
+  GetObjectCommand,
+  PutObjectCommand,
+  S3Client,
+} from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { BadRequestException } from '@nestjs/common';
 
-import { IMAGE_EXT, StorageProvider, UploadedImage } from './storage-provider';
+import { IMAGE_EXT, ResolvedImage, StorageProvider, UploadedImage } from './storage-provider';
+import { IMAGE_KEY_PREFIX, toObjectKey, toStoredPath } from './storage.util';
+
+/**
+ * How long a signed object URL stays valid. Only has to outlive the redirect
+ * that carries the browser to it, plus REDIRECT_MAX_AGE of reuse from cache.
+ */
+const SIGNED_URL_TTL_SECONDS = 900;
+
+/**
+ * How long the browser may reuse our `/uploads/...` redirect without asking
+ * again. Kept well under SIGNED_URL_TTL_SECONDS so a cached redirect can never
+ * point at an already-expired signature. Without this the signature would differ
+ * on every request, giving each response a fresh cache key and defeating the
+ * object's own immutable caching.
+ */
+const REDIRECT_MAX_AGE_SECONDS = 300;
 
 export interface S3StorageConfig {
   bucket: string;
@@ -16,15 +38,15 @@ export interface S3StorageConfig {
 
 /**
  * S3-compatible object storage (AWS S3, LocalStack, MinIO). Objects are keyed
- * `products/<uuid>.<ext>` and the stored URL is the object's public address —
- * path-style under a custom endpoint, virtual-hosted style on real AWS.
+ * `products/<uuid>.<ext>` and the bucket stays private: reads go out as
+ * short-lived presigned URLs minted per request, never as public object URLs.
  */
 export class S3StorageProvider implements StorageProvider {
   readonly kind = 's3' as const;
   private readonly client: S3Client;
   private readonly bucket: string;
-  /** Base under which stored object URLs live, no trailing slash. */
-  private readonly publicBase: string;
+  /** Object-URL base used only to recognise rows written before keys were stored. */
+  private readonly legacyBase: string;
 
   constructor(config: S3StorageConfig) {
     this.bucket = config.bucket;
@@ -50,7 +72,7 @@ export class S3StorageProvider implements StorageProvider {
           }
         : {}),
     });
-    this.publicBase = config.endpoint
+    this.legacyBase = config.endpoint
       ? `${config.endpoint.replace(/\/$/, '')}/${config.bucket}`
       : `https://${config.bucket}.s3.${config.region}.amazonaws.com`;
   }
@@ -60,7 +82,7 @@ export class S3StorageProvider implements StorageProvider {
     if (!ext) {
       throw new BadRequestException('Unsupported image type (use PNG, JPEG, WebP, or GIF)');
     }
-    const key = `products/${randomUUID()}${ext}`;
+    const key = `${IMAGE_KEY_PREFIX}/${randomUUID()}${ext}`;
     await this.client.send(
       new PutObjectCommand({
         Bucket: this.bucket,
@@ -71,16 +93,32 @@ export class S3StorageProvider implements StorageProvider {
         CacheControl: 'public, max-age=31536000, immutable',
       }),
     );
-    return `${this.publicBase}/${key}`;
+    return toStoredPath(key);
   }
 
-  async remove(url: string | null | undefined): Promise<void> {
-    if (!url || !url.startsWith(`${this.publicBase}/`)) return;
-    const key = url.slice(this.publicBase.length + 1);
+  async remove(storedPath: string | null | undefined): Promise<void> {
+    const key = toObjectKey(storedPath) ?? this.legacyKey(storedPath);
+    if (!key) return;
     try {
       await this.client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: key }));
     } catch {
       /* already gone — ignore */
     }
+  }
+
+  async resolve(key: string): Promise<ResolvedImage> {
+    // Signing is a local HMAC over the request description — no call to AWS.
+    const url = await getSignedUrl(
+      this.client,
+      new GetObjectCommand({ Bucket: this.bucket, Key: key }),
+      { expiresIn: SIGNED_URL_TTL_SECONDS },
+    );
+    return { kind: 'redirect', url, maxAgeSeconds: REDIRECT_MAX_AGE_SECONDS };
+  }
+
+  /** Key behind an absolute object URL stored before this provider kept keys. */
+  private legacyKey(storedPath: string | null | undefined): string | null {
+    if (!storedPath || !storedPath.startsWith(`${this.legacyBase}/`)) return null;
+    return storedPath.slice(this.legacyBase.length + 1);
   }
 }
