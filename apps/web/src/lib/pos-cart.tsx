@@ -23,11 +23,22 @@ interface PosCartState {
 
 const EMPTY: PosCartState = { items: [], customerId: '', addedCustomers: [] };
 
+/**
+ * Maximum sellable quantity for a product: its on-hand stock for Inventory
+ * items, or null (no cap) for Service / Non-Inventory items, which aren't
+ * stock-tracked and can always be sold.
+ */
+export function stockCap(product: ClientProduct): number | null {
+  return product.type === 'Inventory' ? product.quantityOnHand : null;
+}
+
 interface PosCartValue extends PosCartState {
   /** True once sessionStorage has been read (avoids empty-cart flash on route load). */
   hydrated: boolean;
   addToCart: (product: ClientProduct) => void;
   changeQty: (productId: string, delta: number) => void;
+  /** Set an item's quantity to an absolute value (typed in). Clamped to >= 1. */
+  setQty: (productId: string, quantity: number) => void;
   removeItem: (productId: string) => void;
   setNote: (productId: string, note: string) => void;
   setLineDiscount: (
@@ -99,14 +110,34 @@ export function PosCartProvider({ children }: { children: React.ReactNode }) {
       changeQty: (productId, delta) =>
         setState((s) => {
           const items = s.items
-            .map((it) =>
-              it.product.id === productId ? { ...it, quantity: it.quantity + delta } : it,
-            )
+            .map((it) => {
+              if (it.product.id !== productId) return it;
+              // Never let an increment push an Inventory item over its stock.
+              const cap = stockCap(it.product);
+              const next = it.quantity + delta;
+              return { ...it, quantity: cap != null ? Math.min(next, cap) : next };
+            })
             .filter((it) => it.quantity > 0);
           // Drop the order discount if the cart empties.
           return items.length === 0
             ? { ...s, items, orderDiscount: undefined, orderApprovalToken: undefined }
             : { ...s, items };
+        }),
+      setQty: (productId, quantity) =>
+        setState((s) => {
+          if (!Number.isFinite(quantity)) return s;
+          return {
+            ...s,
+            items: s.items.map((it) => {
+              if (it.product.id !== productId) return it;
+              // Typed quantity: whole number, minimum 1 (removal is via the
+              // trash button), capped at remaining stock for Inventory items.
+              const cap = stockCap(it.product);
+              let q = Math.max(1, Math.floor(quantity));
+              if (cap != null) q = Math.min(q, cap);
+              return { ...it, quantity: q };
+            }),
+          };
         }),
       removeItem: (productId) =>
         setState((s) => {

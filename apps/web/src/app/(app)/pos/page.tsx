@@ -37,7 +37,7 @@ import { useCheckoutData, type ClientProduct } from '@/lib/catalog';
 import { ORDER_DISCOUNT_KEY, requestDiscountApproval } from '@/lib/discounts';
 import { resolveImageUrl } from '@/lib/products-api';
 import { Permission, discountLimitFor, withinDiscountLimit } from '@/lib/permissions';
-import { usePosCart } from '@/lib/pos-cart';
+import { stockCap, usePosCart } from '@/lib/pos-cart';
 import { cn, formatMoney, round2 } from '@/lib/utils';
 
 const PAGE_SIZES = [20, 30, 40, 50];
@@ -337,29 +337,14 @@ export default function PosPage() {
                 ) : null}
 
                 <div className="mt-2 flex items-center justify-between">
-                  <div className="flex items-center gap-1">
-                    <Button
-                      variant="outline"
-                      size="icon"
-                      className="h-9 w-9"
-                      aria-label="Decrease quantity"
-                      onClick={() => cart.changeQty(item.product.id, -1)}
-                    >
-                      <Minus className="h-4 w-4" />
-                    </Button>
-                    <span className="w-9 text-center text-sm font-semibold tabular-nums">
-                      {item.quantity}
-                    </span>
-                    <Button
-                      variant="outline"
-                      size="icon"
-                      className="h-9 w-9"
-                      aria-label="Increase quantity"
-                      onClick={() => cart.changeQty(item.product.id, 1)}
-                    >
-                      <Plus className="h-4 w-4" />
-                    </Button>
-                  </div>
+                  <QuantityStepper
+                    quantity={item.quantity}
+                    max={stockCap(item.product) ?? undefined}
+                    onDecrement={() => cart.changeQty(item.product.id, -1)}
+                    onIncrement={() => cart.changeQty(item.product.id, 1)}
+                    onSet={(q) => cart.setQty(item.product.id, q)}
+                  />
+
                   <div className="flex items-center gap-0.5">
                     <Button
                       variant="ghost"
@@ -872,6 +857,86 @@ export default function PosPage() {
           {toast}
         </div>
       ) : null}
+    </div>
+  );
+}
+
+/**
+ * Cart line quantity control: −/+ steppers plus a directly-typeable field, so
+ * a cashier can enter a large quantity without clicking up one at a time. The
+ * input keeps its own text state while editing (allowing a transient empty
+ * value) and commits a whole number ≥ 1 on blur/Enter, reverting if invalid.
+ */
+function QuantityStepper({
+  quantity,
+  max,
+  onDecrement,
+  onIncrement,
+  onSet,
+}: {
+  quantity: number;
+  /** Stock cap: the quantity can't be raised above this (undefined = no cap). */
+  max?: number;
+  onDecrement: () => void;
+  onIncrement: () => void;
+  onSet: (quantity: number) => void;
+}) {
+  const [text, setText] = React.useState(String(quantity));
+
+  // Re-sync when the quantity changes elsewhere (the +/- buttons, catalog refresh).
+  React.useEffect(() => setText(String(quantity)), [quantity]);
+
+  const atMax = max != null && quantity >= max;
+
+  const commit = () => {
+    let n = Math.floor(Number(text));
+    if (text.trim() !== '' && Number.isFinite(n) && n >= 1) {
+      if (max != null) n = Math.min(n, max); // clamp typed value to stock
+      if (n !== quantity) onSet(n);
+      else setText(String(quantity)); // normalise (e.g. "03" → "3", over-max → cap)
+    } else {
+      setText(String(quantity)); // revert empty/invalid
+    }
+  };
+
+  return (
+    <div className="flex items-center gap-1">
+      <Button
+        variant="outline"
+        size="icon"
+        className="h-9 w-9"
+        aria-label="Decrease quantity"
+        onClick={onDecrement}
+      >
+        <Minus className="h-4 w-4" />
+      </Button>
+      <input
+        type="text"
+        inputMode="numeric"
+        aria-label="Quantity"
+        value={text}
+        onChange={(e) => setText(e.target.value.replace(/[^0-9]/g, ''))}
+        onFocus={(e) => e.currentTarget.select()}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') {
+            commit();
+            e.currentTarget.blur();
+          }
+        }}
+        className="h-9 w-12 rounded-lg border border-border bg-surface text-center text-sm font-semibold tabular-nums focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
+      />
+      <Button
+        variant="outline"
+        size="icon"
+        className="h-9 w-9"
+        aria-label="Increase quantity"
+        onClick={onIncrement}
+        disabled={atMax}
+        title={atMax ? 'No more stock available' : undefined}
+      >
+        <Plus className="h-4 w-4" />
+      </Button>
     </div>
   );
 }
