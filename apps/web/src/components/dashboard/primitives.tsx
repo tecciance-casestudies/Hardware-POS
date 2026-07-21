@@ -61,17 +61,29 @@ export function Trend({
   direction,
   value,
   label,
+  onHero = false,
 }: {
   direction: 'up' | 'down' | 'neutral';
   value: number;
   label: string;
+  /** On the hero gradient surface, use Volt-Lime/white instead of semantic tones. */
+  onHero?: boolean;
 }) {
   const Icon = direction === 'up' ? ArrowUpRight : direction === 'down' ? ArrowDownRight : null;
+  const tone = onHero
+    ? direction === 'down'
+      ? 'text-white'
+      : 'text-[var(--axlo-volt-lime)]'
+    : TREND_TONE[direction];
   return (
-    <span className={cn('inline-flex items-center gap-1 text-xs font-semibold', TREND_TONE[direction])}>
+    <span className={cn('inline-flex items-center gap-1 text-xs font-semibold', tone)}>
       {Icon ? <Icon className="h-3.5 w-3.5" aria-hidden /> : null}
       {value > 0 ? '+' : ''}
-      {value}%<span className="font-normal text-muted-foreground"> {label}</span>
+      {value}%
+      <span className={cn('font-normal', onHero ? 'text-white/70' : 'text-muted-foreground')}>
+        {' '}
+        {label}
+      </span>
     </span>
   );
 }
@@ -82,22 +94,59 @@ export function Trend({
  * pins to the bottom — no card ever looks unfinished. Count-ups when `rawValue`
  * is supplied.
  */
+const ICON_ACCENT: Record<NonNullable<DashboardMetric['iconAccent']>, string> = {
+  teal: 'bg-brand-50 text-brand-600 ring-brand-100 group-hover:bg-brand-100',
+  aqua: 'bg-accent-soft text-accent ring-accent/20 group-hover:bg-accent-soft',
+  info: 'bg-info-soft text-info ring-info/20 group-hover:bg-info-soft',
+  lime: 'bg-highlight-soft text-[var(--sem-chart-highlight)] ring-highlight/30 group-hover:bg-highlight-soft',
+};
+
 export function MetricCard({ metric, icon: Icon }: { metric: DashboardMetric; icon: LucideIcon }) {
   const cmp = metric.comparison;
   const hasSpark = !!metric.spark && metric.spark.length > 1;
+  const hero = metric.surface === 'hero';
+  const aquaSurface = metric.surface === 'aqua';
+  const iconAccent = ICON_ACCENT[metric.iconAccent ?? 'teal'];
 
   const body = (
     <>
-      <div className="flex items-start justify-between gap-2">
+      {hero ? (
+        <span
+          aria-hidden
+          className="pointer-events-none absolute inset-0 opacity-[0.14]"
+          style={{
+            backgroundImage:
+              'radial-gradient(circle at 88% 12%, var(--axlo-volt-lime) 0, transparent 42%)',
+          }}
+        />
+      ) : null}
+      <div className="relative flex items-start justify-between gap-2">
         <div className="flex items-center gap-1.5">
-          <span className="text-sm font-medium text-muted-foreground">{metric.label}</span>
+          <span
+            className={cn(
+              'text-sm font-medium',
+              hero ? 'text-white/85' : 'text-muted-foreground',
+            )}
+          >
+            {metric.label}
+          </span>
           {metric.helpText ? <InfoDot label={metric.helpText} /> : null}
         </div>
-        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-brand-50 text-brand-600 ring-1 ring-inset ring-brand-100 transition-colors group-hover:bg-brand-100">
+        <span
+          className={cn(
+            'flex h-9 w-9 shrink-0 items-center justify-center rounded-xl ring-1 ring-inset transition-colors',
+            hero ? 'bg-white/15 text-white ring-white/25' : iconAccent,
+          )}
+        >
           <Icon className="h-5 w-5" aria-hidden />
         </span>
       </div>
-      <div className="mt-2.5 text-[1.75rem] font-bold leading-none tracking-tight">
+      <div
+        className={cn(
+          'relative mt-2.5 text-[1.75rem] font-bold leading-none tracking-tight',
+          hero && 'text-white',
+        )}
+      >
         {metric.rawValue != null ? (
           <AnimatedNumber value={metric.rawValue} format={metric.format ?? String} />
         ) : (
@@ -105,30 +154,41 @@ export function MetricCard({ metric, icon: Icon }: { metric: DashboardMetric; ic
         )}
       </div>
       {cmp ? (
-        <div className="mt-2 flex min-h-5 items-center">
-          <Trend direction={cmp.direction} value={cmp.value} label={cmp.label} />
+        <div className="relative mt-2 flex min-h-5 items-center">
+          <Trend direction={cmp.direction} value={cmp.value} label={cmp.label} onHero={hero} />
         </div>
       ) : null}
-      <div className="mt-auto pt-3">
+      <div className="relative mt-auto pt-3">
         {hasSpark ? (
-          <div className={cn(cmp ? TREND_TONE[cmp.direction] : 'text-primary/70')}>
+          <div
+            className={cn(
+              hero ? 'text-[var(--axlo-volt-lime)]' : cmp ? TREND_TONE[cmp.direction] : 'text-primary/70',
+            )}
+          >
             <Sparkline data={metric.spark!} />
           </div>
         ) : metric.footnote ? (
-          <p className="text-xs text-muted-foreground">{metric.footnote}</p>
+          <p className={cn('text-xs', hero ? 'text-white/75' : 'text-muted-foreground')}>
+            {metric.footnote}
+          </p>
         ) : null}
       </div>
     </>
   );
 
-  const base =
-    'group flex h-full flex-col rounded-2xl border border-border bg-card p-4 shadow-card transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1';
+  const base = cn(
+    'group relative flex h-full flex-col overflow-hidden rounded-2xl border p-4 shadow-card transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1',
+    hero
+      ? 'border-transparent bg-gradient-to-br from-[var(--axlo-kinetic-teal)] to-[var(--axlo-flow-aqua)]'
+      : aquaSurface
+        ? 'border-accent/20 bg-accent-soft'
+        : 'border-border bg-card',
+  );
+  const hover = hero
+    ? 'hover:-translate-y-0.5 hover:shadow-card-hover'
+    : 'hover:-translate-y-0.5 hover:border-brand-200 hover:shadow-card-hover';
   return metric.destination ? (
-    <Link
-      href={metric.destination}
-      className={cn(base, 'hover:-translate-y-0.5 hover:border-brand-200 hover:shadow-card-hover')}
-      aria-label={`${metric.label}: ${metric.value}`}
-    >
+    <Link href={metric.destination} className={cn(base, hover)} aria-label={`${metric.label}: ${metric.value}`}>
       {body}
     </Link>
   ) : (
@@ -195,6 +255,8 @@ export function SectionCard({
   badge,
   action,
   className,
+  headerClassName,
+  iconClassName,
   children,
 }: {
   title: string;
@@ -203,6 +265,10 @@ export function SectionCard({
   badge?: React.ReactNode;
   action?: React.ReactNode;
   className?: string;
+  /** Subtle header tint (e.g. `bg-brand-50/60`) — use sparingly, not every card. */
+  headerClassName?: string;
+  /** Icon-well accent classes to colour the section icon. */
+  iconClassName?: string;
   children: React.ReactNode;
 }) {
   return (
@@ -212,10 +278,20 @@ export function SectionCard({
         className,
       )}
     >
-      <header className="flex items-center justify-between gap-3 border-b border-border px-4 py-3">
+      <header
+        className={cn(
+          'flex items-center justify-between gap-3 border-b border-border px-4 py-3',
+          headerClassName,
+        )}
+      >
         <div className="flex min-w-0 items-center gap-2.5">
           {Icon ? (
-            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
+            <span
+              className={cn(
+                'flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground',
+                iconClassName,
+              )}
+            >
               <Icon className="h-4 w-4" aria-hidden />
             </span>
           ) : null}

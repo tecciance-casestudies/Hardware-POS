@@ -151,8 +151,8 @@ export function AreaChart({
         >
           <defs>
             <linearGradient id="areaFill" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="var(--color-primary)" stopOpacity="0.22" />
-              <stop offset="100%" stopColor="var(--color-primary)" stopOpacity="0" />
+              <stop offset="0%" stopColor="var(--color-accent)" stopOpacity="0.28" />
+              <stop offset="100%" stopColor="var(--color-accent)" stopOpacity="0" />
             </linearGradient>
           </defs>
 
@@ -187,7 +187,7 @@ export function AreaChart({
             <path
               d={line}
               fill="none"
-              stroke="var(--color-primary)"
+              stroke="var(--color-accent)"
               strokeWidth="2.5"
               strokeLinejoin="round"
               strokeLinecap="round"
@@ -203,14 +203,23 @@ export function AreaChart({
                 x2={activeX}
                 y1="0"
                 y2={H}
-                stroke="var(--color-primary)"
+                stroke="var(--color-accent)"
                 strokeWidth="1"
                 strokeDasharray="3 3"
                 vectorEffect="non-scaling-stroke"
                 opacity="0.5"
               />
-              <circle cx={activeX} cy={activeY} r="4" fill="var(--color-primary)" />
-              <circle cx={activeX} cy={activeY} r="7" fill="var(--color-primary)" opacity="0.2" />
+              {/* Selected-point marker — Volt-Lime highlight (never colour alone:
+                  the tooltip states the exact value + label). */}
+              <circle cx={activeX} cy={activeY} r="8" fill="var(--sem-chart-highlight)" opacity="0.22" />
+              <circle
+                cx={activeX}
+                cy={activeY}
+                r="4"
+                fill="var(--sem-chart-highlight)"
+                stroke="var(--color-surface)"
+                strokeWidth="1.5"
+              />
             </>
           ) : null}
         </svg>

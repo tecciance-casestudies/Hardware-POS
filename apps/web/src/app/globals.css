@@ -115,6 +115,28 @@
   --sem-chart-5: var(--sem-warning);
   --sem-chart-6: var(--axlo-slate);
 
+  /* Selected / hovered data-point highlight (Volt Lime, contrast-safe in light). */
+  --sem-chart-highlight: #7ba60f;
+
+  /* Payment-method identity colours — the doughnut + legend read as one system.
+   * These are data-identity hues (like a legend key), kept stable across themes
+   * except where dark contrast needs a lift (see the dark overrides). */
+  --pm-cash: var(--axlo-kinetic-teal); /* #006C68 */
+  --pm-card: var(--axlo-flow-aqua); /* #00D4C7 */
+  --pm-bank: var(--sem-info); /* #0EA5E9 */
+  --pm-qr: #8fbf1f; /* Volt Lime, contrast-tuned for light surfaces */
+  --pm-credit: var(--axlo-slate); /* #5F6B75 */
+  --pm-cheque: #7c8b97;
+  --pm-split: #00b3a9;
+  --pm-other: var(--gray-400); /* #9AA8B3 */
+
+  /* Category ranking ramp — a single Teal→Aqua intensity scale (Option B). */
+  --cat-1: var(--axlo-kinetic-teal);
+  --cat-2: #0a8f88;
+  --cat-3: #00b3a9;
+  --cat-4: #2fc6bb;
+  --cat-5: var(--axlo-flow-aqua);
+
   /* Hero gradient surface (subtle). */
   --sem-hero-gradient: linear-gradient(120deg, #eafaf8 0%, #f0faf4 45%, var(--axlo-cloud) 100%);
 }
@@ -171,6 +193,24 @@
   --sem-chart-4: #38bdf8;
   --sem-chart-5: var(--sem-warning);
   --sem-chart-6: var(--gray-400);
+
+  --sem-chart-highlight: var(--axlo-volt-lime);
+
+  /* Dark: lift the darkest identity hues off the Midnight surface for contrast. */
+  --pm-cash: #17938c; /* lightened Kinetic Teal */
+  --pm-card: var(--axlo-flow-aqua);
+  --pm-bank: #38bdf8;
+  --pm-qr: var(--axlo-volt-lime);
+  --pm-credit: #8592a0;
+  --pm-cheque: #9aa8b3;
+  --pm-split: #2fc6bb;
+  --pm-other: var(--gray-400);
+
+  --cat-1: #17938c;
+  --cat-2: #1faea4;
+  --cat-3: #2fc6bb;
+  --cat-4: #57d8cf;
+  --cat-5: var(--axlo-flow-aqua);
 
   --sem-hero-gradient: linear-gradient(120deg, #0f2a2a 0%, #10202e 55%, var(--axlo-midnight) 100%);
 }
@@ -287,6 +327,38 @@ body {
 
 .dash-enter {
   animation: dash-rise 0.45s var(--ease-out-soft) both;
+}
+
+/* Doughnut: draw the ring once on mount (neutralised under reduced-motion). */
+@keyframes doughnut-in {
+  from {
+    opacity: 0;
+    transform: rotate(-14deg) scale(0.94);
+  }
+  to {
+    opacity: 1;
+    transform: rotate(0deg) scale(1);
+  }
+}
+
+.doughnut-enter {
+  animation: doughnut-in 0.6s var(--ease-out-soft) both;
+  transform-origin: center;
+}
+
+/* Horizontal ranking bars grow from the left on mount. */
+@keyframes bar-grow {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+
+.bar-grow {
+  animation: bar-grow 0.55s var(--ease-out-soft) both;
+  transform-origin: left center;
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -5,10 +5,12 @@ import { useRouter } from 'next/navigation';
 import {
   AlertCircle,
   AlertTriangle,
+  ArrowLeftRight,
   BarChart3,
   Boxes,
   Building2,
   CalendarRange,
+  CheckCircle2,
   Clock3,
   FileText,
   Info,
@@ -16,22 +18,33 @@ import {
   PackagePlus,
   Plus,
   Receipt,
+  RotateCcw,
   ShoppingCart,
   TrendingUp,
   Wallet,
+  XCircle,
   type LucideIcon,
 } from 'lucide-react';
 import * as React from 'react';
 
 import { buttonVariants } from '@/components/ui/button';
 import type { Session } from '@/lib/auth';
+import { buildComparison, paymentStatusMeta } from '@/lib/dashboard/adapters';
 import {
-  buildComparison,
+  fetchSalesSeries,
+  type PaymentMethodTotal,
+  type RankedCategoryApi,
+} from '@/lib/dashboard-api';
+import {
+  buildCategoryBars,
   buildPaymentBreakdown,
-  buildTopCategoryRows,
-  paymentStatusMeta,
-} from '@/lib/dashboard/adapters';
-import { fetchSalesSeries } from '@/lib/dashboard-api';
+  createAccessibleChartSummary,
+  formatCategoryMetric,
+  formatDashboardCurrency,
+  formatDashboardPercentage,
+  type CategoryMetric,
+  type PaymentMetric,
+} from '@/lib/dashboard/chart-tokens';
 import { firstNameOf, greetingFor } from '@/lib/dashboard/roles';
 import { useDashboardData } from '@/lib/dashboard/use-dashboard-data';
 import type { AlertItem } from '@/lib/dashboard/types';
@@ -39,6 +52,7 @@ import { Permission, type UserRole } from '@/lib/permissions';
 import { cn, formatMoney } from '@/lib/utils';
 
 import { AreaChart, type ChartPoint } from './charts';
+import { ChartDataTable, Doughnut, HorizontalBars, type RankBar } from './data-charts';
 import { DashboardHero, type HeroAction } from './hero';
 import {
   CardSkeleton,
@@ -46,7 +60,6 @@ import {
   ErrorState,
   KpiSkeleton,
   KPIGrid,
-  ProgressBar,
   Reveal,
   SectionCard,
   SegmentedControl,
@@ -99,6 +112,7 @@ export function AdminDashboard({
           : undefined,
         spark: summary?.netSales.series,
         destination: '/sales',
+        surface: 'hero',
       },
     },
     ...(canReport
@@ -118,6 +132,8 @@ export function AdminDashboard({
                 : undefined,
               spark: summary?.grossProfit.series,
               destination: '/sales',
+              surface: 'aqua',
+              iconAccent: 'aqua',
             },
           } satisfies MetricSpec,
         ]
@@ -133,6 +149,7 @@ export function AdminDashboard({
         helpText: 'Number of sales completed today.',
         footnote: 'Completed today',
         destination: '/sales',
+        iconAccent: 'info',
       },
     },
     {
@@ -146,6 +163,7 @@ export function AdminDashboard({
         helpText: "Today's sales divided by today's transactions.",
         footnote: `Across ${count(txns)} sales today`,
         destination: '/sales',
+        iconAccent: 'aqua',
       },
     },
     {
@@ -159,6 +177,7 @@ export function AdminDashboard({
         helpText: 'Draft and sent quotations awaiting a decision.',
         footnote: 'Awaiting a decision',
         destination: '/quotations',
+        iconAccent: 'lime',
       },
     },
   ];
@@ -223,10 +242,10 @@ export function AdminDashboard({
       {/* Row 3 — mix + rankings + integration */}
       <div className="grid min-w-0 gap-4 md:grid-cols-2 xl:grid-cols-3">
         <Reveal>
-          <PaymentMethodsCard rows={buildPaymentBreakdown(data.paymentMethods)} />
+          <PaymentMethodsCard totals={data.paymentMethods} loading={data.loading && !data.stats} />
         </Reveal>
         <Reveal index={1}>
-          <TopCategoriesCard rows={buildTopCategoryRows(data.topCategories)} />
+          <TopCategoriesCard categories={data.topCategories} loading={data.loading && !data.stats} />
         </Reveal>
         <Reveal index={2} className="md:col-span-2 xl:col-span-1">
           <QuickBooksHealthCard health={data.quickbooks} canOpen={canQuickBooks} />
@@ -400,39 +419,97 @@ function QuickBooksHealthCard({
   health: ReturnType<typeof useDashboardData>['quickbooks'];
   canOpen: boolean;
 }) {
-  const tone =
+  const connected = health.state === 'connected';
+  // Operational status is separate from connection status so the card never
+  // shows "Connected" next to a red dot (a common contradictory pattern).
+  const opTone =
     health.status === 'danger' ? 'danger' : health.status === 'warning' ? 'warning' : 'success';
+  const opLabel = health.failedSyncs > 0 || health.waitingToSync > 0 ? health.statusLabel : 'Healthy';
+
+  // Segmented health bar built only from real counts. When there is nothing to
+  // sync we show a single full "healthy" segment rather than a fake split.
+  const attention = health.waitingToSync + health.failedSyncs;
+  const segments =
+    attention > 0
+      ? [
+          { key: 'failed', value: health.failedSyncs, color: 'var(--color-danger)' },
+          { key: 'waiting', value: health.waitingToSync, color: 'var(--color-info)' },
+        ].filter((s) => s.value > 0)
+      : [{ key: 'healthy', value: 1, color: 'var(--color-success)' }];
+  const segTotal = segments.reduce((s, x) => s + x.value, 0);
+
   return (
-    <SectionCard title="QuickBooks Health" icon={Link2} className="h-full">
+    <SectionCard
+      title="QuickBooks Health"
+      icon={Link2}
+      className="h-full"
+      headerClassName={
+        opTone === 'danger'
+          ? 'bg-danger-soft/50'
+          : opTone === 'warning'
+            ? 'bg-warning-soft/50'
+            : 'bg-brand-50/60'
+      }
+      iconClassName={connected ? 'bg-brand-50 text-brand-600' : undefined}
+    >
       <div className="flex h-full flex-col gap-3">
-        <div className="flex items-center justify-between rounded-xl bg-muted/60 px-3 py-2.5">
-          <div className="flex items-center gap-2">
-            <span
-              className={cn(
-                'h-2.5 w-2.5 rounded-full',
-                tone === 'danger' ? 'bg-danger' : tone === 'warning' ? 'bg-warning' : 'bg-success',
-              )}
-              aria-hidden
-            />
-            <span className="text-sm font-semibold">
-              {health.state === 'connected' ? 'Connected' : 'Disconnected'}
-            </span>
+        {/* Connection vs operational — two distinct, non-contradictory rows. */}
+        <dl className="grid grid-cols-2 gap-2">
+          <div className="rounded-xl bg-muted/60 px-3 py-2.5">
+            <dt className="text-xs text-muted-foreground">Connection</dt>
+            <dd className="mt-1">
+              <StatusPill tone={connected ? 'success' : 'danger'}>
+                {connected ? 'Connected' : 'Disconnected'}
+              </StatusPill>
+            </dd>
           </div>
-          <StatusPill tone={tone}>{health.statusLabel}</StatusPill>
+          <div className="rounded-xl bg-muted/60 px-3 py-2.5">
+            <dt className="text-xs text-muted-foreground">Operational</dt>
+            <dd className="mt-1">
+              <StatusPill tone={opTone}>{opLabel}</StatusPill>
+            </dd>
+          </div>
+        </dl>
+
+        {/* Segmented health visualization (real counts only). */}
+        <div
+          className="flex h-2 w-full overflow-hidden rounded-full bg-muted"
+          role="img"
+          aria-label={
+            attention > 0
+              ? `${count(health.failedSyncs)} failed and ${count(health.waitingToSync)} waiting records.`
+              : 'All records synced — healthy.'
+          }
+        >
+          {segments.map((s) => (
+            <span
+              key={s.key}
+              style={{ width: `${(s.value / segTotal) * 100}%`, backgroundColor: s.color }}
+            />
+          ))}
         </div>
+
         <dl className="space-y-2 text-sm">
           <div className="flex items-center justify-between">
-            <dt className="text-muted-foreground">Waiting to sync</dt>
-            <dd className={cn('font-semibold tabular-nums', health.waitingToSync > 0 && 'text-warning')}>
+            <dt className="flex items-center gap-2 text-muted-foreground">
+              <span className="h-2 w-2 rounded-full bg-info" aria-hidden />
+              Waiting to sync
+            </dt>
+            <dd className={cn('font-semibold tabular-nums', health.waitingToSync > 0 && 'text-info')}>
               {count(health.waitingToSync)}
             </dd>
           </div>
           <div className="flex items-center justify-between">
-            <dt className="text-muted-foreground">Failed syncs (recent)</dt>
+            <dt className="flex items-center gap-2 text-muted-foreground">
+              <span className="h-2 w-2 rounded-full bg-danger" aria-hidden />
+              Failed syncs (recent)
+            </dt>
             <dd className={cn('font-semibold tabular-nums', health.failedSyncs > 0 && 'text-danger')}>
               {count(health.failedSyncs)}
             </dd>
           </div>
+          {/* TODO(api): expose "missing QuickBooks mappings" + last successful sync
+              time on /dashboard/stats so they can be surfaced here as real values. */}
         </dl>
         {canOpen ? (
           <Link
@@ -454,23 +531,61 @@ const SEVERITY_ICON: Record<AlertItem['severity'], LucideIcon> = {
   warning: AlertTriangle,
   info: Info,
 };
-const SEVERITY_TONE: Record<AlertItem['severity'], string> = {
-  critical: 'bg-danger-soft text-danger',
-  warning: 'bg-warning-soft text-warning',
-  info: 'bg-brand-50 text-primary',
+/** Per-severity: left accent bar, tinted (never full-bleed) surface, icon well. */
+const SEVERITY_STYLE: Record<
+  AlertItem['severity'],
+  { accent: string; surface: string; icon: string }
+> = {
+  critical: { accent: 'bg-danger', surface: 'bg-danger-soft/40', icon: 'bg-danger-soft text-danger' },
+  warning: { accent: 'bg-warning', surface: 'bg-warning-soft/40', icon: 'bg-warning-soft text-warning' },
+  info: { accent: 'bg-info', surface: 'bg-info-soft/40', icon: 'bg-info-soft text-info' },
 };
 
+const ATTENTION_FILTERS = [
+  { value: 'all', label: 'All' },
+  { value: 'critical', label: 'Critical' },
+  { value: 'warning', label: 'Warnings' },
+] as const;
+type AttentionFilter = (typeof ATTENTION_FILTERS)[number]['value'];
+
 function AdminAlerts({ alerts, loading }: { alerts: AlertItem[]; loading: boolean }) {
+  const [filter, setFilter] = React.useState<AttentionFilter>('all');
+  const criticalCount = alerts.filter((a) => a.severity === 'critical').length;
+  const warningCount = alerts.filter((a) => a.severity === 'warning').length;
+  const shown = alerts.filter((a) =>
+    filter === 'all' ? true : filter === 'critical' ? a.severity === 'critical' : a.severity === 'warning',
+  );
+
   return (
     <SectionCard
       title="Business Attention"
       icon={AlertTriangle}
       className="h-full"
+      iconClassName={criticalCount > 0 ? 'bg-danger-soft text-danger' : undefined}
       badge={
         alerts.length > 0 ? (
-          <span className="rounded-full bg-danger-soft px-1.5 py-0.5 text-[11px] font-semibold text-danger">
-            {alerts.length}
+          <span className="flex items-center gap-1">
+            {criticalCount > 0 ? (
+              <span className="rounded-full bg-danger-soft px-1.5 py-0.5 text-[11px] font-semibold text-danger tabular-nums">
+                {criticalCount} critical
+              </span>
+            ) : null}
+            {warningCount > 0 ? (
+              <span className="rounded-full bg-warning-soft px-1.5 py-0.5 text-[11px] font-semibold text-warning tabular-nums">
+                {warningCount} warning
+              </span>
+            ) : null}
           </span>
+        ) : null
+      }
+      action={
+        alerts.length > 0 ? (
+          <SegmentedControl<AttentionFilter>
+            options={ATTENTION_FILTERS}
+            value={filter}
+            onChange={setFilter}
+            ariaLabel="Filter business attention items"
+          />
         ) : null
       }
     >
@@ -478,20 +593,28 @@ function AdminAlerts({ alerts, loading }: { alerts: AlertItem[]; loading: boolea
         <CardSkeleton rows={4} />
       ) : alerts.length === 0 ? (
         <EmptyState message="All clear — nothing needs your attention right now." />
+      ) : shown.length === 0 ? (
+        <EmptyState message={`No ${filter} items right now.`} />
       ) : (
-        <ul className="space-y-1.5">
-          {alerts.map((a) => {
+        <ul className="space-y-2">
+          {shown.map((a) => {
             const Icon = SEVERITY_ICON[a.severity];
+            const s = SEVERITY_STYLE[a.severity];
             return (
               <li key={a.id}>
                 <Link
                   href={a.destination}
-                  className="flex items-center gap-3 rounded-xl p-2 transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  className={cn(
+                    'flex items-center gap-3 overflow-hidden rounded-xl p-2.5 pl-3 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+                    s.surface,
+                    'hover:brightness-[0.98]',
+                  )}
                 >
+                  <span className={cn('-ml-3 h-9 w-1 shrink-0 rounded-full', s.accent)} aria-hidden />
                   <span
                     className={cn(
                       'flex h-9 w-9 shrink-0 items-center justify-center rounded-lg',
-                      SEVERITY_TONE[a.severity],
+                      s.icon,
                     )}
                   >
                     <Icon className="h-5 w-5" aria-hidden />
@@ -503,7 +626,7 @@ function AdminAlerts({ alerts, loading }: { alerts: AlertItem[]; loading: boolea
                     </span>
                   </span>
                   {a.badge ? (
-                    <span className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-xs font-semibold tabular-nums">
+                    <span className="shrink-0 rounded-full bg-surface/80 px-2 py-0.5 text-xs font-semibold tabular-nums shadow-sm">
                       {a.badge}
                     </span>
                   ) : null}
@@ -519,25 +642,178 @@ function AdminAlerts({ alerts, loading }: { alerts: AlertItem[]; loading: boolea
 
 // ── Payment methods ──────────────────────────────────────────────────────────
 
-function PaymentMethodsCard({ rows }: { rows: ReturnType<typeof buildPaymentBreakdown> }) {
+const PAYMENT_VIEWS = [
+  { value: 'chart', label: 'Chart' },
+  { value: 'data', label: 'Data' },
+] as const;
+type ChartView = (typeof PAYMENT_VIEWS)[number]['value'];
+
+const PAYMENT_METRICS = [
+  { value: 'amount', label: 'Amount' },
+  { value: 'transactions', label: 'Transactions' },
+] as const;
+
+function PaymentMethodsCard({
+  totals,
+  loading,
+}: {
+  totals: PaymentMethodTotal[];
+  loading: boolean;
+}) {
+  const router = useRouter();
+  const [view, setView] = React.useState<ChartView>('chart');
+  const [metric, setMetric] = React.useState<PaymentMetric>('amount');
+  const [active, setActive] = React.useState<string | null>(null);
+
+  const hasCounts = totals.some((t) => (t.count ?? 0) > 0);
+  const effMetric: PaymentMetric = hasCounts ? metric : 'amount';
+  const bd = React.useMemo(
+    () => buildPaymentBreakdown(totals, effMetric),
+    [totals, effMetric],
+  );
+
+  const openMethod = (key: string) => {
+    if (key === '__other__') return router.push('/sales');
+    router.push(`/sales?paymentMethod=${encodeURIComponent(key)}`);
+  };
+
+  const summary = createAccessibleChartSummary(
+    'Payment split for the selected period.',
+    bd.slices.map((s) => ({ label: s.label, fraction: s.fraction })),
+  );
+
   return (
-    <SectionCard title="Payment Methods" icon={Wallet} className="h-full">
-      {rows.length === 0 ? (
-        <EmptyState message="No payments yet — the split appears as sales come in." />
+    <SectionCard
+      title="Payment Methods"
+      icon={Wallet}
+      className="h-full"
+      headerClassName="bg-brand-50/50"
+      iconClassName="bg-brand-50 text-brand-600"
+      action={
+        bd.slices.length > 0 ? (
+          <SegmentedControl<ChartView>
+            options={PAYMENT_VIEWS}
+            value={view}
+            onChange={setView}
+            ariaLabel="Payment methods view"
+          />
+        ) : null
+      }
+    >
+      {loading ? (
+        <CardSkeleton rows={5} />
+      ) : bd.slices.length === 0 ? (
+        <EmptyState message="No payments in this period yet — the split appears as sales come in." />
+      ) : view === 'data' ? (
+        <ChartDataTable
+          caption={summary}
+          columns={[
+            { key: 'method', label: 'Method' },
+            { key: 'amount', label: 'Amount', align: 'right' },
+            { key: 'pct', label: 'Share', align: 'right' },
+            { key: 'count', label: 'Sales', align: 'right' },
+          ]}
+          rows={bd.slices.map((s) => ({
+            key: s.key,
+            accent: s.color,
+            cells: [
+              s.label,
+              formatDashboardCurrency(s.amount),
+              formatDashboardPercentage(s.fraction),
+              count(s.count),
+            ],
+          }))}
+        />
       ) : (
-        <ul className="space-y-3">
-          {rows.map((r) => (
-            <li key={r.key} className="space-y-1.5">
-              <div className="flex items-center justify-between text-sm">
-                <span className="font-medium">{r.label}</span>
-                <span className="tabular-nums text-muted-foreground">
-                  {formatMoney(r.amount)} · {r.percent}%
-                </span>
-              </div>
-              <ProgressBar percent={r.percent} tone={r.tone} />
-            </li>
-          ))}
-        </ul>
+        <div className="space-y-4">
+          {hasCounts ? (
+            <div className="flex justify-center">
+              <SegmentedControl<PaymentMetric>
+                options={PAYMENT_METRICS}
+                value={metric}
+                onChange={setMetric}
+                ariaLabel="Payment metric"
+              />
+            </div>
+          ) : null}
+
+          <Doughnut
+            segments={bd.slices.map((s) => ({
+              key: s.key,
+              label: s.label,
+              fraction: s.fraction,
+              color: s.color,
+            }))}
+            activeKey={active}
+            onActivate={setActive}
+            onSelect={openMethod}
+            ariaLabel={summary}
+            center={
+              active ? (
+                <>
+                  <span className="text-xs text-muted-foreground">
+                    {bd.slices.find((s) => s.key === active)?.label}
+                  </span>
+                  <span className="text-lg font-bold tabular-nums">
+                    {formatDashboardPercentage(bd.slices.find((s) => s.key === active)?.fraction ?? 0)}
+                  </span>
+                  <span className="text-[11px] tabular-nums text-muted-foreground">
+                    {formatDashboardCurrency(bd.slices.find((s) => s.key === active)?.amount ?? 0)}
+                  </span>
+                </>
+              ) : (
+                <>
+                  <span className="max-w-[7rem] text-xl font-bold leading-tight tabular-nums">
+                    {formatDashboardCurrency(bd.totalAmount)}
+                  </span>
+                  <span className="text-[11px] text-muted-foreground">Total collected</span>
+                </>
+              )
+            }
+          />
+
+          {bd.singleMethod && bd.slices[0] ? (
+            <p className="text-center text-xs text-muted-foreground">
+              All payments in this period were made in {bd.slices[0].label.toLowerCase()}.
+            </p>
+          ) : null}
+
+          {/* Legend — amount · percentage · count, always visible (not tooltip-only). */}
+          <ul className="space-y-1.5">
+            {bd.slices.map((s) => {
+              const dimmed = active != null && active !== s.key;
+              return (
+                <li key={s.key}>
+                  <button
+                    type="button"
+                    onClick={() => openMethod(s.key)}
+                    onMouseEnter={() => setActive(s.key)}
+                    onMouseLeave={() => setActive(null)}
+                    onFocus={() => setActive(s.key)}
+                    onBlur={() => setActive(null)}
+                    className={cn(
+                      'flex w-full items-center gap-2.5 rounded-lg px-1.5 py-1 text-left transition-colors hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+                      dimmed && 'opacity-45',
+                    )}
+                  >
+                    <span
+                      className="h-2.5 w-2.5 shrink-0 rounded-sm"
+                      style={{ backgroundColor: s.color }}
+                      aria-hidden
+                    />
+                    <span className="min-w-0 flex-1 truncate text-sm font-medium">{s.label}</span>
+                    <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
+                      {formatDashboardPercentage(s.fraction)} ·{' '}
+                      {effMetric === 'transactions'
+                        ? `${count(s.count)} sales · ${formatDashboardCurrency(s.amount)}`
+                        : `${formatDashboardCurrency(s.amount)}${s.count > 0 ? ` · ${count(s.count)} sales` : ''}`}
+                    </span>
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
       )}
     </SectionCard>
   );
@@ -545,35 +821,107 @@ function PaymentMethodsCard({ rows }: { rows: ReturnType<typeof buildPaymentBrea
 
 // ── Top categories ───────────────────────────────────────────────────────────
 
-function TopCategoriesCard({ rows }: { rows: ReturnType<typeof buildTopCategoryRows> }) {
+const CATEGORY_METRICS = [
+  { value: 'amount', label: 'Revenue' },
+  { value: 'units', label: 'Units' },
+  { value: 'count', label: 'Sales' },
+] as const;
+
+function TopCategoriesCard({
+  categories,
+  loading,
+}: {
+  categories: RankedCategoryApi[];
+  loading: boolean;
+}) {
+  const router = useRouter();
+  const [metric, setMetric] = React.useState<CategoryMetric>('amount');
+  const [view, setView] = React.useState<ChartView>('chart');
+  const [active, setActive] = React.useState<string | null>(null);
+
+  const bars = React.useMemo(() => buildCategoryBars(categories, metric), [categories, metric]);
+
+  const rankBars: RankBar[] = bars.map((b) => ({
+    key: b.key,
+    rank: b.rank,
+    label: b.label,
+    ratio: b.ratio,
+    valueLabel: formatCategoryMetric(b.metricValue, metric),
+    metaLabel: formatDashboardPercentage(b.contribution),
+    color: b.color,
+    href: '/products',
+  }));
+
+  const summary = createAccessibleChartSummary(
+    'Top categories by ' + (metric === 'amount' ? 'revenue' : metric === 'units' ? 'units sold' : 'sales') + '.',
+    bars.map((b) => ({ label: b.label, fraction: b.contribution })),
+  );
+
+  const open = () => router.push('/products');
+
   return (
     <SectionCard
       title="Top Categories"
       icon={Boxes}
       className="h-full"
-      action={<ViewAllLink href="/products" />}
+      headerClassName="bg-accent-soft/50"
+      iconClassName="bg-accent-soft text-accent"
+      action={
+        <div className="flex items-center gap-1.5">
+          <SegmentedControl<ChartView>
+            options={PAYMENT_VIEWS}
+            value={view}
+            onChange={setView}
+            ariaLabel="Top categories view"
+          />
+          <ViewAllLink href="/products" />
+        </div>
+      }
     >
-      {rows.length === 0 ? (
+      {loading ? (
+        <CardSkeleton rows={5} />
+      ) : bars.length === 0 ? (
         <EmptyState message="No category sales yet — rankings build as sales complete." />
       ) : (
-        <ol className="space-y-3">
-          {rows.map((r, i) => (
-            <li key={r.key} className="space-y-1.5">
-              <div className="flex items-center justify-between gap-2 text-sm">
-                <span className="flex min-w-0 items-center gap-2">
-                  <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-brand-50 text-xs font-semibold text-brand-700">
-                    {i + 1}
-                  </span>
-                  <span className="truncate font-medium">{r.label}</span>
-                </span>
-                <span className="shrink-0 tabular-nums text-muted-foreground">
-                  {formatMoney(r.amount)}
-                </span>
-              </div>
-              <ProgressBar percent={r.percent} tone="primary" />
-            </li>
-          ))}
-        </ol>
+        <div className="space-y-4">
+          <div className="flex justify-start">
+            <SegmentedControl<CategoryMetric>
+              options={CATEGORY_METRICS}
+              value={metric}
+              onChange={setMetric}
+              ariaLabel="Category metric"
+            />
+          </div>
+
+          {view === 'data' ? (
+            <ChartDataTable
+              caption={summary}
+              columns={[
+                { key: 'rank', label: '#' },
+                { key: 'cat', label: 'Category' },
+                { key: 'val', label: CATEGORY_METRICS.find((m) => m.value === metric)?.label ?? '', align: 'right' },
+                { key: 'share', label: 'Share', align: 'right' },
+              ]}
+              rows={bars.map((b) => ({
+                key: b.key,
+                accent: b.color,
+                cells: [
+                  b.rank,
+                  b.label,
+                  formatCategoryMetric(b.metricValue, metric),
+                  formatDashboardPercentage(b.contribution),
+                ],
+              }))}
+            />
+          ) : (
+            <HorizontalBars
+              bars={rankBars}
+              onNavigate={open}
+              activeKey={active}
+              onActivate={setActive}
+            />
+          )}
+        </div>
       )}
     </SectionCard>
   );
@@ -640,11 +988,15 @@ function InventoryAttentionCard({
   stock: { outOfStock: number; lowStock: number };
   loading: boolean;
 }) {
+  // Only out-of-stock and low-stock are exposed by the products API today.
+  // TODO(api): add counts for missing image / missing category / missing
+  // QuickBooks mapping so those rows can be shown here as real values.
   const rows = [
     stock.outOfStock > 0
       ? {
           key: 'out',
           tone: 'danger' as const,
+          icon: XCircle,
           title: 'Out of stock',
           count: stock.outOfStock,
           href: '/products?stockStatus=OUT',
@@ -654,12 +1006,20 @@ function InventoryAttentionCard({
       ? {
           key: 'low',
           tone: 'warning' as const,
+          icon: AlertTriangle,
           title: 'Low stock',
           count: stock.lowStock,
           href: '/products?stockStatus=LOW',
         }
       : null,
-  ].filter(Boolean) as { key: string; tone: 'danger' | 'warning'; title: string; count: number; href: string }[];
+  ].filter(Boolean) as {
+    key: string;
+    tone: 'danger' | 'warning';
+    icon: LucideIcon;
+    title: string;
+    count: number;
+    href: string;
+  }[];
 
   return (
     <SectionCard
@@ -674,29 +1034,34 @@ function InventoryAttentionCard({
         <EmptyState message="Stock levels look healthy — nothing below its alert threshold." />
       ) : (
         <ul className="space-y-2">
-          {rows.map((r) => (
-            <li key={r.key}>
-              <Link
-                href={r.href}
-                className="flex items-center justify-between gap-3 rounded-xl border border-border p-3 transition-colors hover:border-brand-200 hover:bg-muted/50"
-              >
-                <span className="flex items-center gap-2.5">
-                  <span
-                    className={cn(
-                      'h-2.5 w-2.5 rounded-full',
-                      r.tone === 'danger' ? 'bg-danger' : 'bg-warning',
-                    )}
-                    aria-hidden
-                  />
-                  <span className="text-sm font-medium">{r.title}</span>
-                </span>
-                <span className="flex items-center gap-2">
-                  <span className="text-lg font-bold tabular-nums">{r.count}</span>
-                  <span className="text-xs text-muted-foreground">items</span>
-                </span>
-              </Link>
-            </li>
-          ))}
+          {rows.map((r) => {
+            const Icon = r.icon;
+            return (
+              <li key={r.key}>
+                <Link
+                  href={r.href}
+                  className="flex items-center justify-between gap-3 rounded-xl border border-border p-3 transition-colors hover:border-brand-200 hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  <span className="flex items-center gap-2.5">
+                    <span
+                      className={cn(
+                        'flex h-8 w-8 shrink-0 items-center justify-center rounded-lg',
+                        r.tone === 'danger' ? 'bg-danger-soft text-danger' : 'bg-warning-soft text-warning',
+                      )}
+                      aria-hidden
+                    >
+                      <Icon className="h-4 w-4" />
+                    </span>
+                    <span className="text-sm font-medium">{r.title}</span>
+                  </span>
+                  <span className="flex items-baseline gap-1.5">
+                    <span className="text-lg font-bold tabular-nums">{r.count}</span>
+                    <span className="text-xs text-muted-foreground">items</span>
+                  </span>
+                </Link>
+              </li>
+            );
+          })}
         </ul>
       )}
     </SectionCard>
@@ -704,6 +1069,20 @@ function InventoryAttentionCard({
 }
 
 // ── Recent activity (responsive table → cards) ───────────────────────────────
+
+/** Restrained per-status activity glyphs — colour rides the icon, never the row. */
+const ACTIVITY_ICON: Record<'success' | 'warning' | 'danger' | 'muted', LucideIcon> = {
+  success: CheckCircle2,
+  warning: Clock3,
+  danger: RotateCcw,
+  muted: ArrowLeftRight,
+};
+const ACTIVITY_TONE: Record<'success' | 'warning' | 'danger' | 'muted', string> = {
+  success: 'bg-success-soft text-success',
+  warning: 'bg-warning-soft text-warning',
+  danger: 'bg-danger-soft text-danger',
+  muted: 'bg-info-soft text-info',
+};
 
 function RecentActivityCard({ data }: { data: ReturnType<typeof useDashboardData> }) {
   const rows = data.recentSales.slice(0, 6);
@@ -734,10 +1113,24 @@ function RecentActivityCard({ data }: { data: ReturnType<typeof useDashboardData
             <tbody className="divide-y divide-border">
               {rows.map((s) => {
                 const meta = paymentStatusMeta(s.paymentStatus, s.returnStatus);
+                const failedSync = s.syncStatus === 'FAILED';
+                const ActIcon = failedSync ? XCircle : ACTIVITY_ICON[meta.tone];
                 return (
                   <tr key={s.id} className="group transition-colors hover:bg-muted/40">
                     <td className="py-2.5">
-                      <Link href={`/sales/${s.id}`} className="font-medium hover:text-primary">
+                      <Link
+                        href={`/sales/${s.id}`}
+                        className="flex items-center gap-2.5 font-medium hover:text-primary"
+                      >
+                        <span
+                          className={cn(
+                            'flex h-7 w-7 shrink-0 items-center justify-center rounded-lg',
+                            failedSync ? 'bg-danger-soft text-danger' : ACTIVITY_TONE[meta.tone],
+                          )}
+                          aria-hidden
+                        >
+                          <ActIcon className="h-3.5 w-3.5" />
+                        </span>
                         {s.saleNumber}
                       </Link>
                     </td>
@@ -766,9 +1159,20 @@ function RecentActivityCard({ data }: { data: ReturnType<typeof useDashboardData
           <ul className="divide-y divide-border @min-[560px]:hidden">
             {rows.map((s) => {
               const meta = paymentStatusMeta(s.paymentStatus, s.returnStatus);
+              const failedSync = s.syncStatus === 'FAILED';
+              const ActIcon = failedSync ? XCircle : ACTIVITY_ICON[meta.tone];
               return (
                 <li key={s.id}>
                   <Link href={`/sales/${s.id}`} className="flex items-center gap-3 py-2.5">
+                    <span
+                      className={cn(
+                        'flex h-8 w-8 shrink-0 items-center justify-center rounded-lg',
+                        failedSync ? 'bg-danger-soft text-danger' : ACTIVITY_TONE[meta.tone],
+                      )}
+                      aria-hidden
+                    >
+                      <ActIcon className="h-4 w-4" />
+                    </span>
                     <span className="min-w-0 flex-1">
                       <span className="block truncate text-sm font-medium">{s.saleNumber}</span>
                       <span className="block truncate text-xs text-muted-foreground">
