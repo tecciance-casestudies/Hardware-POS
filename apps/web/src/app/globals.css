@@ -7,21 +7,25 @@
 @theme {
   --color-brand-50: #eff6ff;
   --color-brand-100: #dbeafe;
+  --color-brand-200: #bfdbfe;
+  --color-brand-300: #93c5fd;
+  --color-brand-400: #60a5fa;
   --color-brand-500: #3b82f6;
   --color-brand-600: #2563eb;
   --color-brand-700: #1d4ed8;
+  --color-brand-800: #1e40af;
 
   --color-primary: #2563eb;
   --color-primary-hover: #1d4ed8;
   --color-primary-foreground: #ffffff;
 
-  --color-canvas: #f8fafc;
+  --color-canvas: #f6f8fc;
   --color-surface: #ffffff;
   --color-card: #ffffff;
   --color-foreground: #0f172a;
   --color-muted: #f1f5f9;
   --color-muted-foreground: #64748b;
-  --color-border: #e2e8f0;
+  --color-border: #e6ebf2;
   --color-ring: #93c5fd;
 
   --color-success: #16a34a;
@@ -31,7 +35,59 @@
   --color-danger: #dc2626;
   --color-danger-soft: #fee2e2;
 
-  --radius-card: 1rem;
+  /* Restrained analytical accent (purple) — used sparingly for insight cards. */
+  --color-accent: #7c3aed;
+  --color-accent-soft: #ede9fe;
+
+  /* Categorical chart palette — accessible in light mode, one visual system. */
+  --color-chart-1: #2563eb;
+  --color-chart-2: #16a34a;
+  --color-chart-3: #d97706;
+  --color-chart-4: #7c3aed;
+  --color-chart-5: #0891b2;
+  --color-chart-6: #64748b;
+
+  --radius-card: 1.25rem;
+
+  /* Soft, layered elevation — the "command centre" surface language. */
+  --shadow-card: 0 1px 2px 0 rgb(15 23 42 / 0.04), 0 1px 3px 0 rgb(15 23 42 / 0.06);
+  --shadow-card-hover: 0 8px 24px -8px rgb(37 99 235 / 0.18), 0 2px 6px -2px rgb(15 23 42 / 0.08);
+  --shadow-pop: 0 16px 48px -12px rgb(15 23 42 / 0.24);
+
+  /* Motion timing tokens. */
+  --ease-out-soft: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* Subtle hero gradient — a whisper of brand, never neon. */
+.bg-hero-gradient {
+  background-image: linear-gradient(120deg, #f0f5ff 0%, #eef6ff 40%, #f6f8fc 100%);
+}
+
+/* Staggered entrance for dashboard cards. */
+@keyframes dash-rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.dash-enter {
+  animation: dash-rise 0.45s var(--ease-out-soft) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dash-enter,
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
 }
 
 html,

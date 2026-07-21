@@ -17,6 +17,23 @@ export function resolveDashboardVariant(role: UserRole): DashboardVariant {
   return role === 'CASHIER' ? 'cashier' : 'admin';
 }
 
+/**
+ * Time-of-day greeting. Pure (hour is injected) so it is trivially testable and
+ * free of SSR/hydration drift — callers pass `new Date().getHours()` on the
+ * client. 5–11 morning, 12–16 afternoon, 17–21 evening, else night.
+ */
+export function greetingFor(hour: number): string {
+  if (hour >= 5 && hour < 12) return 'Good morning';
+  if (hour >= 12 && hour < 17) return 'Good afternoon';
+  if (hour >= 17 && hour < 22) return 'Good evening';
+  return 'Good evening';
+}
+
+/** First name for a friendly greeting; falls back to the whole string. */
+export function firstNameOf(fullName: string): string {
+  return fullName.trim().split(/\s+/)[0] || fullName;
+}
+
 // TODO(test): once a JS test runner is configured in apps/web, cover:
 //   resolveDashboardVariant('OWNER')   === 'admin'
 //   resolveDashboardVariant('ADMIN')   === 'admin'

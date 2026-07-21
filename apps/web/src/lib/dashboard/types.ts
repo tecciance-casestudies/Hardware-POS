@@ -17,6 +17,10 @@ export interface DashboardMetric {
   label: string;
   /** Preformatted display value (currency already run through formatMoney). */
   value: string;
+  /** Raw numeric value — when present the card count-ups to it and `format` it. */
+  rawValue?: number;
+  /** Formatter used with `rawValue` for the animated display. */
+  format?: (n: number) => string;
   helpText?: string;
   comparison?: MetricComparison;
   status?: MetricStatus;
