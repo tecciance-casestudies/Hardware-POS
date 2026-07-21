@@ -2,6 +2,7 @@ import { BadRequestException, Injectable } from '@nestjs/common';
 import { Prisma, Product } from '@hardware-pos/database';
 
 import { PrismaService } from '../../prisma/prisma.service';
+import { nextDocumentNumber, padSequence } from '../../common/document-sequence';
 import { SyncQueueService } from '../sync/queue/sync-queue.service';
 import { ComputedLine, PersistSaleInput, SalesListFilter } from './sales.types';
 
@@ -364,8 +365,7 @@ export class SalesRepository {
     client: Prisma.TransactionClient | PrismaService,
     tenantId: string,
   ): Promise<string> {
-    const count = await client.sale.count({ where: { tenantId } });
-    return `S-${String(count + 1).padStart(6, '0')}`;
+    return `S-${padSequence(await nextDocumentNumber(client, tenantId, 'SALE'))}`;
   }
 }
 

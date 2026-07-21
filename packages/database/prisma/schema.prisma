@@ -1064,3 +1064,17 @@ model QuotationShareLog {
   @@index([quotationId])
   @@index([channel])
 }
+
+/// Per-tenant, per-document-type running counter for gapless, concurrency-safe
+/// document numbers (sales, returns, quotations). Incremented atomically with a
+/// single INSERT ... ON CONFLICT DO UPDATE, replacing the old count()+1 scheme
+/// that collided under concurrent checkouts and after deletions.
+model DocumentSequence {
+  tenantId String
+  /// Document type: SALE | RETURN | QUOTATION.
+  docType  String
+  /// Last-issued sequence number; the next document uses value + 1.
+  value    Int    @default(0)
+
+  @@id([tenantId, docType])
+}
