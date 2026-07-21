@@ -5,6 +5,11 @@ import {
   type StorageProvider,
   type StorageProviderKind,
 } from './storage-provider';
+import {
+  IMAGE_CACHE_MAX_AGE_DEFAULT_SECONDS,
+  readIntEnv,
+  SIGNED_URL_TTL_DEFAULT_SECONDS,
+} from './storage.util';
 
 export interface StorageEnv {
   STORAGE_PROVIDER?: string;
@@ -13,6 +18,8 @@ export interface StorageEnv {
   S3_ENDPOINT?: string;
   S3_ACCESS_KEY_ID?: string;
   S3_SECRET_ACCESS_KEY?: string;
+  S3_SIGNED_URL_TTL_SECONDS?: string;
+  IMAGE_CACHE_MAX_AGE_SECONDS?: string;
 }
 
 function isKind(value: string): value is StorageProviderKind {
@@ -42,6 +49,11 @@ export function createStorageProvider(env: StorageEnv = process.env): StoragePro
       endpoint: env.S3_ENDPOINT || undefined,
       accessKeyId: env.S3_ACCESS_KEY_ID || undefined,
       secretAccessKey: env.S3_SECRET_ACCESS_KEY || undefined,
+      signedUrlTtlSeconds: readIntEnv(env.S3_SIGNED_URL_TTL_SECONDS, SIGNED_URL_TTL_DEFAULT_SECONDS),
+      cacheMaxAgeSeconds: readIntEnv(
+        env.IMAGE_CACHE_MAX_AGE_SECONDS,
+        IMAGE_CACHE_MAX_AGE_DEFAULT_SECONDS,
+      ),
     });
   }
 

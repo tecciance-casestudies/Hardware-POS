@@ -6,7 +6,9 @@ import { NestExpressApplication } from '@nestjs/platform-express';
 import { API_VERSION } from '@hardware-pos/shared';
 
 import { AppModule } from './app.module';
-import { getUploadDir, UPLOAD_URL_PREFIX } from './common/storage/storage.util';
+import { StorageService } from './common/storage/storage.service';
+import { UPLOAD_URL_PREFIX } from './common/storage/storage.util';
+import { uploadsHandler } from './common/storage/uploads.handler';
 import { parseWebOrigins } from './common/web-origins';
 
 async function bootstrap(): Promise<void> {
@@ -14,8 +16,11 @@ async function bootstrap(): Promise<void> {
   const config = app.get(ConfigService);
 
   app.setGlobalPrefix(API_VERSION);
-  // Serve uploaded product images (outside the versioned API prefix), e.g. /uploads/<file>.
-  app.useStaticAssets(getUploadDir(), { prefix: UPLOAD_URL_PREFIX });
+  // Serve uploaded product images (outside the versioned API prefix), e.g.
+  // /uploads/<key>. Mounted as middleware rather than a controller so the path
+  // stays clear of the version prefix; the handler streams from disk or
+  // redirects to a freshly signed S3 URL depending on STORAGE_PROVIDER.
+  app.use(UPLOAD_URL_PREFIX, uploadsHandler(app.get(StorageService)));
   app.useGlobalPipes(
     new ValidationPipe({
       whitelist: true,

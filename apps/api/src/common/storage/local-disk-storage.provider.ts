@@ -1,13 +1,13 @@
 import { randomUUID } from 'crypto';
-import { unlink, writeFile } from 'fs/promises';
-import { basename, join } from 'path';
+import { mkdir, unlink, writeFile } from 'fs/promises';
+import { dirname, join } from 'path';
 
 import { BadRequestException } from '@nestjs/common';
 
-import { IMAGE_EXT, StorageProvider, UploadedImage } from './storage-provider';
-import { getUploadDir, UPLOAD_URL_PREFIX } from './storage.util';
+import { IMAGE_EXT, ResolvedImage, StorageProvider, UploadedImage } from './storage-provider';
+import { getUploadDir, IMAGE_KEY_PREFIX, toObjectKey, toStoredPath } from './storage.util';
 
-/** Local filesystem storage: files under `<cwd>/uploads`, served at `/uploads/<file>`. */
+/** Local filesystem storage: files under `<UPLOAD_DIR>/<key>`, served at `/uploads/<key>`. */
 export class LocalDiskStorageProvider implements StorageProvider {
   readonly kind = 'local' as const;
   private readonly dir = getUploadDir();
@@ -17,17 +17,26 @@ export class LocalDiskStorageProvider implements StorageProvider {
     if (!ext) {
       throw new BadRequestException('Unsupported image type (use PNG, JPEG, WebP, or GIF)');
     }
-    const filename = `${randomUUID()}${ext}`;
-    await writeFile(join(this.dir, filename), file.buffer);
-    return `${UPLOAD_URL_PREFIX}/${filename}`;
+    const key = `${IMAGE_KEY_PREFIX}/${randomUUID()}${ext}`;
+    const dest = join(this.dir, key);
+    await mkdir(dirname(dest), { recursive: true });
+    await writeFile(dest, file.buffer);
+    return toStoredPath(key);
   }
 
-  async remove(url: string | null | undefined): Promise<void> {
-    if (!url || !url.startsWith(`${UPLOAD_URL_PREFIX}/`)) return;
+  async remove(storedPath: string | null | undefined): Promise<void> {
+    const key = toObjectKey(storedPath);
+    if (!key) return;
     try {
-      await unlink(join(this.dir, basename(url)));
+      await unlink(join(this.dir, key));
     } catch {
       /* already gone — ignore */
     }
+  }
+
+  // Keys written before uploads were namespaced are flat (`<uuid>.png`) and
+  // still resolve here, so rows predating the key prefix keep working.
+  resolve(key: string): Promise<ResolvedImage> {
+    return Promise.resolve({ kind: 'file', path: join(this.dir, key) });
   }
 }
