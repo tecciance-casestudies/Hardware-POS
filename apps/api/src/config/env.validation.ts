@@ -1,6 +1,13 @@
 import { plainToInstance, Type } from 'class-transformer';
 import { IsEnum, IsIn, IsInt, IsOptional, IsString, Max, Min, validateSync } from 'class-validator';
 
+import {
+  IMAGE_CACHE_MAX_AGE_DEFAULT_SECONDS,
+  IMAGE_MAX_EDGE_DEFAULT,
+  IMAGE_WEBP_QUALITY_DEFAULT,
+  SIGNED_URL_TTL_DEFAULT_SECONDS,
+} from '../common/storage/storage.util';
+
 export enum NodeEnv {
   Development = 'development',
   Production = 'production',
@@ -70,6 +77,39 @@ export class EnvironmentVariables {
   @IsString()
   @IsOptional()
   S3_SECRET_ACCESS_KEY?: string;
+
+  /** Lifetime (seconds) of presigned S3 GET URLs. AWS SigV4 caps this at 7 days. */
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(604_800)
+  @IsOptional()
+  S3_SIGNED_URL_TTL_SECONDS = SIGNED_URL_TTL_DEFAULT_SECONDS;
+
+  // ── Upload image processing (applies to every stored image, both providers) ──
+  /** Longest edge (px) every stored image is downscaled to before WebP encoding. */
+  @Type(() => Number)
+  @IsInt()
+  @Min(16)
+  @Max(8_192)
+  @IsOptional()
+  IMAGE_MAX_EDGE = IMAGE_MAX_EDGE_DEFAULT;
+
+  /** WebP encoder quality (1-100) for stored images. */
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(100)
+  @IsOptional()
+  IMAGE_WEBP_QUALITY = IMAGE_WEBP_QUALITY_DEFAULT;
+
+  /** Browser cache lifetime (seconds) for served images (Cache-Control max-age). */
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(31_536_000)
+  @IsOptional()
+  IMAGE_CACHE_MAX_AGE_SECONDS = IMAGE_CACHE_MAX_AGE_DEFAULT_SECONDS;
 
   // ── Sync queue worker ──
   // The background worker drains SyncJob rows. Disable ('false') in tests or when
