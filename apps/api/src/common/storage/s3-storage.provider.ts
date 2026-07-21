@@ -13,19 +13,15 @@ import { IMAGE_EXT, ResolvedImage, StorageProvider, UploadedImage } from './stor
 import { IMAGE_KEY_PREFIX, toObjectKey, toStoredPath } from './storage.util';
 
 /**
- * How long a signed object URL stays valid. Only has to outlive the redirect
- * that carries the browser to it, plus REDIRECT_MAX_AGE of reuse from cache.
+ * Fraction of the signed-URL lifetime for which a redirect to it may be cached.
+ * The `/uploads/...` redirect carries `Cache-Control: max-age = ttl * this`, kept
+ * well under the signature's own lifetime so a cached redirect can never point at
+ * an already-expired URL — while still letting repeat views reuse one signed URL.
+ * (Without any caching the signature would differ per request, giving every
+ * response a fresh cache key and defeating the object's own immutable caching.)
+ * At a 300s TTL this yields a 100s redirect window.
  */
-const SIGNED_URL_TTL_SECONDS = 900;
-
-/**
- * How long the browser may reuse our `/uploads/...` redirect without asking
- * again. Kept well under SIGNED_URL_TTL_SECONDS so a cached redirect can never
- * point at an already-expired signature. Without this the signature would differ
- * on every request, giving each response a fresh cache key and defeating the
- * object's own immutable caching.
- */
-const REDIRECT_MAX_AGE_SECONDS = 300;
+const REDIRECT_CACHE_FRACTION = 1 / 3;
 
 export interface S3StorageConfig {
   bucket: string;
@@ -34,6 +30,10 @@ export interface S3StorageConfig {
   endpoint?: string;
   accessKeyId?: string;
   secretAccessKey?: string;
+  /** Lifetime (seconds) of presigned GET URLs. Env: S3_SIGNED_URL_TTL_SECONDS. */
+  signedUrlTtlSeconds: number;
+  /** `Cache-Control: max-age` (seconds) stored on the object. Env: IMAGE_CACHE_MAX_AGE_SECONDS. */
+  cacheMaxAgeSeconds: number;
 }
 
 /**
@@ -47,9 +47,17 @@ export class S3StorageProvider implements StorageProvider {
   private readonly bucket: string;
   /** Object-URL base used only to recognise rows written before keys were stored. */
   private readonly legacyBase: string;
+  /** Lifetime of a minted presigned URL, and how long a redirect to it may be cached. */
+  private readonly signedUrlTtlSeconds: number;
+  private readonly redirectMaxAgeSeconds: number;
+  /** `Cache-Control: max-age` stored on each uploaded object. */
+  private readonly cacheMaxAgeSeconds: number;
 
   constructor(config: S3StorageConfig) {
     this.bucket = config.bucket;
+    this.signedUrlTtlSeconds = config.signedUrlTtlSeconds;
+    this.redirectMaxAgeSeconds = Math.floor(config.signedUrlTtlSeconds * REDIRECT_CACHE_FRACTION);
+    this.cacheMaxAgeSeconds = config.cacheMaxAgeSeconds;
     this.client = new S3Client({
       region: config.region,
       // Skip the SDK's default streaming checksums — S3 emulators (LocalStack,
@@ -89,8 +97,9 @@ export class S3StorageProvider implements StorageProvider {
         Key: key,
         Body: file.buffer,
         ContentType: file.mimetype,
-        // Cache aggressively — keys are content-unique (UUID per upload).
-        CacheControl: 'public, max-age=31536000, immutable',
+        // Keys are content-unique (UUID per upload), so the object never changes:
+        // `immutable` lets the browser trust its cache for the full max-age.
+        CacheControl: `public, max-age=${this.cacheMaxAgeSeconds}, immutable`,
       }),
     );
     return toStoredPath(key);
@@ -111,9 +120,9 @@ export class S3StorageProvider implements StorageProvider {
     const url = await getSignedUrl(
       this.client,
       new GetObjectCommand({ Bucket: this.bucket, Key: key }),
-      { expiresIn: SIGNED_URL_TTL_SECONDS },
+      { expiresIn: this.signedUrlTtlSeconds },
     );
-    return { kind: 'redirect', url, maxAgeSeconds: REDIRECT_MAX_AGE_SECONDS };
+    return { kind: 'redirect', url, maxAgeSeconds: this.redirectMaxAgeSeconds };
   }
 
   /** Key behind an absolute object URL stored before this provider kept keys. */

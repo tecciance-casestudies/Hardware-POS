@@ -8,12 +8,13 @@ import {
   type StorageProvider,
   type UploadedImage,
 } from './storage-provider';
-import { toObjectKey } from './storage.util';
-
-/** Longest-edge cap applied to every stored image, in pixels. */
-const MAX_IMAGE_EDGE = 780;
-/** WebP encoder quality (0-100). 80 keeps product photos crisp at well under 300 KB. */
-const WEBP_QUALITY = 80;
+import {
+  IMAGE_CACHE_MAX_AGE_DEFAULT_SECONDS,
+  IMAGE_MAX_EDGE_DEFAULT,
+  IMAGE_WEBP_QUALITY_DEFAULT,
+  readIntEnv,
+  toObjectKey,
+} from './storage.util';
 
 /**
  * Facade the rest of the app injects for file storage. WHERE files live is
@@ -24,17 +25,35 @@ const WEBP_QUALITY = 80;
 export class StorageService {
   private static readonly logger = new Logger(StorageService.name);
   private readonly provider: StorageProvider;
+  /** Longest edge (px) every stored image is downscaled to. Env: IMAGE_MAX_EDGE. */
+  private readonly maxEdge: number;
+  /** WebP encoder quality (1-100). Env: IMAGE_WEBP_QUALITY. */
+  private readonly webpQuality: number;
+  /**
+   * `Cache-Control: max-age` (seconds) for served images. Read here so the local
+   * file handler and the S3 provider share one value. Env: IMAGE_CACHE_MAX_AGE_SECONDS.
+   */
+  readonly imageCacheMaxAgeSeconds: number;
 
   constructor() {
     this.provider = createStorageProvider(process.env);
-    StorageService.logger.log(`Upload storage provider: ${this.provider.kind}`);
+    this.maxEdge = readIntEnv(process.env.IMAGE_MAX_EDGE, IMAGE_MAX_EDGE_DEFAULT);
+    this.webpQuality = readIntEnv(process.env.IMAGE_WEBP_QUALITY, IMAGE_WEBP_QUALITY_DEFAULT);
+    this.imageCacheMaxAgeSeconds = readIntEnv(
+      process.env.IMAGE_CACHE_MAX_AGE_SECONDS,
+      IMAGE_CACHE_MAX_AGE_DEFAULT_SECONDS,
+    );
+    StorageService.logger.log(
+      `Upload storage provider: ${this.provider.kind} ` +
+        `(images <=${this.maxEdge}px, webp q${this.webpQuality}, cache ${this.imageCacheMaxAgeSeconds}s)`,
+    );
   }
 
   /**
-   * Downscale to at most MAX_IMAGE_EDGE on the longest side, re-encode to WebP,
-   * and persist; returns the stored image's public URL. Both callers (product
-   * photos and document branding assets) go through here, so the size cap holds
-   * for every stored image whichever provider is configured.
+   * Downscale to at most `maxEdge` on the longest side, re-encode to WebP, and
+   * persist; returns the stored image's public URL. Both callers (product photos
+   * and document branding assets) go through here, so the size cap holds for
+   * every stored image whichever provider is configured.
    */
   async saveImage(file: UploadedImage): Promise<string> {
     // Guard here rather than in the providers: they only ever see the WebP we
@@ -42,7 +61,7 @@ export class StorageService {
     if (!IMAGE_EXT[file.mimetype]) {
       throw new BadRequestException('Unsupported image type (use PNG, JPEG, WebP, or GIF)');
     }
-    const buffer = await compressImage(file.buffer);
+    const buffer = await compressImage(file.buffer, this.maxEdge, this.webpQuality);
     return this.provider.saveImage({ buffer, mimetype: 'image/webp' });
   }
 
@@ -68,14 +87,14 @@ export class StorageService {
  * logo, signature, and stamp assets are drawn onto documents and rely on
  * transparency, which JPEG would flatten. Animated GIFs keep their first frame.
  */
-async function compressImage(buffer: Buffer): Promise<Buffer> {
+async function compressImage(buffer: Buffer, maxEdge: number, quality: number): Promise<Buffer> {
   try {
     return await sharp(buffer)
       // Phone photos carry their orientation in EXIF; apply it before re-encoding
       // drops the metadata, or portrait shots come out sideways.
       .rotate()
-      .resize(MAX_IMAGE_EDGE, MAX_IMAGE_EDGE, { fit: 'inside', withoutEnlargement: true })
-      .webp({ quality: WEBP_QUALITY })
+      .resize(maxEdge, maxEdge, { fit: 'inside', withoutEnlargement: true })
+      .webp({ quality })
       .toBuffer();
   } catch {
     // sharp throws on truncated/corrupt input or a mislabelled mimetype.

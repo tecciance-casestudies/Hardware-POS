@@ -3,9 +3,6 @@ import type { Request, RequestHandler, Response } from 'express';
 import { StorageService } from './storage.service';
 import { UPLOAD_URL_PREFIX } from './storage.util';
 
-/** Keys are UUID-unique per upload and never overwritten, so files never go stale. */
-const FILE_CACHE_CONTROL = 'public, max-age=31536000, immutable';
-
 /**
  * Serves stored images at `/uploads/<key>` — the same stable path recorded on
  * every product, category, and branding record, so nothing upstream has to
@@ -17,6 +14,10 @@ const FILE_CACHE_CONTROL = 'public, max-age=31536000, immutable';
  * signed URL and still hit the browser cache.
  */
 export function uploadsHandler(storage: StorageService): RequestHandler {
+  // Local files are served directly with this header (S3 objects carry their own,
+  // set at upload). Keys are UUID-unique and never overwritten, so `immutable` lets
+  // the browser trust its cache for the full max-age.
+  const fileCacheControl = `public, max-age=${storage.imageCacheMaxAgeSeconds}, immutable`;
   return (req: Request, res: Response): void => {
     if (req.method !== 'GET' && req.method !== 'HEAD') {
       res.status(405).end();
@@ -44,7 +45,7 @@ export function uploadsHandler(storage: StorageService): RequestHandler {
           res.redirect(302, resolved.url);
           return;
         }
-        res.setHeader('Cache-Control', FILE_CACHE_CONTROL);
+        res.setHeader('Cache-Control', fileCacheControl);
         res.sendFile(resolved.path, (err) => {
           if (err && !res.headersSent) res.status(404).end();
         });

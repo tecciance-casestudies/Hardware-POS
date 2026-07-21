@@ -7,6 +7,35 @@ export const UPLOAD_URL_PREFIX = '/uploads';
 /** Key prefix every newly stored image lands under. */
 export const IMAGE_KEY_PREFIX = 'products';
 
+// ── Tunable image / signing defaults ──
+// Overridable via env (IMAGE_MAX_EDGE, IMAGE_WEBP_QUALITY, IMAGE_CACHE_MAX_AGE_SECONDS,
+// S3_SIGNED_URL_TTL_SECONDS) and range-validated in config/env.validation.ts. Defined
+// here so the storage layer and the env validation share one source of truth.
+/** Default longest-edge cap (px) applied to every stored image. */
+export const IMAGE_MAX_EDGE_DEFAULT = 780;
+/** Default WebP encoder quality (1-100). */
+export const IMAGE_WEBP_QUALITY_DEFAULT = 80;
+/** Default lifetime (seconds) of a presigned S3 GET URL. */
+export const SIGNED_URL_TTL_DEFAULT_SECONDS = 300;
+/**
+ * Default `Cache-Control: max-age` (seconds) on served images — how long a browser
+ * keeps a downloaded image before re-fetching. 6h; keys are content-unique so a
+ * higher value is safe, but a bounded one lets a re-created bucket (dev) recover.
+ */
+export const IMAGE_CACHE_MAX_AGE_DEFAULT_SECONDS = 6 * 60 * 60;
+
+/**
+ * Parse an integer environment variable, falling back when unset or blank.
+ * Range validation lives in config/env.validation.ts (fail-fast at boot), so a
+ * value reaching here is already known-valid; a non-integer still falls back
+ * defensively rather than propagating NaN.
+ */
+export function readIntEnv(value: string | undefined, fallback: number): number {
+  if (value === undefined || value.trim() === '') return fallback;
+  const parsed = Number(value);
+  return Number.isInteger(parsed) ? parsed : fallback;
+}
+
 /**
  * Absolute directory where uploaded files are written and served from. Override
  * with `UPLOAD_DIR`; defaults to `<cwd>/uploads`. Created on first access.
