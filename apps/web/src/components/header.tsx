@@ -6,6 +6,7 @@ import * as React from 'react';
 
 import { CommandPalette } from '@/components/command-palette';
 import { SyncStatus } from '@/components/sync-status';
+import { ThemeToggle } from '@/components/theme-toggle';
 import { Button } from '@/components/ui/button';
 import { useAuth } from '@/lib/auth';
 import { useSidebar } from '@/lib/sidebar';
@@ -60,6 +61,7 @@ export function Header() {
       <div className="flex min-w-0 items-center justify-end gap-2 md:gap-3">
         <CommandPalette />
         <SyncStatus />
+        <ThemeToggle className="hidden md:inline-flex" />
         <ProfileMenu
           name={session.user.name}
           role={session.user.role}
@@ -143,6 +145,11 @@ function ProfileMenu({
                 {register}
               </p>
             </div>
+          </div>
+          <div className="my-1 border-t border-border md:hidden" />
+          <div className="flex items-center justify-between px-3 py-2 md:hidden">
+            <span className="text-xs font-medium text-muted-foreground">Theme</span>
+            <ThemeToggle />
           </div>
           <div className="my-1 border-t border-border" />
           <button

@@ -622,12 +622,12 @@ function QuotationPipelineCard({
 function dotFor(tone: string): string {
   return (
     {
-      muted: 'bg-slate-400',
+      muted: 'bg-[var(--gray-400)]',
       primary: 'bg-primary',
       warning: 'bg-warning',
       success: 'bg-success',
       danger: 'bg-danger',
-    }[tone] ?? 'bg-slate-400'
+    }[tone] ?? 'bg-[var(--gray-400)]'
   );
 }
 

@@ -20,14 +20,15 @@ const buttonVariants = cva(
   {
     variants: {
       variant: {
-        primary: 'bg-primary text-primary-foreground hover:bg-primary-hover shadow-sm',
+        primary:
+          'bg-primary text-primary-foreground hover:bg-primary-hover active:bg-primary-active shadow-sm',
         secondary: 'bg-muted text-foreground hover:bg-border',
         outline: 'border border-border bg-surface text-foreground hover:bg-muted',
         ghost: 'text-foreground hover:bg-muted',
-        destructive: 'bg-danger text-white hover:bg-red-700 shadow-sm',
-        danger: 'bg-danger text-white hover:bg-red-700 shadow-sm', // alias of destructive
-        success: 'bg-success text-white hover:bg-green-700 shadow-sm',
-        warning: 'bg-warning text-white hover:bg-amber-600 shadow-sm',
+        destructive: 'bg-danger text-primary-foreground hover:bg-danger-hover shadow-sm',
+        danger: 'bg-danger text-primary-foreground hover:bg-danger-hover shadow-sm', // alias of destructive
+        success: 'bg-success text-primary-foreground hover:bg-success-hover shadow-sm',
+        warning: 'bg-warning text-primary-foreground hover:bg-warning-hover shadow-sm',
         link: 'px-0 text-primary underline-offset-4 shadow-none hover:underline',
       },
       size: {

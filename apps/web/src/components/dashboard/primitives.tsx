@@ -296,11 +296,11 @@ const BAR_TONE: Record<string, string> = {
   card: 'bg-primary',
   bank: 'bg-warning',
   qr: 'bg-accent',
-  credit: 'bg-slate-400',
-  other: 'bg-slate-300',
+  credit: 'bg-[var(--gray-400)]',
+  other: 'bg-[var(--gray-300)]',
   primary: 'bg-primary',
   accent: 'bg-accent',
-  neutral: 'bg-slate-400',
+  neutral: 'bg-[var(--gray-400)]',
 };
 
 export function ProgressBar({ percent, tone = 'primary' }: { percent: number; tone?: string }) {
@@ -325,7 +325,7 @@ const STATUS_DOT = {
   success: 'bg-success',
   warning: 'bg-warning',
   danger: 'bg-danger',
-  muted: 'bg-slate-400',
+  muted: 'bg-[var(--gray-400)]',
 } as const;
 
 /** Status pill — colour is never the sole signal; a dot + text always accompany it. */
