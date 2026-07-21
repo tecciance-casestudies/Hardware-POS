@@ -123,6 +123,38 @@ export class SalesRepository {
     });
   }
 
+  /**
+   * A customer's credit terms plus how much they currently owe (sum of unpaid
+   * balances on their completed sales). Used to enforce the credit limit before
+   * a new credit/partial sale is accepted.
+   */
+  async getCustomerCredit(
+    tenantId: string,
+    customerId: string,
+  ): Promise<{ creditAllowed: boolean; creditLimit: number | null; outstanding: number } | null> {
+    const customer = await this.prisma.customer.findFirst({
+      where: { id: customerId, tenantId },
+      select: { creditAllowed: true, creditLimit: true },
+    });
+    if (!customer) return null;
+
+    const agg = await this.prisma.sale.aggregate({
+      where: {
+        tenantId,
+        customerId,
+        status: 'COMPLETED',
+        paymentStatus: { in: ['UNPAID', 'PARTIAL'] },
+      },
+      _sum: { balanceAmount: true },
+    });
+
+    return {
+      creditAllowed: customer.creditAllowed,
+      creditLimit: customer.creditLimit != null ? Number(customer.creditLimit) : null,
+      outstanding: agg._sum.balanceAmount != null ? Number(agg._sum.balanceAmount) : 0,
+    };
+  }
+
   // ── writes ─────────────────────────────────────────────────────────────────
 
   /** Persist a new DRAFT sale (no payments, no sync job). */
