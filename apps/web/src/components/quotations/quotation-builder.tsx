@@ -214,6 +214,24 @@ export function QuotationBuilder({ mode, initial, header }: Props) {
     });
   }
 
+  /**
+   * A line's total (qty x unit price, minus its discount). Prefers the
+   * server-computed preview figure (the source of truth for rounding);
+   * falls back to a local estimate while the debounced preview loads.
+   */
+  function lineTotal(l: Line, index: number): number {
+    const fromPreview = preview?.items[index]?.lineTotal;
+    if (fromPreview != null) return fromPreview;
+    const subtotal = l.quantity * l.unitPrice;
+    const discount =
+      l.discountType === 'PERCENTAGE'
+        ? (subtotal * l.discountValue) / 100
+        : l.discountType === 'FIXED'
+          ? Math.min(l.discountValue, subtotal)
+          : 0;
+    return Math.round((subtotal - discount) * 100) / 100;
+  }
+
   function patchLine(key: string, patch: Partial<Line>) {
     setLines((prev) => prev.map((l) => (l.key === key ? { ...l, ...patch } : l)));
   }
@@ -452,7 +470,7 @@ export function QuotationBuilder({ mode, initial, header }: Props) {
               Add products to build the quotation.
             </p>
           )}
-          {lines.map((l) => (
+          {lines.map((l, index) => (
             <div key={l.key} className="rounded-xl border border-border p-2.5">
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0">
@@ -523,6 +541,15 @@ export function QuotationBuilder({ mode, initial, header }: Props) {
                 placeholder="Item note (optional)"
                 className="mt-2 h-9 text-xs"
               />
+              {/* Line total: qty x unit price, net of this line's discount. */}
+              <div className="mt-2 flex items-center justify-between border-t border-border pt-2 text-sm">
+                <span className="text-[11px] text-muted-foreground">
+                  Total{l.quantity > 1 ? ` (${l.quantity} × ${formatMoney(l.unitPrice)})` : ''}
+                </span>
+                <span className="font-semibold tabular-nums text-primary">
+                  {formatMoney(lineTotal(l, index))}
+                </span>
+              </div>
             </div>
           ))}
         </CardContent>
