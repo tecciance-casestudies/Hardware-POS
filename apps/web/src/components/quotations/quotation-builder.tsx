@@ -6,14 +6,22 @@ import { Plus, Search, Trash2, UserPlus, X } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { ChipRow } from '@/components/ui/chip-row';
 import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
 import { ProductImage } from '@/components/product-image';
+import { QuantityStepper } from '@/components/pos/quantity-stepper';
 import { QuickAddCustomerDialog } from '@/components/pos/quick-add-customer-dialog';
 import { useAuth } from '@/lib/auth';
 import { Permission } from '@/lib/permissions';
-import { fetchProducts, type ManagedProduct } from '@/lib/products-api';
+import {
+  fetchCategoryTree,
+  fetchProducts,
+  resolveImageUrl,
+  type CategoryNode,
+  type ManagedProduct,
+} from '@/lib/products-api';
 import { fetchCustomers, type ManagedCustomer } from '@/lib/customers-api';
 import {
   createQuotation,
@@ -70,9 +78,12 @@ export function QuotationBuilder({ mode, initial }: Props) {
   const router = useRouter();
 
   const [products, setProducts] = React.useState<ManagedProduct[]>([]);
+  const [categoryTree, setCategoryTree] = React.useState<CategoryNode[]>([]);
   const [customers, setCustomers] = React.useState<ManagedCustomer[]>([]);
   const [addedCustomers, setAddedCustomers] = React.useState<ManagedCustomer[]>([]);
   const [search, setSearch] = React.useState('');
+  const [category, setCategory] = React.useState('All');
+  const [subcategory, setSubcategory] = React.useState('All');
   const [quickAddOpen, setQuickAddOpen] = React.useState(false);
 
   const [customerId, setCustomerId] = React.useState(initial?.customer?.id ?? '');
@@ -112,9 +123,19 @@ export function QuotationBuilder({ mode, initial }: Props) {
 
   React.useEffect(() => {
     if (!session) return;
-    void fetchProducts(session, { pageSize: 200 }).then((r) =>
-      setProducts(r.items.filter((p) => p.isActive !== false)),
-    );
+    // Load the whole active catalog (paging past the API's 200 cap), same as
+    // the POS, so every product is browsable/searchable here too.
+    void (async () => {
+      const first = await fetchProducts(session, { page: 1, pageSize: 200, isActive: 'true' });
+      const all = [...first.items];
+      const totalPages = Math.ceil(first.total / 200);
+      for (let p = 2; p <= totalPages; p += 1) {
+        const next = await fetchProducts(session, { page: p, pageSize: 200, isActive: 'true' });
+        all.push(...next.items);
+      }
+      setProducts(all);
+    })();
+    void fetchCategoryTree(session, true).then(setCategoryTree).catch(() => setCategoryTree([]));
     void fetchCustomers(session, { pageSize: 200 }).then((r) => setCustomers(r.items));
   }, [session]);
 
@@ -154,10 +175,28 @@ export function QuotationBuilder({ mode, initial }: Props) {
   const canAddCustomer = hasPermission(Permission.CUSTOMER_MANAGE);
 
   const allCustomers = [...addedCustomers, ...customers];
+
+  // Resolve product category/subcategory names for the POS-style chip filters.
+  const catNameById = new Map(categoryTree.map((c) => [c.id, c.name]));
+  const subNameById = new Map<string, string>();
+  for (const c of categoryTree) for (const s of c.subcategories) subNameById.set(s.id, s.name);
+
+  const categories = ['All', ...categoryTree.map((c) => c.name)];
+  const activeCategory = categoryTree.find((c) => c.name === category);
+  const subcategories =
+    category !== 'All' && activeCategory && activeCategory.subcategories.length > 0
+      ? ['All', ...activeCategory.subcategories.map((s) => s.name)]
+      : [];
+
+  const q = search.trim().toLowerCase();
   const filteredProducts = products.filter((p) => {
-    const q = search.trim().toLowerCase();
-    if (!q) return true;
-    return p.name.toLowerCase().includes(q) || (p.sku ?? '').toLowerCase().includes(q);
+    const catName = (p.categoryId && catNameById.get(p.categoryId)) || 'Uncategorized';
+    const subName = (p.subcategoryId && subNameById.get(p.subcategoryId)) || null;
+    const matchesCat = category === 'All' || catName === category;
+    const matchesSub = subcategory === 'All' || subName === subcategory;
+    const matchesQuery =
+      !q || p.name.toLowerCase().includes(q) || (p.sku ?? '').toLowerCase().includes(q);
+    return matchesCat && matchesSub && matchesQuery;
   });
 
   function addProduct(p: ManagedProduct) {
@@ -252,28 +291,128 @@ export function QuotationBuilder({ mode, initial }: Props) {
           </div>
         </div>
 
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
-          {filteredProducts.slice(0, 60).map((p) => (
+        {/* Category + subcategory chips — same as the POS section. */}
+        <ChipRow activeKey={category} ariaLabel="categories">
+          {categories.map((c) => (
             <button
-              key={p.id}
-              onClick={() => addProduct(p)}
-              className="group flex flex-col overflow-hidden rounded-xl border border-border bg-card text-left shadow-sm transition-all hover:border-primary hover:shadow"
+              key={c}
+              data-active={category === c}
+              onClick={() => {
+                setCategory(c);
+                setSubcategory('All');
+              }}
+              className={cn(
+                'h-9 shrink-0 whitespace-nowrap rounded-full px-3.5 text-sm font-medium transition-colors',
+                category === c
+                  ? 'bg-primary text-primary-foreground'
+                  : 'bg-muted text-muted-foreground hover:bg-border',
+              )}
             >
-              <div className="flex flex-1 flex-col p-2">
-                <div className="line-clamp-2 min-h-8 text-xs font-medium leading-tight">{p.name}</div>
-                <div className="mt-0.5 truncate text-[11px] text-muted-foreground">{p.sku ?? ''}</div>
-                <div className="mt-1 flex items-center justify-between">
-                  <span className="text-sm font-semibold text-primary">
-                    {formatMoney(p.unitPrice)}
-                  </span>
-                  <Plus className="h-4 w-4 text-muted-foreground group-hover:text-primary" />
-                </div>
-              </div>
+              {c}
             </button>
           ))}
+        </ChipRow>
+        {subcategories.length > 0 ? (
+          <ChipRow activeKey={subcategory} ariaLabel="subcategories">
+            {subcategories.map((s) => (
+              <button
+                key={s}
+                data-active={subcategory === s}
+                onClick={() => setSubcategory(s)}
+                className={cn(
+                  'h-8 shrink-0 whitespace-nowrap rounded-full px-3 text-xs font-medium transition-colors',
+                  subcategory === s
+                    ? 'bg-primary text-primary-foreground'
+                    : 'bg-muted text-muted-foreground hover:bg-border',
+                )}
+              >
+                {s}
+              </button>
+            ))}
+          </ChipRow>
+        ) : null}
+
+        <div className="grid grid-cols-[repeat(auto-fill,minmax(9rem,1fr))] gap-2.5">
+          {filteredProducts.slice(0, 120).map((p) => {
+            const outOfStock = p.type === 'Inventory' && p.quantityOnHand <= 0;
+            const lowStock =
+              p.type === 'Inventory' &&
+              !outOfStock &&
+              p.reorderLevel != null &&
+              p.quantityOnHand <= p.reorderLevel;
+            return (
+              <div
+                key={p.id}
+                title={p.name}
+                className="group flex flex-col overflow-hidden rounded-xl border border-border bg-card text-left shadow-sm transition-all hover:border-primary hover:shadow"
+              >
+                <button
+                  type="button"
+                  onClick={() => addProduct(p)}
+                  disabled={outOfStock}
+                  aria-label={`Add ${p.name} to quotation`}
+                  className="relative block text-left disabled:cursor-not-allowed"
+                >
+                  <ProductImage
+                    src={resolveImageUrl(p.imageUrl)}
+                    alt={p.name}
+                    rounded="rounded-none"
+                    className={cn('aspect-[4/3] w-full border-0', outOfStock && 'opacity-60')}
+                  />
+                  {outOfStock ? (
+                    <span className="absolute right-1.5 top-1.5 rounded-md bg-danger px-1.5 py-0.5 text-[10px] font-semibold text-white">
+                      Out of Stock
+                    </span>
+                  ) : lowStock ? (
+                    <span className="absolute right-1.5 top-1.5 rounded-md bg-warning-soft px-1.5 py-0.5 text-[10px] font-semibold text-warning">
+                      Low Stock
+                    </span>
+                  ) : null}
+                </button>
+                <div className="flex flex-1 flex-col p-2.5">
+                  <div className="line-clamp-2 min-h-8 text-xs font-medium leading-tight">
+                    {p.name}
+                  </div>
+                  <div className="mt-0.5 truncate text-[11px] text-muted-foreground">
+                    {p.sku ?? ''}
+                  </div>
+                  <div className="mt-1.5 flex items-end justify-between gap-1">
+                    <span className="text-sm font-semibold text-primary">
+                      {formatMoney(p.unitPrice)}
+                    </span>
+                    <span
+                      className={cn(
+                        'text-[11px]',
+                        outOfStock ? 'font-medium text-danger' : 'text-muted-foreground',
+                      )}
+                    >
+                      {p.type !== 'Inventory'
+                        ? p.type === 'Service'
+                          ? 'Service'
+                          : '—'
+                        : outOfStock
+                          ? 'Out'
+                          : p.quantityOnHand.toLocaleString()}
+                    </span>
+                  </div>
+                  <Button
+                    variant={outOfStock ? 'outline' : 'primary'}
+                    size="sm"
+                    fullWidth
+                    disabled={outOfStock}
+                    className="mt-2"
+                    onClick={() => addProduct(p)}
+                    leftIcon={outOfStock ? undefined : <Plus className="h-4 w-4" />}
+                  >
+                    {outOfStock ? 'Out of Stock' : 'Add'}
+                  </Button>
+                </div>
+              </div>
+            );
+          })}
           {filteredProducts.length === 0 && (
             <p className="col-span-full py-8 text-center text-sm text-muted-foreground">
-              No products match “{search}”.
+              No products match your search.
             </p>
           )}
         </div>
@@ -308,29 +447,29 @@ export function QuotationBuilder({ mode, initial }: Props) {
                   <Trash2 className="h-4 w-4" />
                 </button>
               </div>
+              {/* Qty (stepper, like the POS cart) + read-only unit price. */}
+              <div className="mt-2 flex items-center justify-between gap-2">
+                <div>
+                  <div className="text-[11px] text-muted-foreground">Qty</div>
+                  <div className="mt-0.5">
+                    <QuantityStepper
+                      quantity={l.quantity}
+                      onDecrement={() =>
+                        patchLine(l.key, { quantity: Math.max(1, l.quantity - 1) })
+                      }
+                      onIncrement={() => patchLine(l.key, { quantity: l.quantity + 1 })}
+                      onSet={(qty) => patchLine(l.key, { quantity: qty })}
+                    />
+                  </div>
+                </div>
+                <div className="text-right">
+                  <div className="text-[11px] text-muted-foreground">Unit price</div>
+                  <div className="mt-0.5 h-9 text-sm font-semibold tabular-nums leading-9">
+                    {formatMoney(l.unitPrice)}
+                  </div>
+                </div>
+              </div>
               <div className="mt-2 grid grid-cols-2 gap-2">
-                <label className="text-[11px] text-muted-foreground">
-                  Qty
-                  <Input
-                    type="number"
-                    min={0.001}
-                    step="any"
-                    value={l.quantity}
-                    onChange={(e) => patchLine(l.key, { quantity: Number(e.target.value) })}
-                    className="mt-0.5 h-9"
-                  />
-                </label>
-                <label className="text-[11px] text-muted-foreground">
-                  Unit price
-                  <Input
-                    type="number"
-                    min={0}
-                    step="any"
-                    value={l.unitPrice}
-                    onChange={(e) => patchLine(l.key, { unitPrice: Number(e.target.value) })}
-                    className="mt-0.5 h-9"
-                  />
-                </label>
                 <label className="text-[11px] text-muted-foreground">
                   Discount
                   <Select
