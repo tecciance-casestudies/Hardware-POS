@@ -52,6 +52,12 @@ interface Line {
 interface Props {
   mode: 'create' | 'edit' | 'revision';
   initial?: QuotationDetail;
+  /**
+   * Page heading rendered inside the catalog column, so the quotation panel
+   * can start at the very top of the content area (just below the app header)
+   * and claim the full height.
+   */
+  header?: React.ReactNode;
 }
 
 let keySeq = 0;
@@ -73,7 +79,7 @@ function lineFromProduct(p: ManagedProduct): Line {
   };
 }
 
-export function QuotationBuilder({ mode, initial }: Props) {
+export function QuotationBuilder({ mode, initial, header }: Props) {
   const { session, hasPermission } = useAuth();
   const router = useRouter();
 
@@ -253,11 +259,15 @@ export function QuotationBuilder({ mode, initial }: Props) {
   }
 
   return (
-    <div className="grid gap-5 lg:grid-cols-[1.9fr_1fr]">
+    <div className="flex min-h-0 flex-col gap-4 lg:grid lg:h-full lg:grid-cols-[1.9fr_1fr] lg:gap-5">
       {/* Catalog + customer. min-w-0 lets this grid column shrink below its
           content's intrinsic width so the chip rows scroll internally instead
-          of forcing the whole page to scroll horizontally. */}
-      <div className="min-w-0 space-y-3">
+          of forcing the whole page to scroll horizontally. On lg+ the column
+          is height-locked: the header/search/chips stay pinned and only the
+          product grid below them scrolls. */}
+      <div className="flex min-h-0 min-w-0 flex-col gap-3">
+        <div className="shrink-0 space-y-3">
+        {header}
         <div className="flex flex-wrap items-center gap-2">
           <Select
             value={customerId}
@@ -333,7 +343,11 @@ export function QuotationBuilder({ mode, initial }: Props) {
             ))}
           </ChipRow>
         ) : null}
+        </div>
 
+        {/* Product grid — the only vertical scroll region on lg+; the header,
+            search row, and category chips above stay pinned. */}
+        <div className="lg:min-h-0 lg:flex-1 lg:overflow-y-auto lg:pr-0.5 lg:[scrollbar-width:thin]">
         <div className="grid grid-cols-[repeat(auto-fill,minmax(9rem,1fr))] gap-2.5">
           {filteredProducts.slice(0, 120).map((p) => {
             const outOfStock = p.type === 'Inventory' && p.quantityOnHand <= 0;
@@ -418,17 +432,21 @@ export function QuotationBuilder({ mode, initial }: Props) {
             </p>
           )}
         </div>
+        </div>
       </div>
 
-      {/* Quotation panel */}
-      <Card className="flex h-fit min-w-0 flex-col lg:sticky lg:top-6">
-        <CardHeader className="border-b border-border p-4">
+      {/* Quotation panel — spans the full content height on lg (it starts just
+          below the app header, beside the catalog column); its middle section
+          scrolls internally so the totals and actions always stay visible. */}
+      <Card className="flex min-w-0 flex-col lg:h-full lg:min-h-0">
+        <CardHeader className="shrink-0 border-b border-border p-4">
           <CardTitle className="text-base">
             {mode === 'revision' ? 'New revision' : mode === 'edit' ? 'Edit quotation' : 'New quotation'}
           </CardTitle>
         </CardHeader>
 
-        <CardContent className="max-h-[46vh] space-y-2.5 overflow-auto p-3">
+        <div className="lg:min-h-0 lg:flex-1 lg:overflow-y-auto lg:[scrollbar-width:thin]">
+        <CardContent className="space-y-2.5 p-3">
           {lines.length === 0 && (
             <p className="py-8 text-center text-sm text-muted-foreground">
               Add products to build the quotation.
@@ -565,7 +583,11 @@ export function QuotationBuilder({ mode, initial }: Props) {
               className="h-9 text-xs"
             />
           )}
+        </div>
+        </div>
 
+        {/* Pinned footer: totals + actions are always visible. */}
+        <div className="shrink-0 space-y-2.5 border-t border-border p-3">
           <div className="space-y-1 rounded-xl bg-muted/60 p-3 text-sm">
             <Row label="Subtotal" value={formatMoney(preview?.subtotal ?? 0)} />
             {(preview?.productDiscountTotal ?? 0) > 0 && (

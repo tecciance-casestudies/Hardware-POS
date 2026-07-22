@@ -28,16 +28,21 @@ export default function EditQuotationPage() {
   const mode = quotation.status === 'DRAFT' ? 'edit' : 'revision';
 
   return (
-    <div className="space-y-5">
-      <PageHeader
-        title={mode === 'edit' ? `Edit ${quotation.revisionLabel}` : `Revise ${quotation.revisionLabel}`}
-        description={
-          mode === 'edit'
-            ? 'Change items, quantities, prices, or discounts. The original is updated.'
-            : 'Create a new revision — the previous version is preserved in history.'
+    <div className="h-full min-h-0">
+      <QuotationBuilder
+        mode={mode}
+        initial={quotation}
+        header={
+          <PageHeader
+            title={mode === 'edit' ? `Edit ${quotation.revisionLabel}` : `Revise ${quotation.revisionLabel}`}
+            description={
+              mode === 'edit'
+                ? 'Change items, quantities, prices, or discounts. The original is updated.'
+                : 'Create a new revision — the previous version is preserved in history.'
+            }
+          />
         }
       />
-      <QuotationBuilder mode={mode} initial={quotation} />
     </div>
   );
 }
