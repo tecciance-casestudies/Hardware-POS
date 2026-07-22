@@ -254,8 +254,10 @@ export function QuotationBuilder({ mode, initial }: Props) {
 
   return (
     <div className="grid gap-5 lg:grid-cols-[1.9fr_1fr]">
-      {/* Catalog + customer */}
-      <div className="space-y-3">
+      {/* Catalog + customer. min-w-0 lets this grid column shrink below its
+          content's intrinsic width so the chip rows scroll internally instead
+          of forcing the whole page to scroll horizontally. */}
+      <div className="min-w-0 space-y-3">
         <div className="flex flex-wrap items-center gap-2">
           <Select
             value={customerId}
@@ -419,7 +421,7 @@ export function QuotationBuilder({ mode, initial }: Props) {
       </div>
 
       {/* Quotation panel */}
-      <Card className="flex h-fit flex-col lg:sticky lg:top-6">
+      <Card className="flex h-fit min-w-0 flex-col lg:sticky lg:top-6">
         <CardHeader className="border-b border-border p-4">
           <CardTitle className="text-base">
             {mode === 'revision' ? 'New revision' : mode === 'edit' ? 'Edit quotation' : 'New quotation'}
