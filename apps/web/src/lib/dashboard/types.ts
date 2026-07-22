@@ -17,6 +17,10 @@ export interface DashboardMetric {
   label: string;
   /** Preformatted display value (currency already run through formatMoney). */
   value: string;
+  /** Raw numeric value — when present the card count-ups to it and `format` it. */
+  rawValue?: number;
+  /** Formatter used with `rawValue` for the animated display. */
+  format?: (n: number) => string;
   helpText?: string;
   comparison?: MetricComparison;
   status?: MetricStatus;
@@ -27,6 +31,10 @@ export interface DashboardMetric {
   footnote?: string;
   /** Route to navigate to on click. */
   destination?: string;
+  /** Strong surface treatment — reserve for one or two "hero" KPI cards only. */
+  surface?: 'hero' | 'aqua';
+  /** Icon-well accent colour; the card stays neutral, only the icon is coloured. */
+  iconAccent?: 'teal' | 'aqua' | 'info' | 'lime';
 }
 
 export type AlertSeverity = 'critical' | 'warning' | 'info';

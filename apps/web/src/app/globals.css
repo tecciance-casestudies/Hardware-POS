@@ -1,37 +1,284 @@
 @import 'tailwindcss';
 
 /*
- * Clean white SaaS POS theme.
- * Blue is reserved for primary actions; the canvas stays white/neutral.
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Axlo Digital design system — semantic token architecture.
+ *
+ * Three layers:
+ *   1. Primitive tokens  → the raw approved Axlo palette (never used directly
+ *      by components).
+ *   2. Semantic tokens   → purpose-named (--sem-*) values that reference the
+ *      primitives; light values in :root, dark overrides in [data-theme='dark'].
+ *   3. Utility mapping    → @theme maps Tailwind colour utilities (bg-primary,
+ *      text-brand-700, border-border, …) onto the semantic tokens, so every
+ *      component that already consumes those utilities re-themes automatically
+ *      and the same names resolve correctly in light AND dark.
+ *
+ * Components must consume the Tailwind utilities (semantic) — not raw hex.
+ * ─────────────────────────────────────────────────────────────────────────────
  */
+
+/* Attribute-based dark variant so `dark:` utilities follow our theme service. */
+@custom-variant dark (&:where([data-theme='dark'], [data-theme='dark'] *));
+
+:root {
+  color-scheme: light;
+
+  /* ── 1. Primitive tokens (approved Axlo palette) ─────────────────────────── */
+  --axlo-midnight: #0b1220;
+  --axlo-kinetic-teal: #006c68;
+  --axlo-flow-aqua: #00d4c7;
+  --axlo-volt-lime: #c7ff3d;
+  --axlo-cloud: #f4f7f7;
+  --axlo-slate: #5f6b75;
+  --axlo-white: #ffffff;
+
+  --gray-50: #f7f9fa;
+  --gray-100: #eef2f4;
+  --gray-200: #dce3e8;
+  --gray-300: #c4ced6;
+  --gray-400: #9aa8b3;
+  --gray-500: #738190;
+  --gray-600: #5f6b75;
+  --gray-700: #3c4856;
+  --gray-800: #1f2937;
+  --gray-900: #0b1220;
+
+  --sem-success: #12b76a;
+  --sem-warning: #f59e0b;
+  --sem-error: #e5484d;
+  --sem-info: #0ea5e9;
+
+  /* ── 2. Semantic tokens — LIGHT ──────────────────────────────────────────── */
+  /* Backgrounds & surfaces */
+  --sem-background-default: var(--axlo-white);
+  --sem-background-subtle: var(--axlo-cloud);
+  --sem-surface-default: var(--axlo-white);
+  --sem-surface-muted: var(--gray-100);
+
+  /* Text */
+  --sem-text-primary: var(--axlo-midnight);
+  --sem-text-secondary: var(--axlo-slate);
+  --sem-text-on-primary: var(--axlo-white);
+  --sem-text-on-accent: var(--axlo-midnight);
+
+  /* Borders */
+  --sem-border-default: var(--gray-200);
+  --sem-border-strong: var(--gray-300);
+
+  /* Action (Kinetic Teal) — hover/active derived centrally via color-mix. */
+  --sem-action-primary: var(--axlo-kinetic-teal);
+  --sem-action-primary-hover: color-mix(in srgb, var(--axlo-kinetic-teal), #000 12%);
+  --sem-action-primary-active: color-mix(in srgb, var(--axlo-kinetic-teal), #000 22%);
+
+  /* Accent (Flow Aqua) + highlight (Volt Lime) */
+  --sem-accent: var(--axlo-flow-aqua);
+  --sem-accent-soft: #e6f7f5;
+  --sem-highlight: var(--axlo-volt-lime);
+  --sem-highlight-soft: #f2ffd6;
+
+  /* Focus ring — Flow Aqua in both themes. */
+  --sem-focus-ring: var(--axlo-flow-aqua);
+
+  /* Teal/aqua tint ramp — active nav, chips, KPI icon wells. */
+  --sem-brand-50: #e6f7f5;
+  --sem-brand-100: #c9f0ec;
+  --sem-brand-200: #9fe4de;
+  --sem-brand-300: #5fd5cb;
+  --sem-brand-400: var(--axlo-flow-aqua);
+  --sem-brand-500: #00b3a9;
+  --sem-brand-600: #008c86;
+  --sem-brand-700: var(--axlo-kinetic-teal);
+  --sem-brand-800: #05504d;
+
+  /* Semantic soft backgrounds (pale tints for badges/alerts). */
+  --sem-success-soft: #e6f7ee;
+  --sem-warning-soft: #fdf1d9;
+  --sem-error-soft: #fce7e7;
+  --sem-info-soft: #e0f2fd;
+
+  /* Semantic hover (button fills). */
+  --sem-success-hover: color-mix(in srgb, var(--sem-success), #000 12%);
+  --sem-warning-hover: color-mix(in srgb, var(--sem-warning), #000 12%);
+  --sem-error-hover: color-mix(in srgb, var(--sem-error), #000 12%);
+
+  /* Elevation */
+  --sem-shadow-card: 0 1px 2px 0 rgb(11 18 32 / 0.04), 0 1px 3px 0 rgb(11 18 32 / 0.07);
+  --sem-shadow-card-hover: 0 8px 24px -8px rgb(0 108 104 / 0.18), 0 2px 6px -2px rgb(11 18 32 / 0.08);
+  --sem-shadow-pop: 0 16px 48px -12px rgb(11 18 32 / 0.24);
+
+  /* Chart series — distinct in light and dark. */
+  --sem-chart-1: var(--axlo-kinetic-teal);
+  --sem-chart-2: var(--axlo-flow-aqua);
+  --sem-chart-3: #8fbf1f; /* Volt Lime, darkened for text/legend contrast in light */
+  --sem-chart-4: var(--sem-info);
+  --sem-chart-5: var(--sem-warning);
+  --sem-chart-6: var(--axlo-slate);
+
+  /* Selected / hovered data-point highlight (Volt Lime, contrast-safe in light). */
+  --sem-chart-highlight: #7ba60f;
+
+  /* Payment-method identity colours — the doughnut + legend read as one system.
+   * These are data-identity hues (like a legend key), kept stable across themes
+   * except where dark contrast needs a lift (see the dark overrides). */
+  --pm-cash: var(--axlo-kinetic-teal); /* #006C68 */
+  --pm-card: var(--axlo-flow-aqua); /* #00D4C7 */
+  --pm-bank: var(--sem-info); /* #0EA5E9 */
+  --pm-qr: #8fbf1f; /* Volt Lime, contrast-tuned for light surfaces */
+  --pm-credit: var(--axlo-slate); /* #5F6B75 */
+  --pm-cheque: #7c8b97;
+  --pm-split: #00b3a9;
+  --pm-other: var(--gray-400); /* #9AA8B3 */
+
+  /* Category ranking ramp — a single Teal→Aqua intensity scale (Option B). */
+  --cat-1: var(--axlo-kinetic-teal);
+  --cat-2: #0a8f88;
+  --cat-3: #00b3a9;
+  --cat-4: #2fc6bb;
+  --cat-5: var(--axlo-flow-aqua);
+
+  /* Hero gradient surface (subtle). */
+  --sem-hero-gradient: linear-gradient(120deg, #eafaf8 0%, #f0faf4 45%, var(--axlo-cloud) 100%);
+}
+
+/* ── 2b. Semantic tokens — DARK (not a naive inversion) ────────────────────── */
+[data-theme='dark'] {
+  color-scheme: dark;
+
+  --sem-background-default: var(--axlo-midnight);
+  --sem-background-subtle: #111827;
+  --sem-surface-default: #1a2433;
+  --sem-surface-muted: #111827;
+
+  --sem-text-primary: var(--axlo-white);
+  --sem-text-secondary: var(--gray-300);
+  --sem-text-on-primary: var(--axlo-white);
+  --sem-text-on-accent: var(--axlo-midnight);
+
+  --sem-border-default: #2a3441;
+  --sem-border-strong: var(--gray-700);
+
+  --sem-action-primary: var(--axlo-kinetic-teal);
+  --sem-action-primary-hover: color-mix(in srgb, var(--axlo-kinetic-teal), #fff 12%);
+  --sem-action-primary-active: color-mix(in srgb, var(--axlo-kinetic-teal), #fff 20%);
+
+  --sem-accent: var(--axlo-flow-aqua);
+  --sem-accent-soft: #123331;
+  --sem-highlight: var(--axlo-volt-lime);
+  --sem-highlight-soft: #26330f;
+
+  /* Active nav = restrained teal surface + Flow Aqua text/icon. */
+  --sem-brand-50: #12332f;
+  --sem-brand-100: #16403b;
+  --sem-brand-200: #1d534c;
+  --sem-brand-300: #2b7a72;
+  --sem-brand-400: var(--axlo-flow-aqua);
+  --sem-brand-500: #17b8ac;
+  --sem-brand-600: var(--axlo-flow-aqua);
+  --sem-brand-700: var(--axlo-flow-aqua);
+  --sem-brand-800: #7fe9e0;
+
+  --sem-success-soft: #0f2a20;
+  --sem-warning-soft: #2c2210;
+  --sem-error-soft: #2c1516;
+  --sem-info-soft: #0b2735;
+
+  --sem-shadow-card: 0 1px 2px 0 rgb(0 0 0 / 0.4), 0 1px 3px 0 rgb(0 0 0 / 0.5);
+  --sem-shadow-card-hover: 0 8px 24px -8px rgb(0 0 0 / 0.6), 0 0 0 1px rgb(0 212 199 / 0.12);
+  --sem-shadow-pop: 0 16px 48px -12px rgb(0 0 0 / 0.7);
+
+  --sem-chart-1: var(--axlo-flow-aqua);
+  --sem-chart-2: #2fb8ae;
+  --sem-chart-3: var(--axlo-volt-lime);
+  --sem-chart-4: #38bdf8;
+  --sem-chart-5: var(--sem-warning);
+  --sem-chart-6: var(--gray-400);
+
+  --sem-chart-highlight: var(--axlo-volt-lime);
+
+  /* Dark: lift the darkest identity hues off the Midnight surface for contrast. */
+  --pm-cash: #17938c; /* lightened Kinetic Teal */
+  --pm-card: var(--axlo-flow-aqua);
+  --pm-bank: #38bdf8;
+  --pm-qr: var(--axlo-volt-lime);
+  --pm-credit: #8592a0;
+  --pm-cheque: #9aa8b3;
+  --pm-split: #2fc6bb;
+  --pm-other: var(--gray-400);
+
+  --cat-1: #17938c;
+  --cat-2: #1faea4;
+  --cat-3: #2fc6bb;
+  --cat-4: #57d8cf;
+  --cat-5: var(--axlo-flow-aqua);
+
+  --sem-hero-gradient: linear-gradient(120deg, #0f2a2a 0%, #10202e 55%, var(--axlo-midnight) 100%);
+}
+
+/* ── 3. Utility mapping — Tailwind colour utilities → semantic tokens ───────── */
 @theme {
-  --color-brand-50: #eff6ff;
-  --color-brand-100: #dbeafe;
-  --color-brand-500: #3b82f6;
-  --color-brand-600: #2563eb;
-  --color-brand-700: #1d4ed8;
+  /* Brand / teal ramp */
+  --color-brand-50: var(--sem-brand-50);
+  --color-brand-100: var(--sem-brand-100);
+  --color-brand-200: var(--sem-brand-200);
+  --color-brand-300: var(--sem-brand-300);
+  --color-brand-400: var(--sem-brand-400);
+  --color-brand-500: var(--sem-brand-500);
+  --color-brand-600: var(--sem-brand-600);
+  --color-brand-700: var(--sem-brand-700);
+  --color-brand-800: var(--sem-brand-800);
 
-  --color-primary: #2563eb;
-  --color-primary-hover: #1d4ed8;
-  --color-primary-foreground: #ffffff;
+  /* Action */
+  --color-primary: var(--sem-action-primary);
+  --color-primary-hover: var(--sem-action-primary-hover);
+  --color-primary-active: var(--sem-action-primary-active);
+  --color-primary-foreground: var(--sem-text-on-primary);
 
-  --color-canvas: #f8fafc;
-  --color-surface: #ffffff;
-  --color-card: #ffffff;
-  --color-foreground: #0f172a;
-  --color-muted: #f1f5f9;
-  --color-muted-foreground: #64748b;
-  --color-border: #e2e8f0;
-  --color-ring: #93c5fd;
+  /* Surfaces & canvas */
+  --color-canvas: var(--sem-background-subtle);
+  --color-surface: var(--sem-surface-default);
+  --color-card: var(--sem-surface-default);
+  --color-foreground: var(--sem-text-primary);
+  --color-muted: var(--sem-surface-muted);
+  --color-muted-foreground: var(--sem-text-secondary);
+  --color-border: var(--sem-border-default);
+  --color-border-strong: var(--sem-border-strong);
+  --color-ring: var(--sem-focus-ring);
 
-  --color-success: #16a34a;
-  --color-success-soft: #dcfce7;
-  --color-warning: #d97706;
-  --color-warning-soft: #fef3c7;
-  --color-danger: #dc2626;
-  --color-danger-soft: #fee2e2;
+  /* Accent / highlight */
+  --color-accent: var(--sem-accent);
+  --color-accent-soft: var(--sem-accent-soft);
+  --color-highlight: var(--sem-highlight);
+  --color-highlight-soft: var(--sem-highlight-soft);
+  --color-on-accent: var(--sem-text-on-accent);
 
-  --radius-card: 1rem;
+  /* Semantic */
+  --color-success: var(--sem-success);
+  --color-success-soft: var(--sem-success-soft);
+  --color-success-hover: var(--sem-success-hover);
+  --color-warning: var(--sem-warning);
+  --color-warning-soft: var(--sem-warning-soft);
+  --color-warning-hover: var(--sem-warning-hover);
+  --color-danger: var(--sem-error);
+  --color-danger-soft: var(--sem-error-soft);
+  --color-danger-hover: var(--sem-error-hover);
+  --color-info: var(--sem-info);
+  --color-info-soft: var(--sem-info-soft);
+
+  /* Chart palette */
+  --color-chart-1: var(--sem-chart-1);
+  --color-chart-2: var(--sem-chart-2);
+  --color-chart-3: var(--sem-chart-3);
+  --color-chart-4: var(--sem-chart-4);
+  --color-chart-5: var(--sem-chart-5);
+  --color-chart-6: var(--sem-chart-6);
+
+  /* Elevation + shape + motion */
+  --shadow-card: var(--sem-shadow-card);
+  --shadow-card-hover: var(--sem-shadow-card-hover);
+  --shadow-pop: var(--sem-shadow-pop);
+  --radius-card: 1.25rem;
+  --ease-out-soft: cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 html,
@@ -45,14 +292,103 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-/* Focus ring for keyboard users on interactive elements. */
+/* Focus ring for keyboard users — Flow Aqua, visible in both themes. */
 :where(button, a, input, [tabindex]):focus-visible {
   outline: 2px solid var(--color-ring);
   outline-offset: 2px;
 }
 
-/* Tailwind v4's preflight no longer sets a pointer cursor on buttons;
-   restore it for every enabled button/button-role element app-wide. */
+/* Restore the pointer cursor Tailwind v4 preflight drops on buttons. */
 :where(button, [role='button'], input[type='submit'], input[type='button']):not(:disabled) {
   cursor: pointer;
+}
+
+/* Signature-adjacent subtle brand surface for the dashboard hero. */
+.bg-hero-gradient {
+  background-image: var(--sem-hero-gradient);
+}
+
+/* Axlo signature gradient (Flow Aqua → Volt Lime) — use sparingly. */
+.bg-axlo-gradient {
+  background-image: linear-gradient(90deg, var(--axlo-flow-aqua) 0%, var(--axlo-volt-lime) 100%);
+}
+
+/* Staggered entrance for dashboard cards. */
+@keyframes dash-rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.dash-enter {
+  animation: dash-rise 0.45s var(--ease-out-soft) both;
+}
+
+/* Doughnut: draw the ring once on mount (neutralised under reduced-motion). */
+@keyframes doughnut-in {
+  from {
+    opacity: 0;
+    transform: rotate(-14deg) scale(0.94);
+  }
+  to {
+    opacity: 1;
+    transform: rotate(0deg) scale(1);
+  }
+}
+
+.doughnut-enter {
+  animation: doughnut-in 0.6s var(--ease-out-soft) both;
+  transform-origin: center;
+}
+
+/* Horizontal ranking bars grow from the left on mount. */
+@keyframes bar-grow {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+
+.bar-grow {
+  animation: bar-grow 0.55s var(--ease-out-soft) both;
+  transform-origin: left center;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dash-enter,
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+/*
+ * Print: always render on a white page regardless of the active theme. Force
+ * the light semantic tokens so shared components used inside A4 previews
+ * (badges, tables) stay ink-light and readable. Dedicated A4 documents carry
+ * their own light styling.
+ */
+@media print {
+  :root,
+  [data-theme='dark'] {
+    color-scheme: light;
+    --sem-background-default: #ffffff;
+    --sem-background-subtle: #ffffff;
+    --sem-surface-default: #ffffff;
+    --sem-surface-muted: var(--gray-100);
+    --sem-text-primary: var(--axlo-midnight);
+    --sem-text-secondary: var(--axlo-slate);
+    --sem-border-default: var(--gray-200);
+    --sem-brand-700: var(--axlo-kinetic-teal);
+  }
 }
