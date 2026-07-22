@@ -52,9 +52,10 @@ export function SaleA4Document({
   profile: DocumentProfile;
   meta: SaleDocumentMeta;
 }) {
+  // Axlo brand accent (Kinetic Teal) when the profile doesn't override it.
   const accent = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(profile.accentColor)
     ? profile.accentColor
-    : '#1d4ed8';
+    : '#006c68';
   const logo = resolveImageUrl(profile.logoUrl);
   const signature = resolveImageUrl(profile.signatureUrl);
   const stamp = resolveImageUrl(profile.stampUrl);

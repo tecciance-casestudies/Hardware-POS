@@ -7,7 +7,6 @@ import {
   ArrowRight,
   Clock,
   FileText,
-  Minus,
   NotebookPen,
   Plus,
   Search,
@@ -20,6 +19,7 @@ import {
 } from 'lucide-react';
 
 import { CustomerCombobox } from '@/components/pos/customer-combobox';
+import { QuantityStepper } from '@/components/pos/quantity-stepper';
 import { ItemDiscountDialog } from '@/components/pos/item-discount-dialog';
 import { ItemNoteDialog } from '@/components/pos/item-note-dialog';
 import { ManagerApprovalDialog } from '@/components/pos/manager-approval-dialog';
@@ -37,7 +37,7 @@ import { useCheckoutData, type ClientProduct } from '@/lib/catalog';
 import { ORDER_DISCOUNT_KEY, requestDiscountApproval } from '@/lib/discounts';
 import { resolveImageUrl } from '@/lib/products-api';
 import { Permission, discountLimitFor, withinDiscountLimit } from '@/lib/permissions';
-import { usePosCart } from '@/lib/pos-cart';
+import { stockCap, usePosCart } from '@/lib/pos-cart';
 import { cn, formatMoney, round2 } from '@/lib/utils';
 
 const PAGE_SIZES = [20, 30, 40, 50];
@@ -337,29 +337,14 @@ export default function PosPage() {
                 ) : null}
 
                 <div className="mt-2 flex items-center justify-between">
-                  <div className="flex items-center gap-1">
-                    <Button
-                      variant="outline"
-                      size="icon"
-                      className="h-9 w-9"
-                      aria-label="Decrease quantity"
-                      onClick={() => cart.changeQty(item.product.id, -1)}
-                    >
-                      <Minus className="h-4 w-4" />
-                    </Button>
-                    <span className="w-9 text-center text-sm font-semibold tabular-nums">
-                      {item.quantity}
-                    </span>
-                    <Button
-                      variant="outline"
-                      size="icon"
-                      className="h-9 w-9"
-                      aria-label="Increase quantity"
-                      onClick={() => cart.changeQty(item.product.id, 1)}
-                    >
-                      <Plus className="h-4 w-4" />
-                    </Button>
-                  </div>
+                  <QuantityStepper
+                    quantity={item.quantity}
+                    max={stockCap(item.product) ?? undefined}
+                    onDecrement={() => cart.changeQty(item.product.id, -1)}
+                    onIncrement={() => cart.changeQty(item.product.id, 1)}
+                    onSet={(q) => cart.setQty(item.product.id, q)}
+                  />
+
                   <div className="flex items-center gap-0.5">
                     <Button
                       variant="ghost"

@@ -45,11 +45,17 @@ export interface DashboardSummary {
 export interface PaymentMethodTotal {
   method: string;
   amount: number;
+  /** Number of payment records captured with this method in the window. */
+  count: number;
 }
 
 export interface RankedCategoryApi {
   label: string;
   amount: number;
+  /** Total units sold across the category in the window. */
+  units: number;
+  /** Number of distinct sales that included an item in this category. */
+  count: number;
 }
 
 export interface RankedProductApi {

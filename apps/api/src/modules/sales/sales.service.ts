@@ -1,6 +1,6 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { DiscountType, PaymentStatus, QuickBooksDocumentType } from '@hardware-pos/database';
-import type { Paginated } from '@hardware-pos/shared';
+import { CURRENCY_SYMBOL, type Paginated } from '@hardware-pos/shared';
 
 import { paginate } from '../../common/pagination';
 import { round2, sum2 } from '../../common/money';
@@ -129,6 +129,12 @@ export class SalesService {
 
     if (quickbooksDocumentType === 'INVOICE' && !customerId) {
       throw new BadRequestException('A customer is required for a credit/partial sale (Invoice)');
+    }
+
+    // A sale that leaves a balance is credit — the customer must be allowed
+    // credit and stay within their limit (including what they already owe).
+    if (balanceAmount > 0 && customerId) {
+      await this.assertWithinCreditLimit(tenantId, customerId, balanceAmount);
     }
 
     const persist: PersistSaleInput = {
@@ -327,6 +333,40 @@ export class SalesService {
     }
     if (customerId && !(await this.salesRepository.customerExists(tenantId, customerId))) {
       throw new BadRequestException(`Unknown customer ${customerId}`);
+    }
+  }
+
+  /**
+   * Enforce a customer's credit terms for a sale that leaves `newBalance`
+   * outstanding: they must be allowed credit, and (when a limit is set) their
+   * existing outstanding balance plus this sale must not exceed it. A null
+   * limit with credit allowed means unlimited.
+   */
+  private async assertWithinCreditLimit(
+    tenantId: string,
+    customerId: string,
+    newBalance: number,
+  ): Promise<void> {
+    const credit = await this.salesRepository.getCustomerCredit(tenantId, customerId);
+    if (!credit) return; // existence already validated by assertLocations
+
+    if (!credit.creditAllowed) {
+      throw new BadRequestException(
+        'This customer is not approved for credit. Take full payment to complete the sale.',
+      );
+    }
+
+    if (credit.creditLimit != null) {
+      const projected = round2(credit.outstanding + newBalance);
+      if (projected > credit.creditLimit) {
+        const available = round2(Math.max(0, credit.creditLimit - credit.outstanding));
+        throw new BadRequestException(
+          `Credit limit exceeded. Limit ${CURRENCY_SYMBOL} ${credit.creditLimit.toFixed(2)}, ` +
+            `already outstanding ${CURRENCY_SYMBOL} ${credit.outstanding.toFixed(2)}, ` +
+            `so only ${CURRENCY_SYMBOL} ${available.toFixed(2)} of credit is available for this sale ` +
+            `(this sale needs ${CURRENCY_SYMBOL} ${round2(newBalance).toFixed(2)}).`,
+        );
+      }
     }
   }
 }

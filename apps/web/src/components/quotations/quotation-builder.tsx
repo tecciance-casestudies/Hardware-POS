@@ -6,14 +6,22 @@ import { Plus, Search, Trash2, UserPlus, X } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { ChipRow } from '@/components/ui/chip-row';
 import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
 import { ProductImage } from '@/components/product-image';
+import { QuantityStepper } from '@/components/pos/quantity-stepper';
 import { QuickAddCustomerDialog } from '@/components/pos/quick-add-customer-dialog';
 import { useAuth } from '@/lib/auth';
 import { Permission } from '@/lib/permissions';
-import { fetchProducts, type ManagedProduct } from '@/lib/products-api';
+import {
+  fetchCategoryTree,
+  fetchProducts,
+  resolveImageUrl,
+  type CategoryNode,
+  type ManagedProduct,
+} from '@/lib/products-api';
 import { fetchCustomers, type ManagedCustomer } from '@/lib/customers-api';
 import {
   createQuotation,
@@ -44,6 +52,12 @@ interface Line {
 interface Props {
   mode: 'create' | 'edit' | 'revision';
   initial?: QuotationDetail;
+  /**
+   * Page heading rendered inside the catalog column, so the quotation panel
+   * can start at the very top of the content area (just below the app header)
+   * and claim the full height.
+   */
+  header?: React.ReactNode;
 }
 
 let keySeq = 0;
@@ -65,14 +79,17 @@ function lineFromProduct(p: ManagedProduct): Line {
   };
 }
 
-export function QuotationBuilder({ mode, initial }: Props) {
+export function QuotationBuilder({ mode, initial, header }: Props) {
   const { session, hasPermission } = useAuth();
   const router = useRouter();
 
   const [products, setProducts] = React.useState<ManagedProduct[]>([]);
+  const [categoryTree, setCategoryTree] = React.useState<CategoryNode[]>([]);
   const [customers, setCustomers] = React.useState<ManagedCustomer[]>([]);
   const [addedCustomers, setAddedCustomers] = React.useState<ManagedCustomer[]>([]);
   const [search, setSearch] = React.useState('');
+  const [category, setCategory] = React.useState('All');
+  const [subcategory, setSubcategory] = React.useState('All');
   const [quickAddOpen, setQuickAddOpen] = React.useState(false);
 
   const [customerId, setCustomerId] = React.useState(initial?.customer?.id ?? '');
@@ -112,9 +129,19 @@ export function QuotationBuilder({ mode, initial }: Props) {
 
   React.useEffect(() => {
     if (!session) return;
-    void fetchProducts(session, { pageSize: 200 }).then((r) =>
-      setProducts(r.items.filter((p) => p.isActive !== false)),
-    );
+    // Load the whole active catalog (paging past the API's 200 cap), same as
+    // the POS, so every product is browsable/searchable here too.
+    void (async () => {
+      const first = await fetchProducts(session, { page: 1, pageSize: 200, isActive: 'true' });
+      const all = [...first.items];
+      const totalPages = Math.ceil(first.total / 200);
+      for (let p = 2; p <= totalPages; p += 1) {
+        const next = await fetchProducts(session, { page: p, pageSize: 200, isActive: 'true' });
+        all.push(...next.items);
+      }
+      setProducts(all);
+    })();
+    void fetchCategoryTree(session, true).then(setCategoryTree).catch(() => setCategoryTree([]));
     void fetchCustomers(session, { pageSize: 200 }).then((r) => setCustomers(r.items));
   }, [session]);
 
@@ -154,10 +181,28 @@ export function QuotationBuilder({ mode, initial }: Props) {
   const canAddCustomer = hasPermission(Permission.CUSTOMER_MANAGE);
 
   const allCustomers = [...addedCustomers, ...customers];
+
+  // Resolve product category/subcategory names for the POS-style chip filters.
+  const catNameById = new Map(categoryTree.map((c) => [c.id, c.name]));
+  const subNameById = new Map<string, string>();
+  for (const c of categoryTree) for (const s of c.subcategories) subNameById.set(s.id, s.name);
+
+  const categories = ['All', ...categoryTree.map((c) => c.name)];
+  const activeCategory = categoryTree.find((c) => c.name === category);
+  const subcategories =
+    category !== 'All' && activeCategory && activeCategory.subcategories.length > 0
+      ? ['All', ...activeCategory.subcategories.map((s) => s.name)]
+      : [];
+
+  const q = search.trim().toLowerCase();
   const filteredProducts = products.filter((p) => {
-    const q = search.trim().toLowerCase();
-    if (!q) return true;
-    return p.name.toLowerCase().includes(q) || (p.sku ?? '').toLowerCase().includes(q);
+    const catName = (p.categoryId && catNameById.get(p.categoryId)) || 'Uncategorized';
+    const subName = (p.subcategoryId && subNameById.get(p.subcategoryId)) || null;
+    const matchesCat = category === 'All' || catName === category;
+    const matchesSub = subcategory === 'All' || subName === subcategory;
+    const matchesQuery =
+      !q || p.name.toLowerCase().includes(q) || (p.sku ?? '').toLowerCase().includes(q);
+    return matchesCat && matchesSub && matchesQuery;
   });
 
   function addProduct(p: ManagedProduct) {
@@ -167,6 +212,24 @@ export function QuotationBuilder({ mode, initial }: Props) {
         return prev.map((l) => (l.key === existing.key ? { ...l, quantity: l.quantity + 1 } : l));
       return [...prev, lineFromProduct(p)];
     });
+  }
+
+  /**
+   * A line's total (qty x unit price, minus its discount). Prefers the
+   * server-computed preview figure (the source of truth for rounding);
+   * falls back to a local estimate while the debounced preview loads.
+   */
+  function lineTotal(l: Line, index: number): number {
+    const fromPreview = preview?.items[index]?.lineTotal;
+    if (fromPreview != null) return fromPreview;
+    const subtotal = l.quantity * l.unitPrice;
+    const discount =
+      l.discountType === 'PERCENTAGE'
+        ? (subtotal * l.discountValue) / 100
+        : l.discountType === 'FIXED'
+          ? Math.min(l.discountValue, subtotal)
+          : 0;
+    return Math.round((subtotal - discount) * 100) / 100;
   }
 
   function patchLine(key: string, patch: Partial<Line>) {
@@ -214,9 +277,18 @@ export function QuotationBuilder({ mode, initial }: Props) {
   }
 
   return (
-    <div className="grid gap-5 lg:grid-cols-[1.9fr_1fr]">
-      {/* Catalog + customer */}
-      <div className="space-y-3">
+    <div className="flex min-h-0 flex-col gap-4 lg:grid lg:h-full lg:grid-cols-[1.9fr_1fr] lg:gap-5">
+      {/* Catalog + customer. min-w-0 lets this grid column shrink below its
+          content's intrinsic width so the chip rows scroll internally instead
+          of forcing the whole page to scroll horizontally. On lg+ the column
+          is height-locked: the header/search/chips stay pinned and only the
+          product grid below them scrolls. */}
+      <div className="flex min-h-0 min-w-0 flex-col">
+        <div className="lg:min-h-0 lg:flex-1 lg:overflow-y-auto lg:pr-0.5 lg:[scrollbar-width:thin]">
+        {header ? <div className="pb-3">{header}</div> : null}
+        {/* Sticky control bar: search + category chips pin to the top of the
+            scroll container; the page title above scrolls away with content. */}
+        <div className="sticky top-0 z-10 space-y-3 bg-canvas pb-3">
         <div className="flex flex-wrap items-center gap-2">
           <Select
             value={customerId}
@@ -252,48 +324,153 @@ export function QuotationBuilder({ mode, initial }: Props) {
           </div>
         </div>
 
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
-          {filteredProducts.slice(0, 60).map((p) => (
+        {/* Category + subcategory chips — same as the POS section. */}
+        <ChipRow activeKey={category} ariaLabel="categories">
+          {categories.map((c) => (
             <button
-              key={p.id}
-              onClick={() => addProduct(p)}
-              className="group flex flex-col overflow-hidden rounded-xl border border-border bg-card text-left shadow-sm transition-all hover:border-primary hover:shadow"
+              key={c}
+              data-active={category === c}
+              onClick={() => {
+                setCategory(c);
+                setSubcategory('All');
+              }}
+              className={cn(
+                'h-9 shrink-0 whitespace-nowrap rounded-full px-3.5 text-sm font-medium transition-colors',
+                category === c
+                  ? 'bg-primary text-primary-foreground'
+                  : 'bg-muted text-muted-foreground hover:bg-border',
+              )}
             >
-              <div className="flex flex-1 flex-col p-2">
-                <div className="line-clamp-2 min-h-8 text-xs font-medium leading-tight">{p.name}</div>
-                <div className="mt-0.5 truncate text-[11px] text-muted-foreground">{p.sku ?? ''}</div>
-                <div className="mt-1 flex items-center justify-between">
-                  <span className="text-sm font-semibold text-primary">
-                    {formatMoney(p.unitPrice)}
-                  </span>
-                  <Plus className="h-4 w-4 text-muted-foreground group-hover:text-primary" />
-                </div>
-              </div>
+              {c}
             </button>
           ))}
+        </ChipRow>
+        {subcategories.length > 0 ? (
+          <ChipRow activeKey={subcategory} ariaLabel="subcategories">
+            {subcategories.map((s) => (
+              <button
+                key={s}
+                data-active={subcategory === s}
+                onClick={() => setSubcategory(s)}
+                className={cn(
+                  'h-8 shrink-0 whitespace-nowrap rounded-full px-3 text-xs font-medium transition-colors',
+                  subcategory === s
+                    ? 'bg-primary text-primary-foreground'
+                    : 'bg-muted text-muted-foreground hover:bg-border',
+                )}
+              >
+                {s}
+              </button>
+            ))}
+          </ChipRow>
+        ) : null}
+        </div>
+
+        <div className="grid grid-cols-[repeat(auto-fill,minmax(9rem,1fr))] gap-2.5">
+          {filteredProducts.slice(0, 120).map((p) => {
+            const outOfStock = p.type === 'Inventory' && p.quantityOnHand <= 0;
+            const lowStock =
+              p.type === 'Inventory' &&
+              !outOfStock &&
+              p.reorderLevel != null &&
+              p.quantityOnHand <= p.reorderLevel;
+            return (
+              <div
+                key={p.id}
+                title={p.name}
+                className="group flex flex-col overflow-hidden rounded-xl border border-border bg-card text-left shadow-sm transition-all hover:border-primary hover:shadow"
+              >
+                <button
+                  type="button"
+                  onClick={() => addProduct(p)}
+                  disabled={outOfStock}
+                  aria-label={`Add ${p.name} to quotation`}
+                  className="relative block text-left disabled:cursor-not-allowed"
+                >
+                  <ProductImage
+                    src={resolveImageUrl(p.imageUrl)}
+                    alt={p.name}
+                    rounded="rounded-none"
+                    className={cn('aspect-[4/3] w-full border-0', outOfStock && 'opacity-60')}
+                  />
+                  {outOfStock ? (
+                    <span className="absolute right-1.5 top-1.5 rounded-md bg-danger px-1.5 py-0.5 text-[10px] font-semibold text-white">
+                      Out of Stock
+                    </span>
+                  ) : lowStock ? (
+                    <span className="absolute right-1.5 top-1.5 rounded-md bg-warning-soft px-1.5 py-0.5 text-[10px] font-semibold text-warning">
+                      Low Stock
+                    </span>
+                  ) : null}
+                </button>
+                <div className="flex flex-1 flex-col p-2.5">
+                  <div className="line-clamp-2 min-h-8 text-xs font-medium leading-tight">
+                    {p.name}
+                  </div>
+                  <div className="mt-0.5 truncate text-[11px] text-muted-foreground">
+                    {p.sku ?? ''}
+                  </div>
+                  <div className="mt-1.5 flex items-end justify-between gap-1">
+                    <span className="text-sm font-semibold text-primary">
+                      {formatMoney(p.unitPrice)}
+                    </span>
+                    <span
+                      className={cn(
+                        'text-[11px]',
+                        outOfStock ? 'font-medium text-danger' : 'text-muted-foreground',
+                      )}
+                    >
+                      {p.type !== 'Inventory'
+                        ? p.type === 'Service'
+                          ? 'Service'
+                          : '—'
+                        : outOfStock
+                          ? 'Out'
+                          : p.quantityOnHand.toLocaleString()}
+                    </span>
+                  </div>
+                  <Button
+                    variant={outOfStock ? 'outline' : 'primary'}
+                    size="sm"
+                    fullWidth
+                    disabled={outOfStock}
+                    className="mt-2"
+                    onClick={() => addProduct(p)}
+                    leftIcon={outOfStock ? undefined : <Plus className="h-4 w-4" />}
+                  >
+                    {outOfStock ? 'Out of Stock' : 'Add'}
+                  </Button>
+                </div>
+              </div>
+            );
+          })}
           {filteredProducts.length === 0 && (
             <p className="col-span-full py-8 text-center text-sm text-muted-foreground">
-              No products match “{search}”.
+              No products match your search.
             </p>
           )}
         </div>
+        </div>
       </div>
 
-      {/* Quotation panel */}
-      <Card className="flex h-fit flex-col lg:sticky lg:top-6">
-        <CardHeader className="border-b border-border p-4">
+      {/* Quotation panel — spans the full content height on lg (it starts just
+          below the app header, beside the catalog column); its middle section
+          scrolls internally so the totals and actions always stay visible. */}
+      <Card className="flex min-w-0 flex-col lg:h-full lg:min-h-0">
+        <CardHeader className="shrink-0 border-b border-border p-4">
           <CardTitle className="text-base">
             {mode === 'revision' ? 'New revision' : mode === 'edit' ? 'Edit quotation' : 'New quotation'}
           </CardTitle>
         </CardHeader>
 
-        <CardContent className="max-h-[46vh] space-y-2.5 overflow-auto p-3">
+        <div className="lg:min-h-0 lg:flex-1 lg:overflow-y-auto lg:[scrollbar-width:thin]">
+        <CardContent className="space-y-2.5 p-3">
           {lines.length === 0 && (
             <p className="py-8 text-center text-sm text-muted-foreground">
               Add products to build the quotation.
             </p>
           )}
-          {lines.map((l) => (
+          {lines.map((l, index) => (
             <div key={l.key} className="rounded-xl border border-border p-2.5">
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0">
@@ -308,29 +485,29 @@ export function QuotationBuilder({ mode, initial }: Props) {
                   <Trash2 className="h-4 w-4" />
                 </button>
               </div>
+              {/* Qty (stepper, like the POS cart) + read-only unit price. */}
+              <div className="mt-2 flex items-center justify-between gap-2">
+                <div>
+                  <div className="text-[11px] text-muted-foreground">Qty</div>
+                  <div className="mt-0.5">
+                    <QuantityStepper
+                      quantity={l.quantity}
+                      onDecrement={() =>
+                        patchLine(l.key, { quantity: Math.max(1, l.quantity - 1) })
+                      }
+                      onIncrement={() => patchLine(l.key, { quantity: l.quantity + 1 })}
+                      onSet={(qty) => patchLine(l.key, { quantity: qty })}
+                    />
+                  </div>
+                </div>
+                <div className="text-right">
+                  <div className="text-[11px] text-muted-foreground">Unit price</div>
+                  <div className="mt-0.5 h-9 text-sm font-semibold tabular-nums leading-9">
+                    {formatMoney(l.unitPrice)}
+                  </div>
+                </div>
+              </div>
               <div className="mt-2 grid grid-cols-2 gap-2">
-                <label className="text-[11px] text-muted-foreground">
-                  Qty
-                  <Input
-                    type="number"
-                    min={0.001}
-                    step="any"
-                    value={l.quantity}
-                    onChange={(e) => patchLine(l.key, { quantity: Number(e.target.value) })}
-                    className="mt-0.5 h-9"
-                  />
-                </label>
-                <label className="text-[11px] text-muted-foreground">
-                  Unit price
-                  <Input
-                    type="number"
-                    min={0}
-                    step="any"
-                    value={l.unitPrice}
-                    onChange={(e) => patchLine(l.key, { unitPrice: Number(e.target.value) })}
-                    className="mt-0.5 h-9"
-                  />
-                </label>
                 <label className="text-[11px] text-muted-foreground">
                   Discount
                   <Select
@@ -364,6 +541,15 @@ export function QuotationBuilder({ mode, initial }: Props) {
                 placeholder="Item note (optional)"
                 className="mt-2 h-9 text-xs"
               />
+              {/* Line total: qty x unit price, net of this line's discount. */}
+              <div className="mt-2 flex items-center justify-between border-t border-border pt-2 text-sm">
+                <span className="text-[11px] text-muted-foreground">
+                  Total{l.quantity > 1 ? ` (${l.quantity} × ${formatMoney(l.unitPrice)})` : ''}
+                </span>
+                <span className="font-semibold tabular-nums text-primary">
+                  {formatMoney(lineTotal(l, index))}
+                </span>
+              </div>
             </div>
           ))}
         </CardContent>
@@ -424,7 +610,11 @@ export function QuotationBuilder({ mode, initial }: Props) {
               className="h-9 text-xs"
             />
           )}
+        </div>
+        </div>
 
+        {/* Pinned footer: totals + actions are always visible. */}
+        <div className="shrink-0 space-y-2.5 border-t border-border p-3">
           <div className="space-y-1 rounded-xl bg-muted/60 p-3 text-sm">
             <Row label="Subtotal" value={formatMoney(preview?.subtotal ?? 0)} />
             {(preview?.productDiscountTotal ?? 0) > 0 && (
