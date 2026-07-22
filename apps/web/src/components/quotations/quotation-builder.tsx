@@ -265,9 +265,12 @@ export function QuotationBuilder({ mode, initial, header }: Props) {
           of forcing the whole page to scroll horizontally. On lg+ the column
           is height-locked: the header/search/chips stay pinned and only the
           product grid below them scrolls. */}
-      <div className="flex min-h-0 min-w-0 flex-col gap-3">
-        <div className="shrink-0 space-y-3">
-        {header}
+      <div className="flex min-h-0 min-w-0 flex-col">
+        <div className="lg:min-h-0 lg:flex-1 lg:overflow-y-auto lg:pr-0.5 lg:[scrollbar-width:thin]">
+        {header ? <div className="pb-3">{header}</div> : null}
+        {/* Sticky control bar: search + category chips pin to the top of the
+            scroll container; the page title above scrolls away with content. */}
+        <div className="sticky top-0 z-10 space-y-3 bg-canvas pb-3">
         <div className="flex flex-wrap items-center gap-2">
           <Select
             value={customerId}
@@ -345,9 +348,6 @@ export function QuotationBuilder({ mode, initial, header }: Props) {
         ) : null}
         </div>
 
-        {/* Product grid — the only vertical scroll region on lg+; the header,
-            search row, and category chips above stay pinned. */}
-        <div className="lg:min-h-0 lg:flex-1 lg:overflow-y-auto lg:pr-0.5 lg:[scrollbar-width:thin]">
         <div className="grid grid-cols-[repeat(auto-fill,minmax(9rem,1fr))] gap-2.5">
           {filteredProducts.slice(0, 120).map((p) => {
             const outOfStock = p.type === 'Inventory' && p.quantityOnHand <= 0;
