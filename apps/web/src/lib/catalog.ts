@@ -109,6 +109,33 @@ function normalizeApi(
   };
 }
 
+/** The API caps `pageSize` at this value, so larger catalogs need paging. */
+const MAX_PAGE_SIZE = 200;
+
+/**
+ * Fetch the whole product catalog for the POS by paging through all results.
+ * The POS filters/searches client-side over this list, so it must load every
+ * product — a single capped request would silently drop everything past the
+ * first page (products sorted alphabetically beyond the cap wouldn't appear).
+ */
+async function fetchAllProducts(auth: { token: string; tenantId: string }): Promise<ApiProduct[]> {
+  const first = await api.get<{ items: ApiProduct[]; total: number }>(
+    `/products?page=1&pageSize=${MAX_PAGE_SIZE}`,
+    auth,
+  );
+  const items = [...first.items];
+  const totalPages = Math.ceil(first.total / MAX_PAGE_SIZE);
+  if (totalPages > 1) {
+    const rest = await Promise.all(
+      Array.from({ length: totalPages - 1 }, (_, i) =>
+        api.get<{ items: ApiProduct[] }>(`/products?page=${i + 2}&pageSize=${MAX_PAGE_SIZE}`, auth),
+      ),
+    );
+    for (const page of rest) items.push(...page.items);
+  }
+  return items;
+}
+
 /** Loads catalog data for the checkout screen from the backend product API. */
 export function useCheckoutData(session: Session): CheckoutData {
   const [refreshKey, setRefreshKey] = React.useState(0);
@@ -133,8 +160,8 @@ export function useCheckoutData(session: Session): CheckoutData {
 
     (async () => {
       try {
-        const [prod, cats, settings] = await Promise.all([
-          api.get<{ items: ApiProduct[] }>('/products?pageSize=200', auth),
+        const [productItems, cats, settings] = await Promise.all([
+          fetchAllProducts(auth),
           api.get<ApiCategory[]>('/categories', auth),
           api.get<PosSettings>('/settings', auth),
         ]);
@@ -153,7 +180,7 @@ export function useCheckoutData(session: Session): CheckoutData {
               .filter((s) => s.isActive !== false)
               .map((s) => ({ id: s.id, name: s.name })),
           }));
-        const products = prod.items.map((p) => normalizeApi(p, catNames, subNames));
+        const products = productItems.map((p) => normalizeApi(p, catNames, subNames));
         setData({
           loading: false,
           error: null,
