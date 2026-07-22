@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { DiscountType, Prisma, QuotationStatus } from '@hardware-pos/database';
 
 import { PrismaService } from '../../prisma/prisma.service';
+import { nextDocumentNumber, padSequence } from '../../common/document-sequence';
 
 /** One persisted quotation line (already computed + snapshotted by the service). */
 export interface PersistQuotationLine {
@@ -184,8 +185,7 @@ export class QuotationsRepository {
     tenantId: string,
     format: string,
   ): Promise<string> {
-    const count = await tx.quotation.count({ where: { tenantId } });
-    const seq = String(count + 1).padStart(6, '0');
+    const seq = padSequence(await nextDocumentNumber(tx, tenantId, 'QUOTATION'));
     return (format || 'QT-{seq}').replace('{seq}', seq);
   }
 

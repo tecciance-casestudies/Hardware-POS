@@ -74,7 +74,7 @@ export class DashboardRepository {
     from: Date,
     to: Date,
     cashierId?: string,
-  ): Promise<{ method: string; amount: number }[]> {
+  ): Promise<{ method: string; amount: number; count: number }[]> {
     const grouped = await this.prisma.payment.groupBy({
       by: ['method'],
       where: {
@@ -86,8 +86,13 @@ export class DashboardRepository {
         },
       },
       _sum: { amount: true },
+      _count: { _all: true },
     });
-    return grouped.map((g) => ({ method: g.method, amount: Number(g._sum.amount ?? 0) }));
+    return grouped.map((g) => ({
+      method: g.method,
+      amount: Number(g._sum.amount ?? 0),
+      count: g._count._all,
+    }));
   }
 
   /** Revenue per top-level category within the window. */
@@ -96,10 +101,14 @@ export class DashboardRepository {
     from: Date,
     to: Date,
     limit: number,
-  ): Promise<{ label: string; amount: number }[]> {
-    return this.prisma.$queryRaw<{ label: string; amount: number }[]>(Prisma.sql`
+  ): Promise<{ label: string; amount: number; units: number; count: number }[]> {
+    return this.prisma.$queryRaw<
+      { label: string; amount: number; units: number; count: number }[]
+    >(Prisma.sql`
       SELECT COALESCE(c.name, 'Uncategorized') AS label,
-             COALESCE(SUM(si."lineTotal"), 0)::float AS amount
+             COALESCE(SUM(si."lineTotal"), 0)::float AS amount,
+             COALESCE(SUM(si.quantity), 0)::float AS units,
+             COUNT(DISTINCT s.id)::int AS count
       FROM "SaleItem" si
       JOIN "Sale" s ON s.id = si."saleId"
       LEFT JOIN "Product" p ON p.id = si."productId"

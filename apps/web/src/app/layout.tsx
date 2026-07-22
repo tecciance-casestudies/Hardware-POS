@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 
 import { AuthProvider } from '@/lib/auth';
+import { ThemeProvider, themeInitScript } from '@/lib/theme';
 
 import './globals.css';
 
@@ -15,9 +16,15 @@ export default function RootLayout({
   children: React.ReactNode;
 }>): React.JSX.Element {
   return (
-    <html lang="en">
+    <html lang="en" suppressHydrationWarning>
+      <head>
+        {/* Applies the stored theme before first paint — no flash of wrong theme. */}
+        <script dangerouslySetInnerHTML={{ __html: themeInitScript }} />
+      </head>
       <body>
-        <AuthProvider>{children}</AuthProvider>
+        <ThemeProvider>
+          <AuthProvider>{children}</AuthProvider>
+        </ThemeProvider>
       </body>
     </html>
   );

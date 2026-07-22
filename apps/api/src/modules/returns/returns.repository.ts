@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { PrintJob, Prisma } from '@hardware-pos/database';
 
 import { PrismaService } from '../../prisma/prisma.service';
+import { nextDocumentNumber, padSequence } from '../../common/document-sequence';
 import { SyncQueueService } from '../sync/queue/sync-queue.service';
 import { PersistReturnInput, ReturnsListFilter } from './returns.types';
 
@@ -341,7 +342,6 @@ export class ReturnsRepository {
     client: Prisma.TransactionClient,
     tenantId: string,
   ): Promise<string> {
-    const count = await client.return.count({ where: { tenantId } });
-    return `R-${String(count + 1).padStart(6, '0')}`;
+    return `R-${padSequence(await nextDocumentNumber(client, tenantId, 'RETURN'))}`;
   }
 }

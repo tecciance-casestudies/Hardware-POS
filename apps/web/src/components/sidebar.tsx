@@ -5,7 +5,7 @@ import { usePathname } from 'next/navigation';
 import { PanelLeftClose, PanelLeftOpen, Store } from 'lucide-react';
 import * as React from 'react';
 
-import { NAV_ITEMS } from '@/lib/nav';
+import { NAV_GROUPS } from '@/lib/nav';
 import { useAuth } from '@/lib/auth';
 import { useSidebar } from '@/lib/sidebar';
 import { cn } from '@/lib/utils';
@@ -38,30 +38,59 @@ function Brand({ collapsed }: { collapsed?: boolean }) {
 function NavList({ collapsed }: { collapsed?: boolean }) {
   const pathname = usePathname();
   const { hasPermission } = useAuth();
-  const items = NAV_ITEMS.filter((item) => !item.permission || hasPermission(item.permission));
+
+  const groups = NAV_GROUPS.map((group) => ({
+    ...group,
+    items: group.items.filter((item) => !item.permission || hasPermission(item.permission)),
+  })).filter((group) => group.items.length > 0);
 
   return (
-    <nav className="flex-1 space-y-1 p-3">
-      {items.map((item) => {
-        const active = pathname === item.href || pathname.startsWith(`${item.href}/`);
-        return (
-          <Link
-            key={item.href}
-            href={item.href}
-            title={collapsed ? item.label : undefined}
-            className={cn(
-              'flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition-colors',
-              collapsed && 'justify-center gap-0',
-              active
-                ? 'bg-brand-50 text-brand-700'
-                : 'text-muted-foreground hover:bg-muted hover:text-foreground',
-            )}
-          >
-            <item.icon className="h-5 w-5 shrink-0" />
-            {!collapsed ? <span>{item.label}</span> : null}
-          </Link>
-        );
-      })}
+    <nav className="flex-1 overflow-y-auto p-3">
+      {groups.map((group, gi) => (
+        <div key={group.label ?? `group-${gi}`} className={cn(gi > 0 && 'mt-4')}>
+          {group.label && !collapsed ? (
+            <p className="px-3 pb-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground/70">
+              {group.label}
+            </p>
+          ) : null}
+          {group.label && collapsed && gi > 0 ? (
+            <div className="mx-auto mb-2 h-px w-6 bg-border" aria-hidden />
+          ) : null}
+          <div className="space-y-1">
+            {group.items.map((item) => {
+              const active = pathname === item.href || pathname.startsWith(`${item.href}/`);
+              return (
+                <Link
+                  key={item.href}
+                  href={item.href}
+                  title={collapsed ? item.label : undefined}
+                  aria-current={active ? 'page' : undefined}
+                  className={cn(
+                    'group/nav relative flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition-colors',
+                    collapsed && 'justify-center gap-0',
+                    active
+                      ? 'bg-brand-50 text-brand-700'
+                      : 'text-muted-foreground hover:bg-muted hover:text-foreground',
+                  )}
+                >
+                  {/* Active rail accent. */}
+                  {active ? (
+                    <span
+                      className={cn(
+                        'absolute left-0 top-1/2 h-5 w-1 -translate-y-1/2 rounded-r-full bg-primary',
+                        collapsed && 'left-0',
+                      )}
+                      aria-hidden
+                    />
+                  ) : null}
+                  <item.icon className="h-5 w-5 shrink-0" />
+                  {!collapsed ? <span>{item.label}</span> : null}
+                </Link>
+              );
+            })}
+          </div>
+        </div>
+      ))}
     </nav>
   );
 }

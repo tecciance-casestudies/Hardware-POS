@@ -2,6 +2,7 @@ import { BadRequestException, Injectable } from '@nestjs/common';
 import { Prisma, Product } from '@hardware-pos/database';
 
 import { PrismaService } from '../../prisma/prisma.service';
+import { nextDocumentNumber, padSequence } from '../../common/document-sequence';
 import { SyncQueueService } from '../sync/queue/sync-queue.service';
 import { ComputedLine, PersistSaleInput, SalesListFilter } from './sales.types';
 
@@ -121,6 +122,38 @@ export class SalesRepository {
       where: { id: customerId, tenantId },
       select: { id: true },
     });
+  }
+
+  /**
+   * A customer's credit terms plus how much they currently owe (sum of unpaid
+   * balances on their completed sales). Used to enforce the credit limit before
+   * a new credit/partial sale is accepted.
+   */
+  async getCustomerCredit(
+    tenantId: string,
+    customerId: string,
+  ): Promise<{ creditAllowed: boolean; creditLimit: number | null; outstanding: number } | null> {
+    const customer = await this.prisma.customer.findFirst({
+      where: { id: customerId, tenantId },
+      select: { creditAllowed: true, creditLimit: true },
+    });
+    if (!customer) return null;
+
+    const agg = await this.prisma.sale.aggregate({
+      where: {
+        tenantId,
+        customerId,
+        status: 'COMPLETED',
+        paymentStatus: { in: ['UNPAID', 'PARTIAL'] },
+      },
+      _sum: { balanceAmount: true },
+    });
+
+    return {
+      creditAllowed: customer.creditAllowed,
+      creditLimit: customer.creditLimit != null ? Number(customer.creditLimit) : null,
+      outstanding: agg._sum.balanceAmount != null ? Number(agg._sum.balanceAmount) : 0,
+    };
   }
 
   // ── writes ─────────────────────────────────────────────────────────────────
@@ -332,8 +365,7 @@ export class SalesRepository {
     client: Prisma.TransactionClient | PrismaService,
     tenantId: string,
   ): Promise<string> {
-    const count = await client.sale.count({ where: { tenantId } });
-    return `S-${String(count + 1).padStart(6, '0')}`;
+    return `S-${padSequence(await nextDocumentNumber(client, tenantId, 'SALE'))}`;
   }
 }
 
