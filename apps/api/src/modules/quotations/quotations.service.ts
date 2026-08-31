@@ -13,6 +13,7 @@ import { customerAddressLine } from '../../common/customer-display';
 import { paginate } from '../../common/pagination';
 import { AuditLogService } from '../audit-log/audit-log.service';
 import { AuthenticatedUser } from '../auth/auth.types';
+import { isAdminLevelRole } from '../auth/permissions';
 import { SettingsService } from '../settings/settings.service';
 import { CompleteSaleDto } from '../sales/dto/complete-sale.dto';
 import { SalesService } from '../sales/sales.service';
@@ -375,10 +376,10 @@ export class QuotationsService {
       throw new BadRequestException('A cancelled quotation cannot be converted');
     }
     if (row.convertedSaleId) {
-      const isAdmin = actor.role === 'OWNER' || actor.role === 'ADMIN';
+      const isAdmin = isAdminLevelRole(actor.role);
       if (!dto.override || !isAdmin) {
         throw new ConflictException(
-          'This quotation has already been converted to a sale. An owner/admin can override.',
+          'This quotation has already been converted to a sale. Someone with owner-level access can override.',
         );
       }
     }

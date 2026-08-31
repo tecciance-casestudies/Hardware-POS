@@ -6,6 +6,7 @@ Use `[x]` pass, `[!]` fail (add a note), `[-]` blocked/N-A.
 **Build under test:** ________  **Date:** ________  **Tester:** ________  **Env:** ☐ local ☐ staging
 
 **Test accounts** (tenant `tnt_dev`): Owner `owner@hardwarepos.test`/`password123` ·
+Salesperson `salesperson@hardwarepos.test`/`password123` ·
 Accountant `accountant@hardwarepos.test`/`password123` · Manager PIN `2222` · Cashier PIN `1111`.
 
 **Preconditions**
@@ -103,6 +104,8 @@ Accountant `accountant@hardwarepos.test`/`password123` · Manager PIN `2222` · 
 - [ ] **Manager**: can approve discounts; cannot connect QuickBooks or run product sync.
 - [ ] **Accountant**: can view **sync logs** and **QuickBooks status**; cannot create sales or take payment.
 - [ ] **Owner/Admin**: full access — connect QuickBooks, sync products/sales, settings, users.
+- [ ] **Salesperson**: identical to Owner on every check above — same nav, same QuickBooks
+      connect/sync access, same settings and user management, unlimited discounts.
 - [ ] Deep-linking to a forbidden route (e.g. Cashier → `/quickbooks/settings`) is blocked/redirected.
 - [ ] Directly calling a forbidden API returns **403**; missing token returns **401**.
 

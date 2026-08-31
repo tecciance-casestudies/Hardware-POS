@@ -27,6 +27,7 @@ enum UserRole {
   ADMIN
   OWNER
   ACCOUNTANT
+  SALESPERSON
 }
 
 enum PaymentMethod {

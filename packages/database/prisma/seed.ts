@@ -61,6 +61,18 @@ async function main(): Promise<void> {
       branchId: null,
     },
     {
+      // Owner-equivalent role, so it mirrors the owner's credentials exactly:
+      // email + password, no PIN. A 4-digit PIN is a weak credential for an
+      // account holding every permission, and `POST /auth/pin-login` is public.
+      id: 'usr_salesperson',
+      name: 'Salesperson',
+      email: 'salesperson@hardwarepos.test',
+      role: UserRole.SALESPERSON,
+      passwordHash: password123,
+      pinHash: null,
+      branchId: null,
+    },
+    {
       id: 'usr_manager',
       name: 'Manager',
       email: null as string | null,
@@ -141,6 +153,7 @@ async function main(): Promise<void> {
   console.log('Login users:');
   console.log('  Owner       owner@hardwarepos.test / password123');
   console.log('  Accountant  accountant@hardwarepos.test / password123');
+  console.log('  Salesperson salesperson@hardwarepos.test / password123');
   console.log('  Manager     PIN 2222  (x-tenant-id: ' + tenant.id + ')');
   console.log('  Cashier     PIN 1111  (x-tenant-id: ' + tenant.id + ')');
   /* eslint-enable no-console */

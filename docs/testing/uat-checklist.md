@@ -12,6 +12,7 @@ or **Rejected** and add comments. Nothing here requires technical knowledge.
 | Who | How they sign in |
 | --- | --- |
 | Owner/Manager | Email + password |
+| Salesperson | Email + password |
 | Cashier | 4-digit PIN |
 | Accountant | Email + password |
 
@@ -85,6 +86,7 @@ or **Rejected** and add comments. Nothing here requires technical knowledge.
 - **Managers** can approve discounts.
 - **Accountants** can review sync logs and QuickBooks status.
 - **Owners/Admins** can do everything, including connecting QuickBooks and managing users.
+- **Salespeople** have the same access as an owner.
 
 **Accept?** ☐ Yes ☐ No — Comments: ____________________
 

@@ -38,7 +38,7 @@ PIN-based staff accounts.
 | id          | uuid PK   |                                               |
 | name        | string    |                                               |
 | pinHash     | string    | Hashed PIN (never stored in plaintext)        |
-| role        | UserRole  | `CASHIER` \| `MANAGER` \| `ADMIN`             |
+| role        | UserRole  | `CASHIER` \| `MANAGER` \| `ADMIN` \| `OWNER` \| `ACCOUNTANT` \| `SALESPERSON` |
 | isActive    | boolean   | default `true`                                |
 | createdAt   | datetime  |                                               |
 | updatedAt   | datetime  |                                               |

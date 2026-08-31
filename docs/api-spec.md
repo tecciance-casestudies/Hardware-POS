@@ -31,7 +31,7 @@ Two login methods issue the same bearer JWT (payload: `sub`, `tenantId`, `role`)
 `Authorization: Bearer <token>` on all other calls; the tenant is taken from the token.
 
 ```
-POST /v1/auth/login                   # email + password (owner / admin / accountant)
+POST /v1/auth/login                   # email + password (owner / admin / salesperson / accountant)
 body:  { "email": "owner@hardwarepos.test", "password": "password123" }
 200 →  { "data": { "token": "...", "user": { "id", "tenantId", "name", "email", "role" } } }
 401 →  invalid email or password
@@ -51,11 +51,11 @@ GET  /v1/auth/me                      # current user + effective permissions
 Each sale line may carry a manual discount (`PERCENTAGE` or `FIXED`), a `discountReason`, and —
 when it exceeds the operator's limit — an approver. Per-role limits (percentage of the line):
 
-| Role              | Max discount without approval |
-| ----------------- | ----------------------------- |
-| Cashier / Accountant | 0%                         |
-| Manager           | 15%                           |
-| Owner / Admin     | unlimited                     |
+| Role                         | Max discount without approval |
+| ---------------------------- | ----------------------------- |
+| Cashier / Accountant         | 0%                            |
+| Manager                      | 15%                           |
+| Owner / Admin / Salesperson  | unlimited                     |
 
 If a line's discount exceeds the acting user's limit, sale create returns **403** with a
 machine-readable body so the front-end can pop a manager-PIN modal:
@@ -84,16 +84,19 @@ already recorded on the draft line — no re-approval needed.
 
 ### Roles & permissions
 
-Roles: `OWNER`, `ADMIN`, `MANAGER`, `CASHIER`, `ACCOUNTANT`. Routes are protected by a global
-JWT guard plus role/permission guards. Summary of enforced access:
+Roles: `OWNER`, `ADMIN`, `SALESPERSON`, `MANAGER`, `CASHIER`, `ACCOUNTANT`. Routes are
+protected by a global JWT guard plus role/permission guards. `SALESPERSON` is an
+owner-equivalent role — it carries exactly the `OWNER` permission set, the same
+unlimited discount ceiling, and the same admin-level overrides. Summary of enforced
+access:
 
-| Capability                         | Roles                          |
-| ---------------------------------- | ------------------------------ |
-| Create sales / take payments       | Cashier, Manager, Owner, Admin |
-| Approve high discounts             | Manager, Owner, Admin          |
-| View sync logs & QuickBooks status | Accountant, Owner, Admin       |
-| Connect QuickBooks / manage users / settings | Owner, Admin         |
-| Everything                         | Owner, Admin                   |
+| Capability                         | Roles                                       |
+| ---------------------------------- | ------------------------------------------- |
+| Create sales / take payments       | Cashier, Manager, Owner, Admin, Salesperson |
+| Approve high discounts             | Manager, Owner, Admin, Salesperson          |
+| View sync logs & QuickBooks status | Accountant, Owner, Admin, Salesperson       |
+| Connect QuickBooks / manage users / settings | Owner, Admin, Salesperson         |
+| Everything                         | Owner, Admin, Salesperson                   |
 
 Unauthenticated → `401`; authenticated but not permitted → `403`.
 
@@ -117,7 +120,7 @@ GET /v1/products/barcode/{barcode}
 GET /v1/products/{id}
 200 → single product   |   404 → not found
 
-POST /v1/products/sync/mock            # simulate a QuickBooks catalog pull (owner/admin only)
+POST /v1/products/sync/mock            # simulate a QuickBooks catalog pull (owner-level roles only)
 200 → { "data": { "created", "updated", "total", "categories" } }
 403 → lacks quickbooks:manage
 
@@ -240,7 +243,7 @@ Real Intuit OAuth 2.0. Configure `QUICKBOOKS_CLIENT_ID`, `QUICKBOOKS_CLIENT_SECR
 refresh tokens are stored **encrypted at rest** (AES-256-GCM) and never returned to the client.
 
 ```
-GET  /v1/quickbooks/connect            # owner/admin — 302 → Intuit authorization screen
+GET  /v1/quickbooks/connect            # owner/admin/salesperson — 302 → Intuit authorization screen
                                        # state is a signed, short-lived JWT carrying the tenant
 
 GET  /v1/quickbooks/callback           # public redirect target from Intuit
@@ -249,7 +252,7 @@ GET  /v1/quickbooks/callback           # public redirect target from Intuit
                                        # 302 → {WEB_ORIGIN}/quickbooks?connected=1
                                        # on failure → …/quickbooks?error=<message>
 
-POST /v1/quickbooks/disconnect         # owner/admin — revokes the token and removes the connection
+POST /v1/quickbooks/disconnect         # owner/admin/salesperson — revokes the token and removes the connection
 200 → { "data": { "disconnected": true } }
 
 GET  /v1/quickbooks/status             # quickbooks:read — never exposes tokens

@@ -16,8 +16,8 @@
  * omitted (or left empty, as in "ROLE::1234") a random one is generated and
  * printed once at the end — record it immediately. The optional PIN (4–6
  * digits) feeds the in-POS approval prompts: any user whose role carries the
- * approve permission (owner, admin, manager) can answer a "manager PIN"
- * request with their own PIN.
+ * approve permission (owner, admin, salesperson, manager) can answer a
+ * "manager PIN" request with their own PIN.
  */
 import { randomBytes } from 'node:crypto';
 

@@ -1258,4 +1258,7 @@ function buildAdminAlerts(data: ReturnType<typeof useDashboardData>): AlertItem[
 }
 
 // Keep the role type import used (documents intended consumers of this view).
-export type AdminDashboardRole = Extract<UserRole, 'OWNER' | 'ADMIN' | 'MANAGER' | 'ACCOUNTANT'>;
+export type AdminDashboardRole = Extract<
+  UserRole,
+  'OWNER' | 'ADMIN' | 'SALESPERSON' | 'MANAGER' | 'ACCOUNTANT'
+>;

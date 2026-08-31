@@ -178,6 +178,7 @@ export class Api {
 export const SEED = {
   owner: { email: 'owner@hardwarepos.test', password: 'password123' },
   accountant: { email: 'accountant@hardwarepos.test', password: 'password123' },
+  salesperson: { email: 'salesperson@hardwarepos.test', password: 'password123' },
   managerPin: '2222',
   cashierPin: '1111',
   tenantId: 'tnt_dev',

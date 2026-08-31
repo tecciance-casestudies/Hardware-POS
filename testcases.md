@@ -7,7 +7,9 @@ has a stable ID for traceability into automated Playwright specs.
 - **Status**: `Not Run` → `Pass` / `Fail` / `Blocked` / `Automated` (update as
   cases are executed manually or scripted)
 - Unless stated otherwise, cases assume the seeded demo tenant and the roles:
-  Owner (email login), Manager, Cashier, Accountant.
+  Owner (email login), Salesperson (email login), Manager, Cashier,
+  Accountant. Salesperson is owner-equivalent — every gate the owner
+  clears must open for it too.
 
 Modules: [AUTH](#auth--sessions) · [PERM](#perm--roles--permissions) ·
 [DASH](#dash--dashboards) · [PROD](#prod--products--categories) ·
@@ -55,6 +57,12 @@ Modules: [AUTH](#auth--sessions) · [PERM](#perm--roles--permissions) ·
 | PERM-007 | Cashier cannot see gross profit card | Cashier dashboard | No Gross Profit KPI (REPORT_READ gated) | P | Not Run |
 | PERM-008 | API rejects missing permissions consistently | Call representative manage endpoints per role matrix | 403 for each disallowed role | N | Not Run |
 | PERM-009 | User management requires USER_MANAGE | Cashier calls GET /v1/users | 403 | N | Not Run |
+| PERM-010 | Salesperson has owner-level user management | Salesperson calls GET /v1/users | 200 with the tenant's users | P | Not Run |
+| PERM-011 | Salesperson may permanently delete a supplier | Salesperson opens supplier profile, deletes | Delete succeeds where a manager gets 403 | P | Not Run |
+| PERM-012 | Salesperson may manage products | POST /v1/products with salesperson token | Product created | P | Not Run |
+| PERM-013 | Salesperson reaches owner-only QuickBooks routes | Salesperson calls GET /v1/quickbooks/connect | Not 403 (role gate allows owner-level roles) | P | Not Run |
+| PERM-014 | Salesperson nav matches the owner's | Log in as salesperson | Same nav entries as PERM-001 | P | Not Run |
+| PERM-015 | Salesperson discount needs no approval | Apply a 50% line discount as salesperson | Accepted with no manager PIN prompt (unlimited ceiling) | P | Not Run |
 
 ## DASH — Dashboards
 
@@ -463,7 +471,7 @@ Modules: [AUTH](#auth--sessions) · [PERM](#perm--roles--permissions) ·
 | Module | Cases | Module | Cases |
 |---|---|---|---|
 | AUTH | 15 | CUST | 14 |
-| PERM | 9 | CIMP | 10 |
+| PERM | 15 | CIMP | 10 |
 | DASH | 20 | SUP | 15 |
 | PROD | 27 | SIMP | 8 |
 | PIMP | 13 | QB | 25 |
@@ -473,7 +481,7 @@ Modules: [AUTH](#auth--sessions) · [PERM](#perm--roles--permissions) ·
 | RET | 18 | UI | 16 |
 | QUO | 20 | SEC | 12 |
 
-**Total: 322 test cases** (≈60% positive / 40% negative).
+**Total: 328 test cases** (≈60% positive / 40% negative).
 
 ### Notes for automation
 

@@ -103,7 +103,7 @@ Units: `DiscountsService.approve`, `resolveApproval`, approval-token sign/verify
 | U-07-1 | Cashier 0% limit exceeded | Over-limit line without token → error requiring approval. |
 | U-07-2 | Manager approves ≤15% | `approve` returns `{approved:true, approvedByUserId, approvalToken}` (signed JWT). |
 | U-07-3 | Manager approves >15% | `approved:false` — over the manager's own cap. |
-| U-07-4 | Owner/Admin | Unlimited; no approval token needed. |
+| U-07-4 | Owner/Admin/Salesperson | Unlimited; no approval token needed. |
 | U-07-5 | Valid token covers the line | `resolveApproval` accepts a token matching product/type/value; sets `approvedByUserId`. |
 | U-07-6 | Tampered / expired / mismatched token | Rejected; line not approved. |
 | U-07-7 | Wrong manager PIN | `approve` fails auth; no token. |
@@ -195,10 +195,11 @@ Units: `PermissionsGuard`, `RolesGuard`, `roleHasPermission`, `ROLE_PERMISSIONS`
 | U-15-1 | Permission map correctness | Cashier lacks `discount:approve` & `quickbooks:manage`; Manager has `discount:approve`; Accountant has `sync:read`,`quickbooks:read` but not `sale:create`. |
 | U-15-2 | `@RequirePermissions` allow | User whose role includes the permission → guard returns true. |
 | U-15-3 | `@RequirePermissions` deny | Missing permission → `ForbiddenException`. |
-| U-15-4 | `@Roles` allow/deny | `quickbooks:connect` restricted to OWNER/ADMIN. |
+| U-15-4 | `@Roles` allow/deny | `quickbooks:connect` restricted to OWNER/ADMIN/SALESPERSON. |
 | U-15-5 | `@Public` bypass | Public routes skip auth. |
 | U-15-6 | Missing/invalid JWT | `JwtAuthGuard` → `UnauthorizedException`. |
 | U-15-7 | Tenant scoping | `@TenantId` from JWT (falls back to `x-tenant-id`); cross-tenant id is never trusted from the body. |
+| U-15-8 | Salesperson ↔ Owner parity | `ROLE_PERMISSIONS.SALESPERSON` equals `ROLE_PERMISSIONS.OWNER`; same unlimited discount limit; `isAdminLevelRole` true. Covered by `apps/api/src/modules/auth/permissions.spec.ts`. |
 
 ---
 

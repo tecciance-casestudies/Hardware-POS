@@ -170,15 +170,17 @@ Use the stub's "force N failures" control. Worker disabled → drive the queue v
 
 Run the same protected request as each role; assert allow/deny.
 
-| ID | Endpoint | Owner | Admin | Manager | Cashier | Accountant |
-| --- | --- | --- | --- | --- | --- | --- |
-| I-15-1 | `POST /sales/complete` (`sale:create`) | ✅ | ✅ | ✅ | ✅ | ❌ 403 |
-| I-15-2 | `POST /discounts/approve` (`sale:create`) | ✅ | ✅ | ✅ | ✅ | ❌ |
-| I-15-3 | `POST /quickbooks/sync-products` (`quickbooks:manage`) | ✅ | ✅ | ❌ | ❌ | ❌ |
-| I-15-4 | `POST /quickbooks/sync-sale/:id` (`quickbooks:manage`) | ✅ | ✅ | ❌ | ❌ | ❌ |
-| I-15-5 | `GET /sync/logs` (`sync:read`) | ✅ | ✅ | ❌ | ❌ | ✅ |
-| I-15-6 | `POST /sync/sales/:id/retry` (`sync:read`) | ✅ | ✅ | ❌ | ❌ | ✅ |
-| I-15-7 | `GET /quickbooks/connect` (`@Roles OWNER/ADMIN`) | ✅ | ✅ | ❌ | ❌ | ❌ |
+Salesperson is an owner-equivalent role, so its column must match Owner's on every row.
+
+| ID | Endpoint | Owner | Admin | Salesperson | Manager | Cashier | Accountant |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| I-15-1 | `POST /sales/complete` (`sale:create`) | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ 403 |
+| I-15-2 | `POST /discounts/approve` (`sale:create`) | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
+| I-15-3 | `POST /quickbooks/sync-products` (`quickbooks:manage`) | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
+| I-15-4 | `POST /quickbooks/sync-sale/:id` (`quickbooks:manage`) | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
+| I-15-5 | `GET /sync/logs` (`sync:read`) | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ |
+| I-15-6 | `POST /sync/sales/:id/retry` (`sync:read`) | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ |
+| I-15-7 | `GET /quickbooks/connect` (`@Roles OWNER/ADMIN/SALESPERSON`) | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
 | I-15-8 | No / invalid JWT on any protected route | 401 for all. |
 | I-15-9 | Cross-tenant read (token tnt_dev, id from another tenant) | 404 (tenant-scoped), never leaks. |
 

@@ -33,6 +33,9 @@ The POS is authoritative for:
 | Cashier   | Log in with PIN, search products, build a cart, take payment, print receipts |
 | Manager   | Everything a cashier can do, plus approve high discounts, view all sales     |
 | Admin     | Manage users, configure the QBO connection, view sync logs, retry syncs      |
+| Owner     | Everything — the full permission set, with no discount ceiling               |
+| Accountant| Read sales, sync logs and QuickBooks status; no selling or editing           |
+| Salesperson | Owner-equivalent: the same full permission set and no discount ceiling     |
 
 ## 3. Functional requirements
 
