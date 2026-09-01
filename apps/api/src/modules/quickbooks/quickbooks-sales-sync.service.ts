@@ -2,6 +2,7 @@ import { BadRequestException, Injectable, Logger, NotFoundException } from '@nes
 import { Prisma } from '@hardware-pos/database';
 
 import { PrismaService } from '../../prisma/prisma.service';
+import { toQuickBooksTxnDate } from '../sales/sale-date';
 import { QuickBooksConfig } from './quickbooks.config';
 import { QuickBooksRepository } from './quickbooks.repository';
 import { QuickBooksService } from './quickbooks.service';
@@ -114,6 +115,9 @@ export class QuickBooksSalesSyncService {
             CustomerRef: customerRef,
             TotalAmt: paidAmount,
             PrivateNote: `POS sale ${sale.saleNumber}`,
+            // Match the invoice: a payment dated after it would sit in a later
+            // period than the sale it settles.
+            TxnDate: toQuickBooksTxnDate(sale.completedAt ?? sale.createdAt),
             Line: [{ Amount: paidAmount, LinkedTxn: [{ TxnId: documentId, TxnType: 'Invoice' }] }],
           });
           quickbooksPaymentId = payment.Id;
@@ -253,6 +257,9 @@ export class QuickBooksSalesSyncService {
     const body: QboSalesDocumentInput = {
       DocNumber: sale.saleNumber,
       PrivateNote: `POS sale ${sale.saleNumber}`,
+      // File the document under the POS invoice date, so a backdated sale lands
+      // in the right QuickBooks period instead of defaulting to today.
+      TxnDate: toQuickBooksTxnDate(sale.completedAt ?? sale.createdAt),
       Line: lines,
     };
     if (customerRef) body.CustomerRef = customerRef;

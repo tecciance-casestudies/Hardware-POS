@@ -115,6 +115,8 @@ export interface PersistSaleInput {
   branchId: string;
   registerId?: string | null;
   customerId?: string | null;
+  /** Invoice date — the user-chosen sale date, or now. Stored as `completedAt`. */
+  saleDate: Date;
   computed: ComputedSale;
   payments: PaymentInput[];
   paidAmount: number;

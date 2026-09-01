@@ -5,7 +5,11 @@ import type { Paginated } from '@hardware-pos/shared';
 import { paginate } from '../../common/pagination';
 import { SettingsService } from '../settings/settings.service';
 import { ReceiptsRepository, SaleForReceipt } from './receipts.repository';
-import { CustomerReceiptData, renderCustomerReceipt } from './receipt-templates';
+import {
+  CustomerReceiptData,
+  formatReceiptDateTime,
+  renderCustomerReceipt,
+} from './receipt-templates';
 import { QueryPrintJobsDto } from './dto/query-print-jobs.dto';
 
 export interface CustomerReceiptResult {
@@ -109,7 +113,7 @@ export class ReceiptsService {
     return {
       storeName: sale.tenant.name,
       saleNumber: sale.saleNumber,
-      dateTime: this.formatDateTime(sale.completedAt ?? sale.createdAt),
+      dateTime: formatReceiptDateTime(sale.completedAt ?? sale.createdAt),
       documentType: sale.quickbooksDocumentType,
       customerName: sale.customer?.name ?? null,
       currency,
@@ -136,9 +140,5 @@ export class ReceiptsService {
 
   private toReceiptContent(data: CustomerReceiptData): Prisma.InputJsonValue {
     return { ...data } as unknown as Prisma.InputJsonValue;
-  }
-
-  private formatDateTime(date: Date): string {
-    return date.toISOString().replace('T', ' ').slice(0, 16) + ' UTC';
   }
 }

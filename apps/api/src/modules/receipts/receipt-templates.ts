@@ -48,6 +48,25 @@ function money(amount: number, _currency: string): string {
 
 const PRINT_BUTTON = `<button class="no-print print-btn" onclick="window.print()">Print</button>`;
 
+/**
+ * The date stamp printed on every receipt — sale and return alike.
+ *
+ * Rendered in the server's own timezone so a receipt names the same calendar day
+ * as the A4 invoice for the same transaction (`DocumentsService.dateTime`).
+ * Printing the UTC instant instead would disagree with the invoice whenever the
+ * server's offset crosses midnight, and the invoice date is precisely what a
+ * backdated sale exists to state.
+ */
+export function formatReceiptDateTime(date: Date): string {
+  return date.toLocaleString('en-GB', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
 export function renderCustomerReceipt(d: CustomerReceiptData): string {
   const rows = d.items
     .map(

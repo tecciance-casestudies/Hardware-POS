@@ -7,6 +7,7 @@ import {
   IsNumber,
   IsOptional,
   IsString,
+  Matches,
   Min,
   ValidateIf,
   ValidateNested,
@@ -36,6 +37,14 @@ export class CompleteSaleDto {
   @IsString()
   @IsOptional()
   customerId?: string;
+
+  /**
+   * Invoice date, as a `YYYY-MM-DD` calendar date. Omitted = now. Used to record
+   * a sale on the day it actually happened; a future date is rejected.
+   */
+  @Matches(/^\d{4}-\d{2}-\d{2}$/, { message: 'saleDate must be a YYYY-MM-DD calendar date' })
+  @IsOptional()
+  saleDate?: string;
 
   @ValidateIf((o: CompleteSaleDto) => !o.saleId)
   @IsArray()

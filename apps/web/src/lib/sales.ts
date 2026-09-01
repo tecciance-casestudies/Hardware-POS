@@ -51,6 +51,8 @@ export interface CompleteSaleDto {
   branchId: string;
   registerId?: string;
   customerId?: string;
+  /** Invoice date as `YYYY-MM-DD`. Omitted = now; the API rejects a future date. */
+  saleDate?: string;
   items: SaleItemPayload[];
   payments: SalePaymentPayload[];
   orderDiscountType?: DiscountType;

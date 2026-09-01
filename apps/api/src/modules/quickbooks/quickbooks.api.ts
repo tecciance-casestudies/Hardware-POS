@@ -67,6 +67,12 @@ export interface QboSalesDocumentInput {
   CustomerRef?: QboRef;
   DocNumber?: string;
   PrivateNote?: string;
+  /**
+   * Transaction date as a bare `YYYY-MM-DD` calendar date (no time, no offset).
+   * Carries the POS invoice date so a backdated sale is filed in QuickBooks on
+   * the day it happened; QuickBooks defaults to today when it is omitted.
+   */
+  TxnDate?: string;
   Line: QboSalesLine[];
   TxnTaxDetail?: { TotalTax: number };
 }
@@ -91,6 +97,8 @@ export interface QboPaymentInput {
   CustomerRef: QboRef;
   TotalAmt: number;
   PrivateNote?: string;
+  /** `YYYY-MM-DD`; matches the invoice date so the payment is not dated ahead of it. */
+  TxnDate?: string;
   Line: Array<{
     Amount: number;
     LinkedTxn: Array<{ TxnId: string; TxnType: 'Invoice' }>;

@@ -26,7 +26,7 @@ export class QuerySalesDto extends PaginationQueryDto {
   @MaxLength(120)
   search?: string;
 
-  /** Inclusive lower bound on sale creation date (ISO string). */
+  /** Inclusive lower bound on the sale/invoice date (ISO string). */
   @Type(() => Date)
   @IsDate()
   @MinDate(MIN_FILTER_DATE)
@@ -34,7 +34,7 @@ export class QuerySalesDto extends PaginationQueryDto {
   @IsOptional()
   dateFrom?: Date;
 
-  /** Inclusive upper bound on sale creation date (ISO string). */
+  /** Inclusive upper bound on the sale/invoice date (ISO string). */
   @Type(() => Date)
   @IsDate()
   @MinDate(MIN_FILTER_DATE)

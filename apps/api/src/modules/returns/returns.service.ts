@@ -20,6 +20,7 @@ import { paginate } from '../../common/pagination';
 import { AuthenticatedUser } from '../auth/auth.types';
 import { AuthService } from '../auth/auth.service';
 import { Permission, roleHasPermission } from '../auth/permissions';
+import { formatReceiptDateTime } from '../receipts/receipt-templates';
 import { SettingsService } from '../settings/settings.service';
 import { SyncQueueService } from '../sync/queue/sync-queue.service';
 import { computeReturnLine, sumReturnTotals, type ComputedReturnLine } from './returns.calc';
@@ -615,7 +616,7 @@ export class ReturnsService {
       registerName: ret.register?.name ?? null,
       returnNumber: ret.returnNumber,
       originalSaleNumber: ret.originalSale.saleNumber,
-      dateTime: (ret.completedAt ?? ret.createdAt).toISOString().replace('T', ' ').slice(0, 16) + ' UTC',
+      dateTime: formatReceiptDateTime(ret.completedAt ?? ret.createdAt),
       documentType: documentTypeLabel,
       customerName: ret.customer?.name ?? null,
       cashierName: ret.createdBy?.name ?? null,

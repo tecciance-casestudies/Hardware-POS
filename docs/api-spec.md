@@ -152,13 +152,19 @@ body: { "branchId", "registerId?", "customerId?",
 200 → { "data": <sale with items, status DRAFT, syncStatus NOT_SYNCED> }
 
 POST /v1/sales/complete                # complete a draft (saleId) OR a full cart in one shot
-body (draft):    { "saleId", "customerId?", "payments": [ { "method", "amount", "reference?" } ] }
-body (one-shot): { "branchId", "registerId?", "customerId?", "items": [ ... ], "payments": [ ... ] }
+body (draft):    { "saleId", "customerId?", "saleDate?", "payments": [ { "method", "amount", "reference?" } ] }
+body (one-shot): { "branchId", "registerId?", "customerId?", "saleDate?", "items": [ ... ], "payments": [ ... ] }
 201 → { "data": <sale status COMPLETED, paymentStatus, quickbooksDocumentType, syncStatus PENDING> }
 400 → validation error (empty cart, price changed, insufficient stock,
-       unapproved high discount, or credit/partial sale without a customer)
+       unapproved high discount, credit/partial sale without a customer,
+       or a sale date in the future)
 
-# Completion pipeline: validate items → validate prices vs cache → check stock →
+# saleDate: the invoice date, as a YYYY-MM-DD calendar date. Omitted = now. It is
+#   interpreted in the SERVER's timezone and stored as the sale's `completedAt`, which
+#   is the date printed on the invoice/receipt, filed in QuickBooks, and used to place
+#   the sale in the sales history and dashboard. A future date is rejected; stock still
+#   moves at completion time, not on the chosen date.
+# Completion pipeline: resolve the sale date → validate items → validate prices vs cache → check stock →
 #   subtotal → product-wise discounts → tax (if rate > 0) → total → save sale,
 #   items, payments → enqueue an outbound QuickBooks sync job.
 # Transaction type: paidAmount >= total → SALES_RECEIPT; otherwise INVOICE (customer required).
@@ -280,7 +286,10 @@ POST /v1/quickbooks/sync-products      # quickbooks:manage — requires an activ
 
 Pushes a completed sale to QuickBooks. A **fully paid** sale becomes a **Sales Receipt**; a
 **credit / partial** sale becomes an **Invoice**, and when any amount was paid a **Payment** is
-created and linked to that invoice. Sale line items reference their `quickbooksItemId` when the
+created and linked to that invoice. Both the document and its linked Payment carry a `TxnDate`
+equal to the sale's invoice date (a bare `YYYY-MM-DD` in server-local time), so a backdated POS
+sale is filed in QuickBooks on the day it happened rather than the day it was keyed in.
+Sale line items reference their `quickbooksItemId` when the
 product has been synced. Product-wise discounts are baked into each line's net amount (QuickBooks
 has no per-line discount field) and noted in the line description — see the `TODO(accountant)`
 comments where an itemised discount line or document-level discount would need confirmation.

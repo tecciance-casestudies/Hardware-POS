@@ -11,6 +11,7 @@ import { CreateDraftDto } from './dto/create-draft.dto';
 import { CompleteSaleDto } from './dto/complete-sale.dto';
 import { QuerySalesDto } from './dto/query-sales.dto';
 import { SaleItemInputDto } from './dto/sale-item.dto';
+import { resolveSaleDate } from './sale-date';
 import { SaleListRow, SaleWithRelations, SalesRepository } from './sales.repository';
 import {
   CartItemInput,
@@ -110,6 +111,9 @@ export class SalesService {
       customerId = dto.customerId;
     }
 
+    // Resolved before any pricing work so a future date fails fast.
+    const saleDate = resolveSaleDate(dto.saleDate);
+
     await this.assertLocations(tenantId, branchId, registerId, customerId);
 
     const orderDiscountInput: OrderDiscountInput = {
@@ -143,6 +147,7 @@ export class SalesService {
       branchId,
       registerId,
       customerId,
+      saleDate,
       computed,
       payments: dto.payments.map((p) => ({
         method: p.method,

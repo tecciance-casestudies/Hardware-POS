@@ -26,6 +26,7 @@ import {
 import * as React from 'react';
 
 import { buttonVariants } from '@/components/ui/button';
+import { formatSaleStamp } from '@/lib/dates';
 import type { Session } from '@/lib/auth';
 import { buildComparison, paymentStatusMeta } from '@/lib/dashboard/adapters';
 import {
@@ -1143,10 +1144,7 @@ function RecentActivityCard({ data }: { data: ReturnType<typeof useDashboardData
                       <StatusPill tone={meta.tone}>{meta.label}</StatusPill>
                     </td>
                     <td className="py-2.5 text-right text-xs tabular-nums text-muted-foreground">
-                      {new Date(s.createdAt).toLocaleTimeString([], {
-                        hour: '2-digit',
-                        minute: '2-digit',
-                      })}
+                      {formatSaleStamp(s.completedAt ?? s.createdAt)}
                     </td>
                   </tr>
                 );

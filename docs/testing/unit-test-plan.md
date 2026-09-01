@@ -67,6 +67,7 @@ Unit: POS cart reducer/store (`apps/web`, Vitest/Jest + Testing Library).
 | U-04-2 | Add same product again | Quantity merges to 2 (no duplicate line). |
 | U-04-3 | Cart totals | Subtotal/discount/tax/total recomputed on each change. |
 | U-04-4 | Remove line | Line removed; totals updated; empty cart disables checkout. |
+| U-04-5 | Invoice-date helpers | `todayIso` reports the LOCAL day (zero-padded), not the UTC one; `isValidYmd` rejects the partial/6-digit-year values a date input emits mid-typing. Covered by `apps/web/src/lib/dates.test.ts`. |
 
 ## 5. Quantity change
 
@@ -117,6 +118,7 @@ Unit: payment-status derivation in `SalesService.complete`.
 | U-08-1 | Cash = total | `paymentStatus=PAID`, `balanceAmount=0`, `quickbooksDocumentType=SALES_RECEIPT`. |
 | U-08-2 | Cash > total (overpay) | `PAID`; `balanceAmount=0` (clamped `max(0, total−paid)`). |
 | U-08-3 | Method persisted | Payment row `method=CASH`, `syncStatus=NOT_SYNCED`. |
+| U-08-4 | Invoice date resolution | `resolveSaleDate` keeps the picked calendar day in LOCAL time (never UTC-midnight), carries the current time of day, accepts today, and rejects tomorrow, an impossible day (2026-02-30) and an absurd year. Covered by `apps/api/src/modules/sales/sale-date.spec.ts`. |
 
 ## 9. Card payment
 
@@ -159,6 +161,7 @@ Unit: `QuickBooksSalesSyncService.buildLines` / `buildDocumentBody` for a fully-
 | U-12-4 | No-discount line | `Amount=lineSubtotal`, `UnitPrice` included. |
 | U-12-5 | Discounted line | `Amount=lineTotal` (net), `UnitPrice` omitted, discount noted in `Description`. |
 | U-12-6 | Tax | `TxnTaxDetail.TotalTax` only when `taxAmount>0`. |
+| U-12-7 | Invoice date | `TxnDate` = the sale's `completedAt` as a bare local `YYYY-MM-DD`; a late-evening sale does not roll to the next day. Covered by `apps/api/src/modules/quickbooks/quickbooks-sales-sync.service.spec.ts`. |
 
 ## 13. QuickBooks Invoice + Payment document build
 
@@ -169,6 +172,7 @@ Unit: `QuickBooksSalesSyncService.buildLines` / `buildDocumentBody` for a fully-
 | U-13-3 | Payment created when paid>0 | A `payment` body with `TotalAmt=paidAmount`, `LinkedTxn → invoice`. |
 | U-13-4 | Pure credit (paid=0) | Invoice only, no payment. |
 | U-13-5 | Paid>0 but no customer mapping | Fails with a clear message (payment needs CustomerRef). |
+| U-13-6 | Payment date | The linked Payment carries the same `TxnDate` as its invoice, so it is never dated ahead of the sale it settles. |
 
 ## 14. Sync queue & retry logic
 

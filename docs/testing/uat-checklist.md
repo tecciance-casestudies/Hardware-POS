@@ -43,6 +43,7 @@ or **Rejected** and add comments. Nothing here requires technical knowledge.
 - Adding items to the cart is quick; tapping an item again increases its quantity.
 - Quantities can be changed, and the running **total is always correct**.
 - The system prevents selling more than is in stock.
+- A sale can be dated to the day it actually took place; the system refuses a future date.
 
 **Accept?** ☐ Yes ☐ No — Comments: ____________________
 

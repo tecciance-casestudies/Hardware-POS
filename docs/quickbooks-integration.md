@@ -58,6 +58,16 @@ Line items map to QBO `SalesItemLineDetail` using each product's QBO `Item` id, 
 unit price, quantity, and the product-wise discount (as a line discount or a discount line,
 per QBO's model). A customer reference is required on Invoices.
 
+Every document carries `TxnDate` — the POS **invoice date**, sent as a bare `YYYY-MM-DD`
+calendar date derived in server-local time, so the day filed in QuickBooks is the day picked
+at the till. A backdated sale is therefore filed in the period it belongs to rather than the
+day it was keyed in. The linked Payment on a partial/credit sale carries the same `TxnDate`,
+so a payment is never dated ahead of the invoice it settles.
+
+> **Open question (accountant):** if the QuickBooks company has a books-closing date, a
+> transaction dated before it is rejected. The POS does not currently pre-check that date —
+> such a sale saves locally and surfaces as a failed sync in the sync log.
+
 ## 5. Idempotency (no duplicates on retry)
 
 Retries must never create a second QBO document for the same sale.

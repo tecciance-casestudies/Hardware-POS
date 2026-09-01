@@ -58,18 +58,39 @@ export class SalesRepository {
     skip: number,
     take: number,
   ): Promise<[SaleListRow[], number]> {
+    // Sales are filtered and ordered by their BUSINESS date, not the row's
+    // creation timestamp: a backdated sale must appear in the period it was
+    // dated to, which is what the list and the PDF report both display. Drafts
+    // have no `completedAt`, so they fall back to `createdAt`.
+    const businessDate: Prisma.SaleWhereInput['AND'] =
+      filter.dateFrom || filter.dateTo
+        ? [
+            {
+              OR: [
+                {
+                  completedAt: {
+                    ...(filter.dateFrom ? { gte: filter.dateFrom } : {}),
+                    ...(filter.dateTo ? { lte: filter.dateTo } : {}),
+                  },
+                },
+                {
+                  completedAt: null,
+                  createdAt: {
+                    ...(filter.dateFrom ? { gte: filter.dateFrom } : {}),
+                    ...(filter.dateTo ? { lte: filter.dateTo } : {}),
+                  },
+                },
+              ],
+            },
+          ]
+        : [];
+
     const where: Prisma.SaleWhereInput = {
       tenantId,
       ...(filter.syncStatus ? { syncStatus: filter.syncStatus } : {}),
       ...(filter.paymentStatus ? { paymentStatus: filter.paymentStatus } : {}),
-      ...(filter.dateFrom || filter.dateTo
-        ? {
-            createdAt: {
-              ...(filter.dateFrom ? { gte: filter.dateFrom } : {}),
-              ...(filter.dateTo ? { lte: filter.dateTo } : {}),
-            },
-          }
-        : {}),
+      // Kept in AND so the date clause's OR cannot collide with the search OR.
+      ...(businessDate.length ? { AND: businessDate } : {}),
       ...(filter.search
         ? {
             OR: [
@@ -83,7 +104,11 @@ export class SalesRepository {
       this.prisma.sale.findMany({
         where,
         include: saleListInclude,
-        orderBy: { createdAt: 'desc' },
+        // Newest business date first. Drafts have no business date yet; they
+        // surface at the top rather than the bottom because a draft is a held
+        // sale someone is meant to come back to, and burying it past the last
+        // page of history would hide it entirely.
+        orderBy: [{ completedAt: { sort: 'desc', nulls: 'first' } }, { createdAt: 'desc' }],
         skip,
         take,
       }),
@@ -210,7 +235,7 @@ export class SalesRepository {
           customerId: input.customerId ?? null,
           saleNumber,
           status: 'COMPLETED',
-          completedAt: new Date(),
+          completedAt: input.saleDate,
           subtotal: input.computed.subtotal,
           totalDiscount: input.computed.totalDiscount,
           ...orderDiscountData(input.computed),
@@ -252,7 +277,7 @@ export class SalesRepository {
         where: { id: saleId },
         data: {
           status: 'COMPLETED',
-          completedAt: new Date(),
+          completedAt: input.saleDate,
           customerId: input.customerId ?? null,
           subtotal: input.computed.subtotal,
           totalDiscount: input.computed.totalDiscount,

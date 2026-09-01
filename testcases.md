@@ -176,6 +176,11 @@ Modules: [AUTH](#auth--sessions) · [PERM](#perm--roles--permissions) ·
 | POS-031 | Hold sale as draft | Create draft via POST /sales/draft with cart lines | Draft persisted; stock NOT decremented | P | Not Run |
 | POS-032 | Complete a held draft | Complete the draft later | Stock decremented exactly once; sale gets final S-number | P | Not Run |
 | POS-033 | Draft re-validates stock at completion | Stock sells out after drafting; complete draft | 400 insufficient stock; nothing partial | N | Not Run |
+| POS-034 | Invoice date selector position and default | Open POS, view the cart panel | A date selector sits directly above the customer dropdown, pre-filled with today | P | Not Run |
+| POS-035 | Backdate a sale from the cart | Set the invoice date to an earlier day | Field shows the picked date and a "Backdated" marker | P | Not Run |
+| POS-036 | Invoice date survives the payment round-trip | Pick a past date, go to Payment, return to the cart | The picked date is still selected | P | Not Run |
+| POS-037 | Forward dating blocked in the picker | Try to pick tomorrow | The picker refuses it (max = today) | N | Not Run |
+| POS-038 | Invoice date resets after a completed sale | Complete a backdated sale, start a new one | The selector is back to today | P | Not Run |
 
 ## PAY — Payments & Credit
 
@@ -219,6 +224,15 @@ Modules: [AUTH](#auth--sessions) · [PERM](#perm--roles--permissions) ·
 | SALE-009 | Cashier sees only permitted actions | Cashier opens sale detail | No admin-only actions (e.g. retry-sync if QB-gated) | P | Not Run |
 | SALE-010 | Sales report endpoint | GET /sales/report for a date range | Aggregates match the underlying sales; filters respected | P | Not Run |
 | SALE-011 | Manual per-sale sync | POST /sales/:id/sync on a NOT_SYNCED sale | Queued and pushed like the automatic path | P | Not Run |
+| SALE-012 | Sale with no date is dated now | Complete a sale without `saleDate` | `completedAt` is the current time | P | Not Run |
+| SALE-013 | Past date stored as the sale date | Complete with `saleDate` 10 days ago | `completedAt` falls on the picked day | P | Not Run |
+| SALE-014 | Future sale date rejected | Complete with `saleDate` = tomorrow | 400; no sale created | N | Not Run |
+| SALE-015 | Rejected date moves no stock | Complete with a future `saleDate` | Stock unchanged; no sale row, no sync job | N | Not Run |
+| SALE-016 | Stock moves today for a backdated sale | Complete dated 45 days ago | Stock decremented now, not on the picked date | P | Not Run |
+| SALE-017 | Backdated sale lists under its invoice date | Filter the sales history by the picked day, then by today | Present in the first, absent from the second | P | Not Run |
+| SALE-018 | Backdated sale prints its invoice date | Open the A4 bill for a backdated sale | Document date is the picked date | P | Not Run |
+| SALE-019 | QuickBooks filed under the invoice date | Sync a backdated sale | QBO document `TxnDate` equals the picked day | P | Not Run |
+| SALE-020 | Quotation conversion is not backdated | Convert a quotation to a sale | Sale is dated now; no backdating on this path | P | Not Run |
 
 ## RET — Returns & Refunds
 
@@ -475,13 +489,13 @@ Modules: [AUTH](#auth--sessions) · [PERM](#perm--roles--permissions) ·
 | DASH | 20 | SUP | 15 |
 | PROD | 27 | SIMP | 8 |
 | PIMP | 13 | QB | 25 |
-| POS | 33 | SET | 9 |
+| POS | 38 | SET | 9 |
 | PAY | 22 | DOC | 11 |
-| SALE | 11 | ADM | 14 |
+| SALE | 20 | ADM | 14 |
 | RET | 18 | UI | 16 |
 | QUO | 20 | SEC | 12 |
 
-**Total: 328 test cases** (≈60% positive / 40% negative).
+**Total: 342 test cases** (≈60% positive / 40% negative).
 
 ### Notes for automation
 

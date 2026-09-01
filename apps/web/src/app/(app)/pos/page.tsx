@@ -5,6 +5,7 @@ import * as React from 'react';
 import {
   AlertTriangle,
   ArrowRight,
+  CalendarDays,
   Clock,
   FileText,
   NotebookPen,
@@ -273,7 +274,10 @@ export default function PosPage() {
 
   const currency = data.settings.currency;
   const cartEmpty = cart.items.length === 0;
-  const canPay = !cartEmpty && !totals.hasStockIssue;
+  // Both are YYYY-MM-DD, so a plain string compare orders them correctly.
+  const isBackdated = cart.saleDateValid && cart.saleDate < cart.today;
+  // A half-typed or future date must not reach the payment screen.
+  const canPay = !cartEmpty && !totals.hasStockIssue && cart.saleDateValid;
 
   const goToPayment = () => {
     setCartOpen(false);
@@ -322,6 +326,35 @@ export default function PosPage() {
             </Button>
           ) : null}
         </div>
+      </div>
+
+      {/* Invoice date — never scrolls. Sits above the customer picker so the
+          date is settled before the sale is built. Defaults to today; `max`
+          blocks forward dating in the picker, and the API rejects it too. */}
+      <div className="shrink-0 border-b border-border px-4 py-3">
+        <label
+          htmlFor={inSheet ? 'sale-date-sheet' : 'sale-date'}
+          className="flex items-center gap-2 text-[11px] font-medium text-muted-foreground"
+        >
+          <CalendarDays className="h-3.5 w-3.5" aria-hidden />
+          Invoice date
+          {isBackdated ? (
+            <span className="rounded-full bg-warning-soft px-2 py-0.5 text-[10px] font-semibold text-warning">
+              Backdated
+            </span>
+          ) : null}
+        </label>
+        <Input
+          id={inSheet ? 'sale-date-sheet' : 'sale-date'}
+          type="date"
+          className="mt-1 h-11"
+          value={cart.saleDate}
+          max={cart.today}
+          // Stored verbatim, including the empty value a date input emits while
+          // a segment is half-typed. Validity gates the Payment button instead,
+          // so the field never snaps back under the user mid-edit.
+          onChange={(e) => cart.setSaleDate(e.target.value)}
+        />
       </div>
 
       {/* Customer — never scrolls */}
@@ -498,6 +531,13 @@ export default function PosPage() {
           <div className="flex items-center gap-1.5 rounded-lg bg-danger-soft px-3 py-2 text-xs font-medium text-danger">
             <AlertTriangle className="h-3.5 w-3.5" />
             Some items exceed available stock.
+          </div>
+        ) : null}
+
+        {cart.hydrated && !cart.saleDateValid ? (
+          <div className="flex items-center gap-1.5 rounded-lg bg-danger-soft px-3 py-2 text-xs font-medium text-danger">
+            <AlertTriangle className="h-3.5 w-3.5" />
+            Enter an invoice date of today or earlier.
           </div>
         ) : null}
 

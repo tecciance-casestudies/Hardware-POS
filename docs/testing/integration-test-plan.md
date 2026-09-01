@@ -98,6 +98,9 @@ The cart is client-side; the server equivalent is a **draft** sale.
 | ID | Request | Expected |
 | --- | --- | --- |
 | I-08-1 | `POST /v1/sales/complete` CASH = total | 201; `paymentStatus=PAID`, `balanceAmount=0`, `quickbooksDocumentType=SALES_RECEIPT`, `syncStatus=PENDING`. |
+| I-08-4 | Complete with a past `saleDate` | 201; `completedAt` falls on the picked day; stock still decremented in the same transaction. |
+| I-08-5 | Complete with a future `saleDate` | 400; no Sale row and no SyncJob created; stock unchanged. |
+| I-08-6 | Sales history is filtered by the invoice date | A backdated sale is returned for its picked day and absent from today's range. |
 | I-08-2 | SyncJob enqueued | One `SyncJob` (`SALES_SYNC`,`PENDING`) + `SyncLog` (`SALE/OUTBOUND/PENDING`) in the same tx. |
 | I-08-3 | Payment row | `method=CASH`, `syncStatus=NOT_SYNCED`. |
 

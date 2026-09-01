@@ -405,6 +405,8 @@ export class QuotationsService {
       );
     }
 
+    // No `saleDate`: converting a quotation creates a sale dated now. Backdating
+    // is a POS-cart action only — deliberately not exposed on this path.
     const saleDto: CompleteSaleDto = {
       branchId,
       registerId: dto.registerId,

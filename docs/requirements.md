@@ -69,6 +69,13 @@ The POS is authoritative for:
 - **FR-12** Take payment (cash, card — recorded as a payment method + amount).
 - **FR-13** Determine the transaction type from amount paid vs. total (see §4).
 - **FR-14** Persist the sale locally first, then enqueue it for QBO sync.
+- **FR-15** Set the **invoice date** from the POS cart (a date selector directly above the
+  customer dropdown, defaulting to today) so a sale can be recorded on the day it actually
+  took place. The chosen date is the one printed on the invoice and receipt, the date the
+  transaction is filed under in QuickBooks, and the date the sale is placed under in the
+  sales history and dashboard figures.
+- **FR-16** Reject a **future** invoice date. Stock is still adjusted at completion time,
+  regardless of the date chosen.
 
 ### 3.6 Receipt
 

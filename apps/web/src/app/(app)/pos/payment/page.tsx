@@ -142,11 +142,15 @@ export default function PaymentPage() {
   const change = mode === 'CASH' ? round2(Math.max(0, tenderedNum - total)) : 0;
   const cashShort = mode === 'CASH' ? round2(Math.max(0, total - tenderedNum)) : 0;
   const needsCustomer = paidAmount < total; // partial or credit → invoice needs a customer
+  const isBackdated = cart.saleDateValid && cart.saleDate < cart.today;
 
+  // Gated here as well as in the cart: /pos/payment is reachable by a direct
+  // reload, which rehydrates from sessionStorage without passing through /pos.
   const invalid =
     submitting ||
     cart.items.length === 0 ||
     totals.hasStockIssue ||
+    !cart.saleDateValid ||
     (needsCustomer && !hasCustomer) ||
     (mode === 'CASH' && tenderedNum < total) ||
     (mode === 'PARTIAL' && (paidAmount <= 0 || paidAmount >= total)) ||
@@ -158,6 +162,9 @@ export default function PaymentPage() {
   if (!submitting) {
     if (totals.hasStockIssue) {
       disabledReason = 'Some items exceed available stock — adjust quantities in the cart.';
+    } else if (!cart.saleDateValid) {
+      // Names the cart because that is the only place the date can be fixed.
+      disabledReason = 'The invoice date must be today or earlier — fix it in the cart.';
     } else if (needsCustomer && !hasCustomer) {
       disabledReason = 'Select a customer to record a credit or partial sale.';
     } else if (mode === 'CASH' && tenderedNum < total) {
@@ -209,6 +216,7 @@ export default function PaymentPage() {
       const dto: CompleteSaleDto = {
         ...saleLocation(session!),
         customerId: cart.customerId || undefined,
+        saleDate: cart.submittedSaleDate,
         items: cart.items.map((it) => ({
           productId: it.product.id,
           quantity: it.quantity,
@@ -296,6 +304,13 @@ export default function PaymentPage() {
       <div className="flex shrink-0 flex-wrap items-baseline gap-x-3 gap-y-0">
         <h1 className="text-2xl font-semibold tracking-tight">Payment</h1>
         <p className="truncate text-sm text-muted-foreground">{customerName}</p>
+        {/* The date is only editable in the cart, so say plainly that this sale
+            is not being dated today before the payment is taken. */}
+        {isBackdated ? (
+          <span className="rounded-full bg-warning-soft px-2 py-0.5 text-xs font-semibold text-warning">
+            Dated {cart.saleDate}
+          </span>
+        ) : null}
       </div>
 
       {/* Order summary ~40% · payment workspace ~60% on lg+. */}

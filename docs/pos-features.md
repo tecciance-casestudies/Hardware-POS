@@ -12,6 +12,7 @@
 - **Cart** — add / edit / remove line items
 - **Product-wise manual discount** — per-line discounts
 - **Manager PIN approval** — required for high discounts
+- **Invoice date** — date a sale to when it actually happened; forward dating blocked
 - **Customer selection** — attach a customer to a sale
 - **Payment** — capture payment(s)
 - **Receipt print** — print / reprint receipts

@@ -95,7 +95,7 @@ One completed (or in-progress) transaction.
 | amountPaid    | Decimal(12,2) | sum of payments; `< total` ⇒ INVOICE, `>= total` ⇒ RECEIPT    |
 | qboId         | string?       | id of the created QBO SalesReceipt/Invoice — **unique**       |
 | syncStatus    | SyncStatus    | `PENDING` \| `SYNCING` \| `SYNCED` \| `FAILED`                 |
-| completedAt   | datetime?     |                                                                |
+| completedAt   | datetime?     | Invoice date — user-selectable at completion, defaults to now, never future. Printed on documents, filed in QBO, and the column reports/dashboards filter on. Indexed. |
 | createdAt     | datetime      |                                                                |
 | updatedAt     | datetime      |                                                                |
 
