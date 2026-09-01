@@ -7,7 +7,14 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { DiscountType, QuotationStatus } from '@hardware-pos/database';
-import type { Paginated, QuotationStatusCode } from '@hardware-pos/shared';
+import {
+  parseDay,
+  safeTimeZone,
+  todayInTimeZone,
+  zonedTimeToUtc,
+  type Paginated,
+  type QuotationStatusCode,
+} from '@hardware-pos/shared';
 
 import { customerAddressLine } from '../../common/customer-display';
 import { paginate } from '../../common/pagination';
@@ -116,7 +123,7 @@ export class QuotationsService {
       createdByUserId: actor.id,
       status: dto.status === 'SENT' ? 'SENT' : 'DRAFT',
       issueDate: new Date(),
-      validUntil: this.resolveValidUntil(dto.validUntil, app.quotation.defaultValidityDays),
+      validUntil: this.resolveValidUntil(dto.validUntil, app.quotation.defaultValidityDays, app.timezone),
       notes: dto.notes ?? null,
       termsAndConditions: dto.termsAndConditions ?? app.quotation.defaultTermsAndConditions ?? null,
       shareToken: this.newShareToken(),
@@ -199,7 +206,7 @@ export class QuotationsService {
       row.currentRevisionNumber,
       {
         customerId: dto.customerId,
-        validUntil: dto.validUntil !== undefined ? this.resolveValidUntil(dto.validUntil, app.quotation.defaultValidityDays) : undefined,
+        validUntil: dto.validUntil !== undefined ? this.resolveValidUntil(dto.validUntil, app.quotation.defaultValidityDays, app.timezone) : undefined,
         notes: dto.notes,
         termsAndConditions: dto.termsAndConditions,
       },
@@ -244,7 +251,7 @@ export class QuotationsService {
       changedByUserId: actor.id,
       changeReason: dto.changeReason ?? null,
       customerId: dto.customerId,
-      validUntil: dto.validUntil !== undefined ? this.resolveValidUntil(dto.validUntil, app.quotation.defaultValidityDays) : undefined,
+      validUntil: dto.validUntil !== undefined ? this.resolveValidUntil(dto.validUntil, app.quotation.defaultValidityDays, app.timezone) : undefined,
       notes: dto.notes ?? row.notes,
       termsAndConditions: dto.termsAndConditions ?? row.termsAndConditions,
       totals,
@@ -305,7 +312,7 @@ export class QuotationsService {
       createdByUserId: actor.id,
       status: 'DRAFT',
       issueDate: new Date(),
-      validUntil: this.resolveValidUntil(undefined, app.quotation.defaultValidityDays),
+      validUntil: this.resolveValidUntil(undefined, app.quotation.defaultValidityDays, app.timezone),
       notes: row.notes,
       termsAndConditions: row.termsAndConditions,
       shareToken: this.newShareToken(),
@@ -802,10 +809,32 @@ export class QuotationsService {
     return validUntil.getTime() < Date.now();
   }
 
-  private resolveValidUntil(input: string | undefined, defaultDays: number): Date | null {
-    if (input) return new Date(input);
-    const d = new Date();
-    d.setDate(d.getDate() + (defaultDays || 14));
-    return d;
+  /**
+   * A quotation's validity is a calendar day the customer reads off a printed
+   * document, so it resolves to end-of-day in the SHOP's zone. Parsing the bare
+   * `YYYY-MM-DD` with `new Date()` would pin UTC midnight and expire the
+   * quotation part-way through its own last day for any shop east of Greenwich.
+   */
+  private resolveValidUntil(
+    input: string | undefined,
+    defaultDays: number,
+    tz: string,
+  ): Date | null {
+    const zone = safeTimeZone(tz);
+    const day =
+      input && parseDay(input)
+        ? input
+        : this.addDays(todayInTimeZone(zone), defaultDays || 14);
+    const p = parseDay(day);
+    if (!p) return null;
+    return zonedTimeToUtc(p.year, p.month, p.day, 23, 59, 59, zone);
+  }
+
+  /** `YYYY-MM-DD` plus n days, staying on calendar days (UTC maths, no zone). */
+  private addDays(ymd: string, days: number): string {
+    const p = parseDay(ymd);
+    if (!p) return ymd;
+    const d = new Date(Date.UTC(p.year, p.month - 1, p.day + days));
+    return d.toISOString().slice(0, 10);
   }
 }

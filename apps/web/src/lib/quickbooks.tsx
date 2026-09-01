@@ -368,7 +368,20 @@ export function useQuickBooks(): QuickBooksContextValue {
 }
 
 /** Deterministic timestamp formatting (avoids locale/timezone hydration issues). */
+/**
+ * Sync timestamps shown on screen. These are operational — "when did this last
+ * sync" — so they read in the VIEWER's own timezone, unlike document dates which
+ * are pinned to the shop's. The stored value is a UTC instant either way.
+ */
 export function formatQbTime(iso: string | null): string {
   if (!iso) return '—';
-  return iso.replace('T', ' ').slice(0, 16) + ' UTC';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '—';
+  return d.toLocaleString(undefined, {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
 }

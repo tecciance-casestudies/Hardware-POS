@@ -82,6 +82,25 @@ sale item. The approver's own limit is re-checked against the real line at compl
 manager token cannot cover a discount beyond 15%). Completing a draft reuses the approver
 already recorded on the draft line — no re-approval needed.
 
+### Dates and times
+
+Every datetime is **stored and transmitted as a UTC instant** and crosses the wire as an ISO-8601
+string. Nothing is persisted as a bare calendar day. Conversion to a timezone happens only at the
+moment a value is shown, and which zone depends on what is being shown:
+
+| Surface | Timezone |
+| ------- | -------- |
+| On screen (sales list, dashboard, sync times) | the **viewer's own** browser timezone |
+| Documents — invoice, receipt, PDF/XLSX report, emailed or shared copies | the **shop's** timezone, from `settings.timezone` |
+
+Documents are pinned to the shop's zone deliberately: an invoice is a business record, so a reprint —
+or the customer's emailed copy opened in another country — must carry the same date as the original.
+`settings.timezone` is an IANA name (default `Asia/Colombo`) settable via `PUT /v1/settings`; an
+unknown zone is rejected with 400.
+
+The `saleDate` on `POST /v1/sales/complete` is likewise a calendar day **in the shop's timezone**, and
+"not in the future" is judged against the shop's current day.
+
 ### Roles & permissions
 
 Roles: `OWNER`, `ADMIN`, `SALESPERSON`, `MANAGER`, `CASHIER`, `ACCOUNTANT`. Routes are

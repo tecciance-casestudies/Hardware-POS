@@ -13,7 +13,7 @@ import {
   QuickBooksReturnDocumentType,
   UserRole,
 } from '@hardware-pos/database';
-import type { Paginated } from '@hardware-pos/shared';
+import { safeTimeZone, type Paginated } from '@hardware-pos/shared';
 
 import { round2 } from '../../common/money';
 import { paginate } from '../../common/pagination';
@@ -595,7 +595,9 @@ export class ReturnsService {
     userId: string,
   ): Promise<{ printJobId: string; html: string }> {
     const settings = this.settingsService.getSettings(tenantId);
-    const html = renderReturnReceipt(this.toReceiptData(ret, settings.receiptFooter));
+    const html = renderReturnReceipt(
+      this.toReceiptData(ret, settings.receiptFooter, safeTimeZone(settings.timezone)),
+    );
     const job = await this.repo.createReceiptPrintJob({
       tenantId,
       saleId: ret.originalSaleId,
@@ -606,7 +608,7 @@ export class ReturnsService {
     return { printJobId: job.id, html };
   }
 
-  private toReceiptData(ret: ReturnWithRelations, footer: string): ReturnReceiptData {
+  private toReceiptData(ret: ReturnWithRelations, footer: string, tz: string): ReturnReceiptData {
     const documentTypeLabel =
       ret.quickbooksDocumentType === 'CREDIT_MEMO' ? 'Credit Memo' : 'Refund Receipt';
     const remaining = round2(Number(ret.originalSale.total) - Number(ret.originalSale.returnedAmount));
@@ -616,7 +618,7 @@ export class ReturnsService {
       registerName: ret.register?.name ?? null,
       returnNumber: ret.returnNumber,
       originalSaleNumber: ret.originalSale.saleNumber,
-      dateTime: formatReceiptDateTime(ret.completedAt ?? ret.createdAt),
+      dateTime: formatReceiptDateTime(ret.completedAt ?? ret.createdAt, tz),
       documentType: documentTypeLabel,
       customerName: ret.customer?.name ?? null,
       cashierName: ret.createdBy?.name ?? null,

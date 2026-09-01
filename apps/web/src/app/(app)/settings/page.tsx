@@ -3,6 +3,8 @@
 import * as React from 'react';
 import { AlertTriangle, ImageIcon, RotateCcw, Save, Upload } from 'lucide-react';
 
+import { DEFAULT_TIME_ZONE } from '@hardware-pos/shared';
+
 import { PageHeader } from '@/components/page-header';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
@@ -29,6 +31,21 @@ import {
 } from '@/lib/settings-api';
 
 const TABS = ['Business', 'Branding', 'Layout', 'Preview'] as const;
+
+/**
+ * Shop timezone choices. A short curated list rather than the full IANA database:
+ * this is a single-region retail product, and a 400-entry dropdown is a worse
+ * answer than five relevant ones. The API accepts any valid IANA zone, so the
+ * list can grow without a backend change.
+ */
+const TIME_ZONE_CHOICES = [
+  'Asia/Colombo',
+  'Asia/Dubai',
+  'Asia/Kolkata',
+  'Asia/Singapore',
+  'Europe/London',
+  'UTC',
+] as const;
 type Tab = (typeof TABS)[number];
 
 const PREVIEW_TYPES: { value: PreviewDocumentType; label: string }[] = [
@@ -44,6 +61,8 @@ export default function SettingsPage() {
 
   const [settings, setSettings] = React.useState<AppSettings | null>(null);
   const [docs, setDocs] = React.useState<DocumentSettings | null>(null);
+  // Top-level, not part of `documents` — hence its own state and dirty check.
+  const [timezone, setTimezone] = React.useState<string | null>(null);
   const [tab, setTab] = React.useState<Tab>('Business');
   const [loading, setLoading] = React.useState(true);
   const [saving, setSaving] = React.useState(false);
@@ -63,6 +82,7 @@ export default function SettingsPage() {
         if (!active) return;
         setSettings(s);
         setDocs(s.documents);
+        setTimezone(s.timezone);
       })
       .catch((e) => active && setError(e instanceof Error ? e.message : 'Failed to load settings'))
       .finally(() => active && setLoading(false));
@@ -71,7 +91,10 @@ export default function SettingsPage() {
     };
   }, [session]);
 
-  const dirty = !!settings && !!docs && JSON.stringify(settings.documents) !== JSON.stringify(docs);
+  const dirty =
+    !!settings &&
+    !!docs &&
+    (JSON.stringify(settings.documents) !== JSON.stringify(docs) || settings.timezone !== timezone);
 
   const set = <K extends keyof DocumentSettings>(key: K, value: DocumentSettings[K]) =>
     setDocs((d) => (d ? { ...d, [key]: value } : d));
@@ -81,9 +104,13 @@ export default function SettingsPage() {
     setSaving(true);
     setError(null);
     try {
-      const next = await updateSettings(session, { documents: docs });
+      const next = await updateSettings(session, {
+        documents: docs,
+        ...(timezone && timezone !== settings?.timezone ? { timezone } : {}),
+      });
       setSettings(next);
       setDocs(next.documents);
+      setTimezone(next.timezone);
       showToast('Settings saved');
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not save settings');
@@ -100,6 +127,7 @@ export default function SettingsPage() {
       const next = await resetSettings(session);
       setSettings(next);
       setDocs(next.documents);
+      setTimezone(next.timezone);
       showToast('Settings reset to defaults');
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not reset settings');
@@ -212,7 +240,13 @@ export default function SettingsPage() {
       ) : null}
 
       {tab === 'Business' ? (
-        <BusinessTab docs={docs} set={set} disabled={!canManage} />
+        <BusinessTab
+          docs={docs}
+          set={set}
+          disabled={!canManage}
+          timezone={timezone ?? DEFAULT_TIME_ZONE}
+          onTimezone={setTimezone}
+        />
       ) : tab === 'Branding' ? (
         <BrandingTab
           docs={docs}
@@ -284,10 +318,39 @@ function Field({
   );
 }
 
-function BusinessTab({ docs, set, disabled }: { docs: DocumentSettings; set: SetFn; disabled: boolean }) {
+function BusinessTab({
+  docs,
+  set,
+  disabled,
+  timezone,
+  onTimezone,
+}: {
+  docs: DocumentSettings;
+  set: SetFn;
+  disabled: boolean;
+  timezone: string;
+  onTimezone: (tz: string) => void;
+}) {
   return (
     <Card className="max-w-3xl">
       <CardContent className="grid gap-4 p-6 sm:grid-cols-2">
+        <Field
+          label="Timezone"
+          hint="Dates on invoices, receipts and reports are stated in this zone, so a document reads the same for everyone. On-screen times follow each user's own device."
+          full
+        >
+          <Select
+            value={timezone}
+            disabled={disabled}
+            onChange={(e) => onTimezone(e.target.value)}
+          >
+            {TIME_ZONE_CHOICES.map((tz) => (
+              <option key={tz} value={tz}>
+                {tz}
+              </option>
+            ))}
+          </Select>
+        </Field>
         <Field label="Business name" hint="Falls back to your account name when blank." full>
           <Input value={docs.companyName ?? ''} disabled={disabled} onChange={(e) => set('companyName', e.target.value)} placeholder="Hardware POS" />
         </Field>

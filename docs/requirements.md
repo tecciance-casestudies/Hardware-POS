@@ -76,6 +76,11 @@ The POS is authoritative for:
   sales history and dashboard figures.
 - **FR-16** Reject a **future** invoice date. Stock is still adjusted at completion time,
   regardless of the date chosen.
+- **FR-17** Store every date and time as a **UTC instant**. Convert to a timezone only when
+  displaying: on-screen values use the **viewer's own** device timezone (read from the browser),
+  while printed and emailed documents — invoice, receipt, PDF/XLSX reports — use the configured
+  **shop timezone**, so one document reads the same date for everyone who opens it.
+- **FR-18** Let an owner/admin set the shop timezone in Settings (IANA name; default `Asia/Colombo`).
 
 ### 3.6 Receipt
 

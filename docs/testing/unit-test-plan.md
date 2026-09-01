@@ -67,6 +67,7 @@ Unit: POS cart reducer/store (`apps/web`, Vitest/Jest + Testing Library).
 | U-04-2 | Add same product again | Quantity merges to 2 (no duplicate line). |
 | U-04-3 | Cart totals | Subtotal/discount/tax/total recomputed on each change. |
 | U-04-4 | Remove line | Line removed; totals updated; empty cart disables checkout. |
+| U-04-6 | Timezone maths | `zonedTimeToUtc` / `dayInTimeZone` round-trip a calendar day in a named zone and use the offset in force on that day across a DST boundary; `safeTimeZone` degrades an unknown zone to the default. Covered by `apps/web/src/lib/timezone.test.ts`. |
 | U-04-5 | Invoice-date helpers | `todayIso` reports the LOCAL day (zero-padded), not the UTC one; `isValidYmd` rejects the partial/6-digit-year values a date input emits mid-typing. Covered by `apps/web/src/lib/dates.test.ts`. |
 
 ## 5. Quantity change
@@ -118,6 +119,7 @@ Unit: payment-status derivation in `SalesService.complete`.
 | U-08-1 | Cash = total | `paymentStatus=PAID`, `balanceAmount=0`, `quickbooksDocumentType=SALES_RECEIPT`. |
 | U-08-2 | Cash > total (overpay) | `PAID`; `balanceAmount=0` (clamped `max(0, total−paid)`). |
 | U-08-3 | Method persisted | Payment row `method=CASH`, `syncStatus=NOT_SYNCED`. |
+| U-08-5 | Invoice date is judged in the shop zone | `resolveSaleDate` accepts a day that is already today in the shop's zone while still yesterday in UTC, and rejects one that is tomorrow there. |
 | U-08-4 | Invoice date resolution | `resolveSaleDate` keeps the picked calendar day in LOCAL time (never UTC-midnight), carries the current time of day, accepts today, and rejects tomorrow, an impossible day (2026-02-30) and an absurd year. Covered by `apps/api/src/modules/sales/sale-date.spec.ts`. |
 
 ## 9. Card payment

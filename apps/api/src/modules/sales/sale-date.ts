@@ -1,100 +1,68 @@
 import { BadRequestException } from '@nestjs/common';
+import { dayInTimeZone, parseDay, safeTimeZone, zonedTimeToUtc } from '@hardware-pos/shared';
 
 /**
  * Resolution of the user-chosen invoice date for a POS sale ("backdating").
  *
  * The POS sends a plain calendar date (`YYYY-MM-DD`) — the day the sale actually
- * happened. Two rules keep that day intact everywhere it is later rendered:
+ * happened. That day is anchored in the SHOP's timezone: not the server's, which
+ * is an accident of deployment, and not the cashier's, because the invoice the
+ * date ends up on is itself rendered in the shop's zone. Anchoring it anywhere
+ * else would let a sale picked as "1 Aug" print as "31 Jul" on the very document
+ * the date exists to state.
  *
- *  - It is interpreted in the SERVER's local timezone, never as UTC. Invoices are
- *    formatted with `toLocaleDateString` (server-local), so `new Date('2026-08-01')`
- *    — which JS parses as UTC midnight — would print 31 Jul on any server west of
- *    Greenwich. Building the date locally makes the printed day match the picked day
- *    whatever the deployment timezone.
- *  - It carries the current time of day rather than midnight, so a backdated
- *    invoice reads like a real one ("01 Aug 2026, 14:23") and a sale dated today is
- *    indistinguishable from one with no date at all.
+ * The stored instant is midday in that zone rather than midnight: midday is the
+ * furthest point from a date boundary, so no DST shift or offset rounding can
+ * push the sale onto a neighbouring day. Only a genuine BACKDATE takes this path
+ * — a sale left on today's date sends no `saleDate` at all and keeps its real
+ * instant — so the conventional 12:00 appears exactly where the true time of day
+ * is unknown, rather than inventing a plausible-looking one.
  *
- * Forward dating is rejected: a sale may be dated today or earlier, never later.
+ * Forward dating is rejected — a sale may be dated today or earlier, "today"
+ * being the shop's current day.
  */
 
-const DATE_ONLY = /^(\d{4})-(\d{2})-(\d{2})$/;
+/** Lower bound, matching the sales-history filter's floor (`query-sales.dto.ts`). */
+const MIN_SALE_YEAR = 1990;
 
 /**
- * Lower bound — the same calendar floor the sales-history filter uses
- * (`MIN_FILTER_DATE` in `query-sales.dto.ts`). Built locally so it is compared
- * in the same frame `picked` is constructed in. Date inputs emit absurd years
- * mid-typing; without this a stray `0002-01-01` reaches Postgres.
- */
-const MIN_SALE_DATE = new Date(1990, 0, 1);
-
-/** Local midnight of the day `d` falls on — the comparable "calendar day" value. */
-function startOfLocalDay(d: Date): Date {
-  return new Date(d.getFullYear(), d.getMonth(), d.getDate());
-}
-
-/**
- * Turn the DTO's optional `saleDate` into the timestamp to store as `completedAt`.
+ * Turn the DTO's optional `saleDate` into the UTC instant stored as `completedAt`.
  *
- * @param input `YYYY-MM-DD`, or a full ISO string, or undefined for "now"
+ * @param input `YYYY-MM-DD` as read in the shop's timezone, or undefined for "now"
+ * @param tz    the shop's IANA timezone
  * @param now   injected for testability; defaults to the current instant
- * @throws BadRequestException on an unparseable or future date
+ * @throws BadRequestException on a malformed, impossible, future or out-of-range date
  */
-export function resolveSaleDate(input: string | undefined, now: Date = new Date()): Date {
+export function resolveSaleDate(
+  input: string | undefined,
+  tz: string,
+  now: Date = new Date(),
+): Date {
+  // No date picked: the sale happened now, and `now` is already a UTC instant.
   if (!input) return now;
 
-  const match = DATE_ONLY.exec(input);
-  // A full ISO timestamp already pins an instant, so take it as given; only a
-  // date-only value needs a time of day attached.
-  const picked = match
-    ? new Date(
-        Number(match[1]),
-        Number(match[2]) - 1,
-        Number(match[3]),
-        now.getHours(),
-        now.getMinutes(),
-        now.getSeconds(),
-        now.getMilliseconds(),
-      )
-    : new Date(input);
-
-  if (Number.isNaN(picked.getTime())) {
+  const zone = safeTimeZone(tz);
+  const parts = parseDay(input);
+  if (!parts) {
     throw new BadRequestException('saleDate must be a valid date (YYYY-MM-DD)');
   }
-  if (match) {
-    // The multi-arg Date constructor is forgiving in two ways that must not pass
-    // silently: it rolls a day that does not exist into the next month
-    // (2026-02-30 → 2 Mar), and it maps a two-digit year into the 1900s
-    // (0099 → 1999). Reject anything it did not reproduce exactly.
-    if (
-      picked.getFullYear() !== Number(match[1]) ||
-      picked.getMonth() !== Number(match[2]) - 1 ||
-      picked.getDate() !== Number(match[3])
-    ) {
-      throw new BadRequestException('saleDate must be a valid date (YYYY-MM-DD)');
-    }
-    // Whole-day comparison: any time earlier today is fine, tomorrow is not.
-    if (startOfLocalDay(picked) > startOfLocalDay(now)) {
-      throw new BadRequestException('A sale cannot be dated in the future');
-    }
-  } else if (picked > now) {
-    // A full ISO value pins an instant, so it is checked to the instant — a
-    // day-granular check would let "later today" through.
-    throw new BadRequestException('A sale cannot be dated in the future');
-  }
-  if (picked < MIN_SALE_DATE) {
+  if (parts.year < MIN_SALE_YEAR) {
     throw new BadRequestException('saleDate is out of range');
   }
-  return picked;
+  // Calendar-day comparison in the shop's zone: a sale rung at 02:00 in Colombo
+  // is on today's date there even though UTC is still on yesterday.
+  if (input > dayInTimeZone(now, zone)) {
+    throw new BadRequestException('A sale cannot be dated in the future');
+  }
+
+  return zonedTimeToUtc(parts.year, parts.month, parts.day, 12, 0, 0, zone);
 }
 
 /**
  * QuickBooks `TxnDate` wire format — a bare calendar date, no time or offset.
- * Derived in server-local time so the day filed in QuickBooks is the day picked
- * in the POS.
+ * Derived in the shop's timezone so the day filed in QuickBooks is the day the
+ * invoice prints.
  */
-export function toQuickBooksTxnDate(date: Date): string {
-  const month = String(date.getMonth() + 1).padStart(2, '0');
-  const day = String(date.getDate()).padStart(2, '0');
-  return `${date.getFullYear()}-${month}-${day}`;
+export function toQuickBooksTxnDate(date: Date, tz: string): string {
+  return dayInTimeZone(date, safeTimeZone(tz));
 }

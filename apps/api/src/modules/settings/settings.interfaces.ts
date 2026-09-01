@@ -1,6 +1,14 @@
 /** POS-level settings surfaced to the front-end. */
 export interface AppSettings {
   currency: string;
+  /**
+   * The shop's IANA timezone (e.g. `Asia/Colombo`). Every datetime is stored in
+   * UTC; this is the zone printed DOCUMENTS are rendered in — invoices, receipts
+   * and the PDF report — so one document reads the same date for everyone who
+   * opens it, including a customer opening an emailed copy. On-screen datetimes
+   * use the viewer's own browser timezone instead.
+   */
+  timezone: string;
   /** Sales tax rate as a percentage. 0 disables tax. */
   taxRatePercent: number;
   taxInclusive: boolean;

@@ -184,6 +184,16 @@ the core tables above. Field-level detail lives in `packages/database/prisma/sch
 | `QuickBooksMapping`    | Correlates local entity ids with their QuickBooks ids.                  |
 | `AuditLog`             | Append-only record of user/system actions.                              |
 
+### Dates and times
+
+Every `DateTime` column is Postgres `timestamp(3)` and holds a **UTC instant** — Prisma serialises a
+JS `Date` as its UTC wall clock and re-inflates it the same way, so the instant round-trips regardless
+of the Node or Postgres session timezone. The API and database containers additionally pin `TZ=UTC`
+(and `PGTZ=UTC`) so this is an enforced invariant rather than a default.
+
+Timezone conversion is a **display** concern only: screens render in the viewer's browser zone,
+documents in the shop's `settings.timezone`. No column stores a bare calendar day.
+
 ### Enums
 
 `UserRole`, `PaymentMethod`, `PaymentStatus`, `SyncStatus`, `DiscountType`,

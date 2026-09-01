@@ -11,8 +11,24 @@ import {
   Max,
   MaxLength,
   Min,
+  Validate,
   ValidateNested,
+  ValidatorConstraint,
+  type ValidatorConstraintInterface,
 } from 'class-validator';
+import { isValidTimeZone } from '@hardware-pos/shared';
+
+/** Accepts only an IANA zone this runtime can actually resolve. */
+@ValidatorConstraint({ name: 'isIanaTimeZone', async: false })
+export class IsIanaTimeZone implements ValidatorConstraintInterface {
+  validate(value: unknown): boolean {
+    return typeof value === 'string' && isValidTimeZone(value);
+  }
+
+  defaultMessage(): string {
+    return 'timezone must be a valid IANA timezone name (e.g. Asia/Colombo)';
+  }
+}
 
 export class UpdateReturnSettingsDto {
   @IsInt()
@@ -227,6 +243,12 @@ export class UpdateSettingsDto {
   @IsString()
   @IsOptional()
   currency?: string;
+
+  /** Shop timezone (IANA, e.g. `Asia/Colombo`). Rejected unless the runtime knows it. */
+  @IsString()
+  @Validate(IsIanaTimeZone)
+  @IsOptional()
+  timezone?: string;
 
   @IsNumber()
   @Min(0)

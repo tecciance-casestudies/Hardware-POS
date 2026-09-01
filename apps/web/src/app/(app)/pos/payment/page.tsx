@@ -66,6 +66,14 @@ export default function PaymentPage() {
   const cart = usePosCart();
 
   const currency = data.settings.currency;
+  // Keep the cart's notion of "today" on the shop's calendar, so the invoice-date
+  // picker can never offer a day the API will reject.
+  const shopTimeZone = data.settings.timezone;
+  const { setShopTimeZone } = cart;
+  React.useEffect(() => {
+    setShopTimeZone(shopTimeZone);
+  }, [shopTimeZone, setShopTimeZone]);
+
   const totals = computeTotals(cart.items, data.settings.taxRatePercent, cart.orderDiscount);
   const total = totals.total;
 

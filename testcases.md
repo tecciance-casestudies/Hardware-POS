@@ -399,6 +399,12 @@ Modules: [AUTH](#auth--sessions) · [PERM](#perm--roles--permissions) ·
 | SET-014 | Invoice note escapes HTML | Enter `<script>alert(1)</script> A & B` | Rendered as literal text, no script execution | N | Passed |
 | SET-015 | Invoice note length capped | Submit a note over 500 characters | Validation error, not persisted | N | Not Run |
 | SET-016 | Existing tenant gets the new field | Load settings for a tenant saved before this field existed | Defaults merged in, note blank, no crash | P | Passed |
+| SET-017 | Shop timezone is settable | Settings → Business → change Timezone, Save | Value persists across reload (not silently discarded) | P | Not Run |
+| SET-018 | Invalid timezone rejected | PUT /v1/settings with `timezone: "Not/AZone"` | 400 with a validation message | N | Not Run |
+| SET-019 | Documents follow the shop timezone | Set shop tz, open an invoice from a device in another tz | Invoice date/time is the shop's, not the device's | P | Not Run |
+| SET-020 | Screens follow the device timezone | Change the device timezone, reload the sales list | Times shift to the device zone; documents do not | P | Not Run |
+| SET-021 | Receipt and invoice agree | Print the A4 bill and thermal receipt for one sale | Both state the same date and time | P | Not Run |
+| SET-022 | Report exports agree | Export the sales report as PDF and XLSX | Both show the same date/time strings | P | Not Run |
 
 ## DOC — Documents & Printing
 
@@ -489,13 +495,13 @@ Modules: [AUTH](#auth--sessions) · [PERM](#perm--roles--permissions) ·
 | DASH | 20 | SUP | 15 |
 | PROD | 27 | SIMP | 8 |
 | PIMP | 13 | QB | 25 |
-| POS | 38 | SET | 9 |
+| POS | 38 | SET | 15 |
 | PAY | 22 | DOC | 11 |
 | SALE | 20 | ADM | 14 |
 | RET | 18 | UI | 16 |
 | QUO | 20 | SEC | 12 |
 
-**Total: 342 test cases** (≈60% positive / 40% negative).
+**Total: 348 test cases** (≈60% positive / 40% negative).
 
 ### Notes for automation
 

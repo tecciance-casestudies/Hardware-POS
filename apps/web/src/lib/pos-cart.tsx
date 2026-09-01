@@ -2,8 +2,10 @@
 
 import * as React from 'react';
 
+import { DEFAULT_TIME_ZONE, safeTimeZone, todayInTimeZone } from '@hardware-pos/shared';
+
 import { newCartItem, type CartItem, type LineDiscount, type OrderDiscount } from './cart';
-import { isValidYmd, todayIso } from './dates';
+import { isValidYmd } from './dates';
 import type { ClientCustomer, ClientProduct } from './catalog';
 
 /**
@@ -48,8 +50,15 @@ interface PosCartValue extends PosCartState {
    * mid-edit, so check `saleDateValid` before using it.
    */
   saleDate: string;
-  /** Today as `YYYY-MM-DD`; the newest date the picker may offer. Empty until hydration. */
+  /**
+   * Today as `YYYY-MM-DD` in the SHOP's timezone — the newest date the picker may
+   * offer. Deliberately not the browser's day: the API judges an invoice date
+   * against the shop's calendar, so a till whose browser is a day ahead would
+   * otherwise offer a date the server rejects. Empty until hydration.
+   */
   today: string;
+  /** Tell the cart which zone the shop trades in (from settings). */
+  setShopTimeZone: (tz: string) => void;
   /** True when `saleDate` is a real calendar day that is not in the future. */
   saleDateValid: boolean;
   /**
@@ -87,9 +96,11 @@ const PosCartContext = React.createContext<PosCartValue | null>(null);
 export function PosCartProvider({ children }: { children: React.ReactNode }) {
   const [state, setState] = React.useState<PosCartState>(EMPTY);
   const [hydrated, setHydrated] = React.useState(false);
-  // Client-only: the server's "today" may be a different calendar day, so
-  // computing this during render would produce a hydration mismatch.
+  // Client-only: "today" can only be resolved after mount, or the server render
+  // would disagree with the browser and trip a hydration mismatch.
   const [today, setToday] = React.useState('');
+  // Defaulted until settings load; the POS pages push the real value in.
+  const [shopTz, setShopTz] = React.useState(DEFAULT_TIME_ZONE);
 
   // Tracks the day the UI currently believes it is, so the interval below can
   // tell a real rollover from a no-op tick without re-running the effect.
@@ -97,7 +108,7 @@ export function PosCartProvider({ children }: { children: React.ReactNode }) {
 
   // Hydrate from sessionStorage after mount (avoids SSR/client mismatch).
   React.useEffect(() => {
-    const t = todayIso();
+    const t = todayInTimeZone(shopTz);
     todayRef.current = t;
     try {
       const raw = window.sessionStorage.getItem(STORAGE_KEY);
@@ -125,7 +136,7 @@ export function PosCartProvider({ children }: { children: React.ReactNode }) {
   React.useEffect(() => {
     if (!hydrated) return;
     const tick = () => {
-      const t = todayIso();
+      const t = todayInTimeZone(shopTz);
       const prev = todayRef.current;
       if (prev === t) return;
       todayRef.current = t;
@@ -133,9 +144,10 @@ export function PosCartProvider({ children }: { children: React.ReactNode }) {
       // An untouched selector follows the clock; a deliberate backdate does not.
       setState((s) => (s.saleDate === prev || !s.saleDate ? { ...s, saleDate: t } : s));
     };
+    tick();
     const id = window.setInterval(tick, 60_000);
     return () => window.clearInterval(id);
-  }, [hydrated]);
+  }, [hydrated, shopTz]);
 
   // Persist — but never before the stored cart has been read back. Without this
   // guard the mount-time run writes the initial EMPTY state over a saved cart,
@@ -262,14 +274,15 @@ export function PosCartProvider({ children }: { children: React.ReactNode }) {
       // in the same breath — seeding the date from a clock the validator has not
       // caught up with yet would mark the fresh cart future-dated until the next
       // rollover tick.
+      setShopTimeZone: (tz: string) => setShopTz(safeTimeZone(tz)),
       clearCart: () => {
-        const t = todayIso();
+        const t = todayInTimeZone(shopTz);
         todayRef.current = t;
         setToday(t);
         setState({ ...EMPTY, saleDate: t });
       },
     }),
-    [state, hydrated, today, updateItem],
+    [state, hydrated, today, shopTz, updateItem],
   );
 
   return <PosCartContext.Provider value={value}>{children}</PosCartContext.Provider>;

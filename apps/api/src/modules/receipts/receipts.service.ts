@@ -3,6 +3,8 @@ import { Prisma, PrintJob, Receipt } from '@hardware-pos/database';
 import type { Paginated } from '@hardware-pos/shared';
 
 import { paginate } from '../../common/pagination';
+import { safeTimeZone } from '@hardware-pos/shared';
+
 import { SettingsService } from '../settings/settings.service';
 import { ReceiptsRepository, SaleForReceipt } from './receipts.repository';
 import {
@@ -35,7 +37,12 @@ export class ReceiptsService {
     const sale = await this.loadCompletedSale(tenantId, saleId);
     const settings = this.settingsService.getSettings(tenantId);
 
-    const receiptData = this.toCustomerReceiptData(sale, settings.currency, settings.receiptFooter);
+    const receiptData = this.toCustomerReceiptData(
+      sale,
+      settings.currency,
+      settings.receiptFooter,
+      safeTimeZone(settings.timezone),
+    );
     const receipt = await this.receiptsRepository.upsertReceipt(
       sale.id,
       `RCP-${sale.saleNumber}`,
@@ -109,11 +116,12 @@ export class ReceiptsService {
     sale: SaleForReceipt,
     currency: string,
     footer: string,
+    tz: string,
   ): CustomerReceiptData {
     return {
       storeName: sale.tenant.name,
       saleNumber: sale.saleNumber,
-      dateTime: formatReceiptDateTime(sale.completedAt ?? sale.createdAt),
+      dateTime: formatReceiptDateTime(sale.completedAt ?? sale.createdAt, tz),
       documentType: sale.quickbooksDocumentType,
       customerName: sale.customer?.name ?? null,
       currency,

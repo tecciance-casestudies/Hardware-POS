@@ -226,6 +226,14 @@ export default function PosPage() {
     return res.reason ?? 'Not approved';
   };
 
+  // Keep the cart's notion of "today" on the shop's calendar, so the invoice-date
+  // picker can never offer a day the API will reject.
+  const shopTimeZone = data.settings.timezone;
+  const { setShopTimeZone } = cart;
+  React.useEffect(() => {
+    setShopTimeZone(shopTimeZone);
+  }, [shopTimeZone, setShopTimeZone]);
+
   const totals = computeTotals(cart.items, data.settings.taxRatePercent, cart.orderDiscount);
   const orderBase = round2(totals.subtotal - totals.totalDiscount);
 

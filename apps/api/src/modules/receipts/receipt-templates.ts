@@ -2,7 +2,7 @@
  * Printable HTML templates. Each returns a complete standalone document with
  * inline print CSS and a screen-only Print button (browser print for v1).
  */
-import { formatCurrency } from '@hardware-pos/shared';
+import { formatCurrency, formatDateTimeInTimeZone } from '@hardware-pos/shared';
 
 export interface ReceiptLine {
   name: string;
@@ -51,20 +51,13 @@ const PRINT_BUTTON = `<button class="no-print print-btn" onclick="window.print()
 /**
  * The date stamp printed on every receipt — sale and return alike.
  *
- * Rendered in the server's own timezone so a receipt names the same calendar day
- * as the A4 invoice for the same transaction (`DocumentsService.dateTime`).
- * Printing the UTC instant instead would disagree with the invoice whenever the
- * server's offset crosses midnight, and the invoice date is precisely what a
- * backdated sale exists to state.
+ * Rendered in the SHOP's timezone, matching the A4 invoice for the same
+ * transaction, so a receipt and its invoice can never name different days and a
+ * reprint always reads the same. The server's own zone is deliberately not used:
+ * it is an accident of deployment, not a property of the business.
  */
-export function formatReceiptDateTime(date: Date): string {
-  return date.toLocaleString('en-GB', {
-    day: '2-digit',
-    month: 'short',
-    year: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  });
+export function formatReceiptDateTime(date: Date, tz: string): string {
+  return formatDateTimeInTimeZone(date, tz);
 }
 
 export function renderCustomerReceipt(d: CustomerReceiptData): string {

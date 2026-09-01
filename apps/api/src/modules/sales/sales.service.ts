@@ -111,8 +111,12 @@ export class SalesService {
       customerId = dto.customerId;
     }
 
-    // Resolved before any pricing work so a future date fails fast.
-    const saleDate = resolveSaleDate(dto.saleDate);
+    // Resolved before any pricing work so a future date fails fast. Anchored in
+    // the shop's timezone, which is the zone the resulting invoice prints in.
+    const saleDate = resolveSaleDate(
+      dto.saleDate,
+      this.settingsService.getSettings(tenantId).timezone,
+    );
 
     await this.assertLocations(tenantId, branchId, registerId, customerId);
 
