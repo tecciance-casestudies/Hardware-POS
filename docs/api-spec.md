@@ -101,6 +101,11 @@ unknown zone is rejected with 400.
 The `saleDate` on `POST /v1/sales/complete` is likewise a calendar day **in the shop's timezone**, and
 "not in the future" is judged against the shop's current day.
 
+Business windows are cut on the shop's clock too. Dashboard ranges — "today", the default 7-day
+window, the per-day series buckets and a cashier's shift — run from one shop midnight to the next,
+not from the server's or the database session's. For a Colombo shop on a UTC host that is the
+difference between a day running 00:00–00:00 and one running 05:30–05:30.
+
 ### Roles & permissions
 
 Roles: `OWNER`, `ADMIN`, `SALESPERSON`, `MANAGER`, `CASHIER`, `ACCOUNTANT`. Routes are

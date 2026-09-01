@@ -1,6 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma } from '@hardware-pos/database';
 
+import { lastNDaysInTimeZone } from '@hardware-pos/shared';
+
 import { PrismaService } from '../../prisma/prisma.service';
 import { DashboardStats } from './dashboard.types';
 
@@ -48,16 +50,30 @@ export class DashboardRepository {
     return Number(rows[0]?.profit ?? 0);
   }
 
-  /** Daily (or hourly) net-sales buckets for charts/sparklines. */
+  /**
+   * Daily (or hourly) net-sales buckets for charts/sparklines, cut on the SHOP's
+   * clock rather than the database session's.
+   *
+   * `completedAt` is a `timestamp` holding a UTC wall clock, so the double
+   * `AT TIME ZONE` is doing two different jobs: the first reads the naive value
+   * back as a real UTC instant, the second re-expresses that instant as local
+   * wall-clock time in `tz`. Truncating there gives the shop's day, and the
+   * trailing `AT TIME ZONE` converts the bucket label back to an instant so the
+   * API hands out a UTC value like everything else.
+   */
   async salesSeries(
     tenantId: string,
     from: Date,
     to: Date,
     interval: 'day' | 'hour',
+    tz: string,
   ): Promise<{ bucket: Date; value: number }[]> {
     const unit = interval === 'hour' ? 'hour' : 'day';
     return this.prisma.$queryRaw<{ bucket: Date; value: number }[]>(Prisma.sql`
-      SELECT date_trunc(${unit}, s."completedAt") AS bucket,
+      SELECT (
+               date_trunc(${unit}, s."completedAt" AT TIME ZONE 'UTC' AT TIME ZONE ${tz})
+                 AT TIME ZONE ${tz}
+             ) AS bucket,
              COALESCE(SUM(s.total), 0)::float AS value
       FROM "Sale" s
       WHERE s."tenantId" = ${tenantId}
@@ -170,14 +186,18 @@ export class DashboardRepository {
     return Number(agg._sum.amount ?? 0);
   }
 
-  async getStats(tenantId: string): Promise<DashboardStats> {
-    // "Today" is the API server's local midnight.
-    const startOfToday = new Date();
-    startOfToday.setHours(0, 0, 0, 0);
+  async getStats(tenantId: string, tz: string): Promise<DashboardStats> {
+    // "Today" is the shop's calendar day — midnight to midnight where the shop
+    // trades, not where the server happens to run.
+    const { from: startOfToday, to: endOfToday } = lastNDaysInTimeZone(1, tz);
 
     const [todayAgg, productsCached, pendingSyncs, inventoryRows] = await Promise.all([
       this.prisma.sale.aggregate({
-        where: { tenantId, status: 'COMPLETED', completedAt: { gte: startOfToday } },
+        where: {
+          tenantId,
+          status: 'COMPLETED',
+          completedAt: { gte: startOfToday, lt: endOfToday },
+        },
         _sum: { total: true },
         _count: { _all: true },
       }),

@@ -405,6 +405,8 @@ Modules: [AUTH](#auth--sessions) · [PERM](#perm--roles--permissions) ·
 | SET-020 | Screens follow the device timezone | Change the device timezone, reload the sales list | Times shift to the device zone; documents do not | P | Not Run |
 | SET-021 | Receipt and invoice agree | Print the A4 bill and thermal receipt for one sale | Both state the same date and time | P | Not Run |
 | SET-022 | Report exports agree | Export the sales report as PDF and XLSX | Both show the same date/time strings | P | Not Run |
+| SET-023 | Dashboard day runs shop midnight to midnight | Complete a sale at 02:00 shop time; check "Today" | Counted for that shop day, not the previous one | P | Not Run |
+| SET-024 | Dashboard series buckets by shop day | Sales either side of shop midnight | Each lands in its own shop-day column | P | Not Run |
 
 ## DOC — Documents & Printing
 
@@ -495,13 +497,13 @@ Modules: [AUTH](#auth--sessions) · [PERM](#perm--roles--permissions) ·
 | DASH | 20 | SUP | 15 |
 | PROD | 27 | SIMP | 8 |
 | PIMP | 13 | QB | 25 |
-| POS | 38 | SET | 15 |
+| POS | 38 | SET | 17 |
 | PAY | 22 | DOC | 11 |
 | SALE | 20 | ADM | 14 |
 | RET | 18 | UI | 16 |
 | QUO | 20 | SEC | 12 |
 
-**Total: 348 test cases** (≈60% positive / 40% negative).
+**Total: 350 test cases** (≈60% positive / 40% negative).
 
 ### Notes for automation
 

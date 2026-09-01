@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  addDays,
+  daysInWindow,
   DEFAULT_TIME_ZONE,
   dayInTimeZone,
   formatDateInTimeZone,
@@ -9,6 +11,8 @@ import {
   isValidTimeZone,
   parseDay,
   safeTimeZone,
+  lastNDaysInTimeZone,
+  startOfDayInTimeZone,
   todayInTimeZone,
   zonedTimeToUtc,
 } from '@hardware-pos/shared';
@@ -119,5 +123,77 @@ describe('todayInTimeZone', () => {
   it('is the injected instant read in the given zone', () => {
     expect(todayInTimeZone('Asia/Colombo', ACROSS_MIDNIGHT)).toBe('2026-08-01');
     expect(todayInTimeZone('UTC', ACROSS_MIDNIGHT)).toBe('2026-07-31');
+  });
+});
+
+describe('calendar-day windows', () => {
+  const COLOMBO = 'Asia/Colombo';
+
+  it('starts a day at local midnight, not UTC midnight', () => {
+    // Colombo is +5:30, so its midnight is 18:30 UTC the previous day. Cutting
+    // the window at UTC midnight instead would run 05:30 to 05:30 local.
+    expect(startOfDayInTimeZone('2026-08-01', COLOMBO).toISOString()).toBe(
+      '2026-07-31T18:30:00.000Z',
+    );
+  });
+
+  it('gives "today" as one full local day', () => {
+    const now = new Date('2026-08-01T06:00:00Z'); // 11:30 in Colombo
+    const { from, to } = lastNDaysInTimeZone(1, COLOMBO, now);
+    expect(from.toISOString()).toBe('2026-07-31T18:30:00.000Z');
+    expect(to.toISOString()).toBe('2026-08-01T18:30:00.000Z');
+  });
+
+  it('treats the small hours as still being the same local day', () => {
+    // 20:00 UTC on 31 Jul is already 01:30 on 1 Aug in Colombo, so "today" is
+    // the 1st — a server-clock window would still be reporting the 31st.
+    const now = new Date('2026-07-31T20:00:00Z');
+    const { from } = lastNDaysInTimeZone(1, COLOMBO, now);
+    expect(dayInTimeZone(from, COLOMBO)).toBe('2026-08-01');
+  });
+
+  it('spans N whole local days ending with today', () => {
+    const now = new Date('2026-08-10T06:00:00Z');
+    const { from, to } = lastNDaysInTimeZone(7, COLOMBO, now);
+    expect(dayInTimeZone(from, COLOMBO)).toBe('2026-08-04');
+    expect(daysInWindow(from, to, COLOMBO)).toHaveLength(7);
+  });
+
+  it('enumerates each local day exactly once', () => {
+    const { from, to } = lastNDaysInTimeZone(3, COLOMBO, new Date('2026-08-10T06:00:00Z'));
+    expect(daysInWindow(from, to, COLOMBO)).toEqual(['2026-08-08', '2026-08-09', '2026-08-10']);
+  });
+
+  it('includes a partly-covered final day', () => {
+    const from = startOfDayInTimeZone('2026-08-01', COLOMBO);
+    const to = new Date(from.getTime() + 36 * 60 * 60 * 1000); // 1.5 days
+    expect(daysInWindow(from, to, COLOMBO)).toEqual(['2026-08-01', '2026-08-02']);
+  });
+
+  it('counts whole days across a DST transition', () => {
+    // 8 Mar 2026 is 23 hours long in New York; the window must still be 3 days.
+    const now = new Date('2026-03-09T16:00:00Z');
+    const { from, to } = lastNDaysInTimeZone(3, 'America/New_York', now);
+    expect(daysInWindow(from, to, 'America/New_York')).toEqual([
+      '2026-03-07',
+      '2026-03-08',
+      '2026-03-09',
+    ]);
+  });
+
+  it('returns nothing for an inverted window', () => {
+    const d = startOfDayInTimeZone('2026-08-01', COLOMBO);
+    expect(daysInWindow(d, d, COLOMBO)).toEqual([]);
+  });
+});
+
+describe('addDays', () => {
+  it('crosses month and year boundaries', () => {
+    expect(addDays('2026-08-31', 1)).toBe('2026-09-01');
+    expect(addDays('2026-01-01', -1)).toBe('2025-12-31');
+  });
+
+  it('handles a leap day', () => {
+    expect(addDays('2028-02-28', 1)).toBe('2028-02-29');
   });
 });

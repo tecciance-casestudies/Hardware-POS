@@ -149,6 +149,63 @@ export function parseDay(ymd: string): { year: number; month: number; day: numbe
   return { year, month, day };
 }
 
+/** `YYYY-MM-DD` shifted by whole calendar days. Pure string/date arithmetic. */
+export function addDays(ymd: string, days: number): string {
+  const p = parseDay(ymd);
+  if (!p) return ymd;
+  const d = new Date(Date.UTC(p.year, p.month - 1, p.day + days));
+  return d.toISOString().slice(0, 10);
+}
+
+/**
+ * The UTC instant at which `ymd` begins in `tz` — i.e. local midnight.
+ *
+ * This is the boundary business windows are cut on: "today's sales" runs from
+ * one local midnight to the next, not from whatever midnight the server or the
+ * database session happens to keep.
+ */
+export function startOfDayInTimeZone(ymd: string, tz: string): Date {
+  const p = parseDay(ymd);
+  if (!p) return new Date(NaN);
+  return zonedTimeToUtc(p.year, p.month, p.day, 0, 0, 0, tz);
+}
+
+/**
+ * The half-open window `[start, end)` covering `days` calendar days in `tz` and
+ * ending at the close of today. `days = 1` is exactly today, midnight to midnight.
+ */
+export function lastNDaysInTimeZone(
+  days: number,
+  tz: string,
+  now: Date = new Date(),
+): { from: Date; to: Date } {
+  const today = todayInTimeZone(tz, now);
+  const span = Math.max(1, Math.floor(days));
+  return {
+    from: startOfDayInTimeZone(addDays(today, -(span - 1)), tz),
+    to: startOfDayInTimeZone(addDays(today, 1), tz),
+  };
+}
+
+/**
+ * Every calendar day in `tz` touched by the half-open window `[from, to)`.
+ * Used to zero-fill a series so a day with no sales still gets a slot — and so
+ * the slots line up with the shop's days rather than 24-hour chunks.
+ */
+export function daysInWindow(from: Date, to: Date, tz: string, cap = 400): string[] {
+  if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime()) || to <= from) return [];
+  const first = dayInTimeZone(from, tz);
+  // `to` is exclusive, so the last covered day is the one holding `to - 1ms`.
+  const last = dayInTimeZone(new Date(to.getTime() - 1), tz);
+  const out: string[] = [];
+  let day = first;
+  while (day <= last && out.length < cap) {
+    out.push(day);
+    day = addDays(day, 1);
+  }
+  return out;
+}
+
 const DATE_OPTS: Intl.DateTimeFormatOptions = {
   day: '2-digit',
   month: 'short',

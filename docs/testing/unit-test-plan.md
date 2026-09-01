@@ -67,6 +67,7 @@ Unit: POS cart reducer/store (`apps/web`, Vitest/Jest + Testing Library).
 | U-04-2 | Add same product again | Quantity merges to 2 (no duplicate line). |
 | U-04-3 | Cart totals | Subtotal/discount/tax/total recomputed on each change. |
 | U-04-4 | Remove line | Line removed; totals updated; empty cart disables checkout. |
+| U-04-7 | Dashboard day windows | The default range, the shift window and the per-day series slots are cut on the shop's midnights, not the server's; a sale in the small hours lands in the right shop day. Covered by `apps/api/src/modules/dashboard/dashboard.service.spec.ts`. |
 | U-04-6 | Timezone maths | `zonedTimeToUtc` / `dayInTimeZone` round-trip a calendar day in a named zone and use the offset in force on that day across a DST boundary; `safeTimeZone` degrades an unknown zone to the default. Covered by `apps/web/src/lib/timezone.test.ts`. |
 | U-04-5 | Invoice-date helpers | `todayIso` reports the LOCAL day (zero-padded), not the UTC one; `isValidYmd` rejects the partial/6-digit-year values a date input emits mid-typing. Covered by `apps/web/src/lib/dates.test.ts`. |
 
