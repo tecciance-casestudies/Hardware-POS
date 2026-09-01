@@ -96,7 +96,8 @@ moment a value is shown, and which zone depends on what is being shown:
 Documents are pinned to the shop's zone deliberately: an invoice is a business record, so a reprint —
 or the customer's emailed copy opened in another country — must carry the same date as the original.
 `settings.timezone` is an IANA name (default `Asia/Colombo`) settable via `PUT /v1/settings`; an
-unknown zone is rejected with 400.
+unknown zone is rejected with 400. Any zone the runtime knows is accepted, and the Settings picker
+offers the full IANA set grouped by region.
 
 The `saleDate` on `POST /v1/sales/complete` is likewise a calendar day **in the shop's timezone**, and
 "not in the future" is judged against the shop's current day.

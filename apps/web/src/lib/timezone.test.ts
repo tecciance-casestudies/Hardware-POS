@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   addDays,
+  availableTimeZones,
   daysInWindow,
   DEFAULT_TIME_ZONE,
   dayInTimeZone,
@@ -13,6 +14,7 @@ import {
   safeTimeZone,
   lastNDaysInTimeZone,
   startOfDayInTimeZone,
+  timeZoneOffsetLabel,
   todayInTimeZone,
   zonedTimeToUtc,
 } from '@hardware-pos/shared';
@@ -195,5 +197,58 @@ describe('addDays', () => {
 
   it('handles a leap day', () => {
     expect(addDays('2028-02-28', 1)).toBe('2028-02-29');
+  });
+});
+
+describe('availableTimeZones', () => {
+  const zones = availableTimeZones();
+
+  it('offers the whole IANA set, not a shortlist', () => {
+    expect(zones.length).toBeGreaterThan(300);
+  });
+
+  it('includes UTC, which the supported-values list omits', () => {
+    expect(zones).toContain('UTC');
+  });
+
+  it('includes the default and a spread of regions', () => {
+    expect(zones).toContain(DEFAULT_TIME_ZONE);
+    for (const region of ['Africa/', 'America/', 'Asia/', 'Europe/', 'Pacific/']) {
+      expect(zones.some((z) => z.startsWith(region))).toBe(true);
+    }
+  });
+
+  it('is sorted and free of duplicates', () => {
+    expect([...zones].sort((a, b) => a.localeCompare(b))).toEqual(zones);
+    expect(new Set(zones).size).toBe(zones.length);
+  });
+
+  it('offers only zones the formatters actually accept', () => {
+    for (const tz of zones) expect(isValidTimeZone(tz)).toBe(true);
+  });
+});
+
+describe('timeZoneOffsetLabel', () => {
+  it('reports the offset in UTC±HH:MM form', () => {
+    expect(timeZoneOffsetLabel('Asia/Colombo')).toBe('UTC+05:30');
+    expect(timeZoneOffsetLabel('UTC')).toBe('UTC+00:00');
+  });
+
+  it('reflects the offset in force at the given instant (DST)', () => {
+    const summer = new Date('2026-07-01T12:00:00Z');
+    const winter = new Date('2026-01-01T12:00:00Z');
+    expect(timeZoneOffsetLabel('Europe/London', summer)).toBe('UTC+01:00');
+    expect(timeZoneOffsetLabel('Europe/London', winter)).toBe('UTC+00:00');
+  });
+
+  it('handles a negative and an extreme offset', () => {
+    expect(timeZoneOffsetLabel('America/New_York', new Date('2026-01-01T12:00:00Z'))).toBe(
+      'UTC-05:00',
+    );
+    expect(timeZoneOffsetLabel('Pacific/Kiritimati')).toBe('UTC+14:00');
+  });
+
+  it('degrades rather than throwing on an unknown zone', () => {
+    expect(timeZoneOffsetLabel('Not/AZone')).toBe(timeZoneOffsetLabel(DEFAULT_TIME_ZONE));
   });
 });

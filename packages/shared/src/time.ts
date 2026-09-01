@@ -32,6 +32,60 @@ export function browserTimeZone(): string {
   }
 }
 
+/**
+ * Every IANA zone this runtime knows, plus `UTC`.
+ *
+ * Read from ICU via `Intl.supportedValuesOf` rather than shipping a zone list:
+ * a bundled list goes stale every time a country changes its rules, whereas this
+ * one is exactly the set `Intl` will actually accept. `UTC` is added explicitly
+ * because the canonical database spells it `Etc/UTC` and omits both from the
+ * supported-values output.
+ *
+ * The fallback covers runtimes predating `supportedValuesOf` (Safari < 15.4) —
+ * a short list is a degraded picker, not a broken one, and the API still accepts
+ * any valid zone typed by other means.
+ */
+export function availableTimeZones(): string[] {
+  const withUtc = (list: string[]) =>
+    Array.from(new Set([...list, 'UTC'])).sort((a, b) => a.localeCompare(b));
+  try {
+    const supported = (
+      Intl as unknown as { supportedValuesOf?: (k: string) => string[] }
+    ).supportedValuesOf?.('timeZone');
+    if (supported?.length) return withUtc(supported);
+  } catch {
+    /* fall through */
+  }
+  return withUtc([
+    DEFAULT_TIME_ZONE,
+    'Asia/Dubai',
+    'Asia/Kolkata',
+    'Asia/Singapore',
+    'Europe/London',
+  ]);
+}
+
+/**
+ * `UTC+05:30` — the zone's current offset, for labelling a picker. The offset is
+ * a property of the instant, not the zone, so a DST zone reads differently in
+ * summer and winter; that is accurate rather than a defect.
+ */
+export function timeZoneOffsetLabel(tz: string, now: Date = new Date()): string {
+  try {
+    const part = new Intl.DateTimeFormat('en-GB', {
+      timeZone: safeTimeZone(tz),
+      timeZoneName: 'longOffset',
+    })
+      .formatToParts(now)
+      .find((p) => p.type === 'timeZoneName')?.value;
+    // ICU spells it GMT±HH:MM, and renders GMT alone at zero offset.
+    if (!part) return 'UTC+00:00';
+    return part === 'GMT' ? 'UTC+00:00' : part.replace('GMT', 'UTC');
+  } catch {
+    return 'UTC+00:00';
+  }
+}
+
 /** True when `tz` is a zone this runtime actually knows. */
 export function isValidTimeZone(tz: string): boolean {
   if (!tz) return false;
