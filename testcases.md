@@ -407,6 +407,8 @@ Modules: [AUTH](#auth--sessions) · [PERM](#perm--roles--permissions) ·
 | SET-022 | Report exports agree | Export the sales report as PDF and XLSX | Both show the same date/time strings | P | Not Run |
 | SET-023 | Dashboard day runs shop midnight to midnight | Complete a sale at 02:00 shop time; check "Today" | Counted for that shop day, not the previous one | P | Not Run |
 | SET-024 | Dashboard series buckets by shop day | Sales either side of shop midnight | Each lands in its own shop-day column | P | Not Run |
+| SET-025 | Existing businesses backfilled to Sri Lanka | Run migrations on a database predating the timezone field | Every business reads `Asia/Colombo`; one that had chosen another zone keeps it | P | Not Run |
+| SET-026 | A newly provisioned business has a timezone | Provision a tenant, read its settings | `Asia/Colombo` stored, not merely defaulted | P | Not Run |
 
 ## DOC — Documents & Printing
 
@@ -497,13 +499,13 @@ Modules: [AUTH](#auth--sessions) · [PERM](#perm--roles--permissions) ·
 | DASH | 20 | SUP | 15 |
 | PROD | 27 | SIMP | 8 |
 | PIMP | 13 | QB | 25 |
-| POS | 38 | SET | 17 |
+| POS | 38 | SET | 19 |
 | PAY | 22 | DOC | 11 |
 | SALE | 20 | ADM | 14 |
 | RET | 18 | UI | 16 |
 | QUO | 20 | SEC | 12 |
 
-**Total: 350 test cases** (≈60% positive / 40% negative).
+**Total: 352 test cases** (≈60% positive / 40% negative).
 
 ### Notes for automation
 

@@ -23,6 +23,18 @@ async function main(): Promise<void> {
     create: { id: TENANT_ID, name: 'Demo Hardware Store', slug: 'demo' },
   });
 
+  // Pin the shop timezone explicitly, matching what provisioning and the
+  // backfill migration do, so a seeded tenant is not the odd one out.
+  const existingSettings = await prisma.tenantSettings.findFirst({
+    where: { tenantId: tenant.id, branchId: null },
+    select: { id: true },
+  });
+  if (!existingSettings) {
+    await prisma.tenantSettings.create({
+      data: { tenantId: tenant.id, branchId: null, data: { timezone: 'Asia/Colombo' } },
+    });
+  }
+
   const branch = await prisma.branch.upsert({
     where: { id: BRANCH_ID },
     update: {},

@@ -194,6 +194,11 @@ of the Node or Postgres session timezone. The API and database containers additi
 Timezone conversion is a **display** concern only: screens render in the viewer's browser zone,
 documents in the shop's `settings.timezone`. No column stores a bare calendar day.
 
+Every business carries an explicit `timezone` in `TenantSettings.data`, defaulting to `Asia/Colombo`
+(Sri Lanka). It is written when a tenant is provisioned, and a migration backfilled it for businesses
+that pre-date the field — so a shop's zone is a stored decision rather than whatever the code default
+happens to be.
+
 ### Enums
 
 `UserRole`, `PaymentMethod`, `PaymentStatus`, `SyncStatus`, `DiscountType`,
