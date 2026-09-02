@@ -38,7 +38,7 @@ PIN-based staff accounts.
 | id          | uuid PK   |                                               |
 | name        | string    |                                               |
 | pinHash     | string    | Hashed PIN (never stored in plaintext)        |
-| role        | UserRole  | `CASHIER` \| `MANAGER` \| `ADMIN`             |
+| role        | UserRole  | `CASHIER` \| `MANAGER` \| `ADMIN` \| `OWNER` \| `ACCOUNTANT` \| `SALESPERSON` |
 | isActive    | boolean   | default `true`                                |
 | createdAt   | datetime  |                                               |
 | updatedAt   | datetime  |                                               |
@@ -95,7 +95,7 @@ One completed (or in-progress) transaction.
 | amountPaid    | Decimal(12,2) | sum of payments; `< total` ⇒ INVOICE, `>= total` ⇒ RECEIPT    |
 | qboId         | string?       | id of the created QBO SalesReceipt/Invoice — **unique**       |
 | syncStatus    | SyncStatus    | `PENDING` \| `SYNCING` \| `SYNCED` \| `FAILED`                 |
-| completedAt   | datetime?     |                                                                |
+| completedAt   | datetime?     | Invoice date — user-selectable at completion, defaults to now, never future. Printed on documents, filed in QBO, and the column reports/dashboards filter on. Indexed. |
 | createdAt     | datetime      |                                                                |
 | updatedAt     | datetime      |                                                                |
 
@@ -183,6 +183,21 @@ the core tables above. Field-level detail lives in `packages/database/prisma/sch
 | `QuickBooksConnection` | Per-tenant OAuth tokens, realm id, and environment.                     |
 | `QuickBooksMapping`    | Correlates local entity ids with their QuickBooks ids.                  |
 | `AuditLog`             | Append-only record of user/system actions.                              |
+
+### Dates and times
+
+Every `DateTime` column is Postgres `timestamp(3)` and holds a **UTC instant** — Prisma serialises a
+JS `Date` as its UTC wall clock and re-inflates it the same way, so the instant round-trips regardless
+of the Node or Postgres session timezone. The API and database containers additionally pin `TZ=UTC`
+(and `PGTZ=UTC`) so this is an enforced invariant rather than a default.
+
+Timezone conversion is a **display** concern only: screens render in the viewer's browser zone,
+documents in the shop's `settings.timezone`. No column stores a bare calendar day.
+
+Every business carries an explicit `timezone` in `TenantSettings.data`, defaulting to `Asia/Colombo`
+(Sri Lanka). It is written when a tenant is provisioned, and a migration backfilled it for businesses
+that pre-date the field — so a shop's zone is a stored decision rather than whatever the code default
+happens to be.
 
 ### Enums
 

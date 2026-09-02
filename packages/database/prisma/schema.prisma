@@ -27,6 +27,7 @@ enum UserRole {
   ADMIN
   OWNER
   ACCOUNTANT
+  SALESPERSON
 }
 
 enum PaymentMethod {
@@ -588,6 +589,10 @@ model Sale {
   @@index([customerId])
   @@index([syncStatus])
   @@index([createdAt])
+  // Sales history, the PDF report and every dashboard window filter and order on
+  // the business date, which backdating decouples from createdAt. Composite
+  // because every one of those queries is already tenant-scoped.
+  @@index([tenantId, completedAt])
 }
 
 model SaleItem {

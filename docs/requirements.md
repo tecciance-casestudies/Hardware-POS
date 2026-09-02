@@ -33,6 +33,9 @@ The POS is authoritative for:
 | Cashier   | Log in with PIN, search products, build a cart, take payment, print receipts |
 | Manager   | Everything a cashier can do, plus approve high discounts, view all sales     |
 | Admin     | Manage users, configure the QBO connection, view sync logs, retry syncs      |
+| Owner     | Everything — the full permission set, with no discount ceiling               |
+| Accountant| Read sales, sync logs and QuickBooks status; no selling or editing           |
+| Salesperson | Owner-equivalent: the same full permission set and no discount ceiling     |
 
 ## 3. Functional requirements
 
@@ -66,6 +69,18 @@ The POS is authoritative for:
 - **FR-12** Take payment (cash, card — recorded as a payment method + amount).
 - **FR-13** Determine the transaction type from amount paid vs. total (see §4).
 - **FR-14** Persist the sale locally first, then enqueue it for QBO sync.
+- **FR-15** Set the **invoice date** from the POS cart (a date selector directly above the
+  customer dropdown, defaulting to today) so a sale can be recorded on the day it actually
+  took place. The chosen date is the one printed on the invoice and receipt, the date the
+  transaction is filed under in QuickBooks, and the date the sale is placed under in the
+  sales history and dashboard figures.
+- **FR-16** Reject a **future** invoice date. Stock is still adjusted at completion time,
+  regardless of the date chosen.
+- **FR-17** Store every date and time as a **UTC instant**. Convert to a timezone only when
+  displaying: on-screen values use the **viewer's own** device timezone (read from the browser),
+  while printed and emailed documents — invoice, receipt, PDF/XLSX reports — use the configured
+  **shop timezone**, so one document reads the same date for everyone who opens it.
+- **FR-18** Let an owner/admin set the shop timezone in Settings (IANA name; default `Asia/Colombo`).
 
 ### 3.6 Receipt
 

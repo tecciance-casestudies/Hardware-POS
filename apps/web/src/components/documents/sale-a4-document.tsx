@@ -5,6 +5,8 @@ import * as React from 'react';
 import type { DocumentProfile, SaleDocumentMeta } from '@/lib/document-template-service';
 import { resolveImageUrl } from '@/lib/products-api';
 import type { SaleDetail } from '@/lib/sales';
+import { formatDateTimeInTimeZone } from '@hardware-pos/shared';
+
 import { formatMoney } from '@/lib/utils';
 
 /**
@@ -32,15 +34,15 @@ const PAYMENT_LABELS: Record<string, string> = {
   OTHER: 'Other',
 };
 
-function formatDateTime(iso: string | null): string {
+/**
+ * Dates on this invoice are stated in the SHOP's timezone, not the viewer's.
+ * The stored value is a UTC instant; rendering it in whatever zone the printer
+ * happens to sit in would let the same invoice carry two different dates —
+ * unacceptable for a document that is filed as a business record.
+ */
+function formatDateTime(iso: string | null, tz: string): string {
   if (!iso) return '—';
-  return new Date(iso).toLocaleString('en-GB', {
-    day: '2-digit',
-    month: 'short',
-    year: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  });
+  return formatDateTimeInTimeZone(new Date(iso), tz);
 }
 
 export function SaleA4Document({
@@ -113,7 +115,7 @@ export function SaleA4Document({
           <div className="a4-meta-list">
             <div>
               <span className="a4-k">Date</span>
-              {formatDateTime(sale.completedAt ?? sale.createdAt)}
+              {formatDateTime(sale.completedAt ?? sale.createdAt, profile.timezone)}
             </div>
             <div>
               <span className="a4-k">Branch</span>
@@ -216,7 +218,7 @@ export function SaleA4Document({
         {/* Footer */}
         <div className="a4-foot">
           {profile.footerText || 'Thank you for your business!'}
-          <span className="a4-gen">Generated {formatDateTime(new Date().toISOString())}</span>
+          <span className="a4-gen">Generated {formatDateTime(new Date().toISOString(), profile.timezone)}</span>
         </div>
         {profile.billNote ? <div className="a4-billnote">{profile.billNote}</div> : null}
       </div>

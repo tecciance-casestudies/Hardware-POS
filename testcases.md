@@ -7,7 +7,9 @@ has a stable ID for traceability into automated Playwright specs.
 - **Status**: `Not Run` → `Pass` / `Fail` / `Blocked` / `Automated` (update as
   cases are executed manually or scripted)
 - Unless stated otherwise, cases assume the seeded demo tenant and the roles:
-  Owner (email login), Manager, Cashier, Accountant.
+  Owner (email login), Salesperson (email login), Manager, Cashier,
+  Accountant. Salesperson is owner-equivalent — every gate the owner
+  clears must open for it too.
 
 Modules: [AUTH](#auth--sessions) · [PERM](#perm--roles--permissions) ·
 [DASH](#dash--dashboards) · [PROD](#prod--products--categories) ·
@@ -55,6 +57,12 @@ Modules: [AUTH](#auth--sessions) · [PERM](#perm--roles--permissions) ·
 | PERM-007 | Cashier cannot see gross profit card | Cashier dashboard | No Gross Profit KPI (REPORT_READ gated) | P | Not Run |
 | PERM-008 | API rejects missing permissions consistently | Call representative manage endpoints per role matrix | 403 for each disallowed role | N | Not Run |
 | PERM-009 | User management requires USER_MANAGE | Cashier calls GET /v1/users | 403 | N | Not Run |
+| PERM-010 | Salesperson has owner-level user management | Salesperson calls GET /v1/users | 200 with the tenant's users | P | Not Run |
+| PERM-011 | Salesperson may permanently delete a supplier | Salesperson opens supplier profile, deletes | Delete succeeds where a manager gets 403 | P | Not Run |
+| PERM-012 | Salesperson may manage products | POST /v1/products with salesperson token | Product created | P | Not Run |
+| PERM-013 | Salesperson reaches owner-only QuickBooks routes | Salesperson calls GET /v1/quickbooks/connect | Not 403 (role gate allows owner-level roles) | P | Not Run |
+| PERM-014 | Salesperson nav matches the owner's | Log in as salesperson | Same nav entries as PERM-001 | P | Not Run |
+| PERM-015 | Salesperson discount needs no approval | Apply a 50% line discount as salesperson | Accepted with no manager PIN prompt (unlimited ceiling) | P | Not Run |
 
 ## DASH — Dashboards
 
@@ -168,6 +176,11 @@ Modules: [AUTH](#auth--sessions) · [PERM](#perm--roles--permissions) ·
 | POS-031 | Hold sale as draft | Create draft via POST /sales/draft with cart lines | Draft persisted; stock NOT decremented | P | Not Run |
 | POS-032 | Complete a held draft | Complete the draft later | Stock decremented exactly once; sale gets final S-number | P | Not Run |
 | POS-033 | Draft re-validates stock at completion | Stock sells out after drafting; complete draft | 400 insufficient stock; nothing partial | N | Not Run |
+| POS-034 | Invoice date selector position and default | Open POS, view the cart panel | A date selector sits directly above the customer dropdown, pre-filled with today | P | Not Run |
+| POS-035 | Backdate a sale from the cart | Set the invoice date to an earlier day | Field shows the picked date and a "Backdated" marker | P | Not Run |
+| POS-036 | Invoice date survives the payment round-trip | Pick a past date, go to Payment, return to the cart | The picked date is still selected | P | Not Run |
+| POS-037 | Forward dating blocked in the picker | Try to pick tomorrow | The picker refuses it (max = today) | N | Not Run |
+| POS-038 | Invoice date resets after a completed sale | Complete a backdated sale, start a new one | The selector is back to today | P | Not Run |
 
 ## PAY — Payments & Credit
 
@@ -211,6 +224,15 @@ Modules: [AUTH](#auth--sessions) · [PERM](#perm--roles--permissions) ·
 | SALE-009 | Cashier sees only permitted actions | Cashier opens sale detail | No admin-only actions (e.g. retry-sync if QB-gated) | P | Not Run |
 | SALE-010 | Sales report endpoint | GET /sales/report for a date range | Aggregates match the underlying sales; filters respected | P | Not Run |
 | SALE-011 | Manual per-sale sync | POST /sales/:id/sync on a NOT_SYNCED sale | Queued and pushed like the automatic path | P | Not Run |
+| SALE-012 | Sale with no date is dated now | Complete a sale without `saleDate` | `completedAt` is the current time | P | Not Run |
+| SALE-013 | Past date stored as the sale date | Complete with `saleDate` 10 days ago | `completedAt` falls on the picked day | P | Not Run |
+| SALE-014 | Future sale date rejected | Complete with `saleDate` = tomorrow | 400; no sale created | N | Not Run |
+| SALE-015 | Rejected date moves no stock | Complete with a future `saleDate` | Stock unchanged; no sale row, no sync job | N | Not Run |
+| SALE-016 | Stock moves today for a backdated sale | Complete dated 45 days ago | Stock decremented now, not on the picked date | P | Not Run |
+| SALE-017 | Backdated sale lists under its invoice date | Filter the sales history by the picked day, then by today | Present in the first, absent from the second | P | Not Run |
+| SALE-018 | Backdated sale prints its invoice date | Open the A4 bill for a backdated sale | Document date is the picked date | P | Not Run |
+| SALE-019 | QuickBooks filed under the invoice date | Sync a backdated sale | QBO document `TxnDate` equals the picked day | P | Not Run |
+| SALE-020 | Quotation conversion is not backdated | Convert a quotation to a sale | Sale is dated now; no backdating on this path | P | Not Run |
 
 ## RET — Returns & Refunds
 
@@ -377,6 +399,16 @@ Modules: [AUTH](#auth--sessions) · [PERM](#perm--roles--permissions) ·
 | SET-014 | Invoice note escapes HTML | Enter `<script>alert(1)</script> A & B` | Rendered as literal text, no script execution | N | Passed |
 | SET-015 | Invoice note length capped | Submit a note over 500 characters | Validation error, not persisted | N | Not Run |
 | SET-016 | Existing tenant gets the new field | Load settings for a tenant saved before this field existed | Defaults merged in, note blank, no crash | P | Passed |
+| SET-017 | Shop timezone is settable | Settings → Business → change Timezone, Save | Value persists across reload (not silently discarded) | P | Not Run |
+| SET-018 | Invalid timezone rejected | PUT /v1/settings with `timezone: "Not/AZone"` | 400 with a validation message | N | Not Run |
+| SET-019 | Documents follow the shop timezone | Set shop tz, open an invoice from a device in another tz | Invoice date/time is the shop's, not the device's | P | Not Run |
+| SET-020 | Screens follow the device timezone | Change the device timezone, reload the sales list | Times shift to the device zone; documents do not | P | Not Run |
+| SET-021 | Receipt and invoice agree | Print the A4 bill and thermal receipt for one sale | Both state the same date and time | P | Not Run |
+| SET-022 | Report exports agree | Export the sales report as PDF and XLSX | Both show the same date/time strings | P | Not Run |
+| SET-023 | Dashboard day runs shop midnight to midnight | Complete a sale at 02:00 shop time; check "Today" | Counted for that shop day, not the previous one | P | Not Run |
+| SET-024 | Dashboard series buckets by shop day | Sales either side of shop midnight | Each lands in its own shop-day column | P | Not Run |
+| SET-025 | Existing businesses backfilled to Sri Lanka | Run migrations on a database predating the timezone field | Every business reads `Asia/Colombo`; one that had chosen another zone keeps it | P | Not Run |
+| SET-026 | A newly provisioned business has a timezone | Provision a tenant, read its settings | `Asia/Colombo` stored, not merely defaulted | P | Not Run |
 
 ## DOC — Documents & Printing
 
@@ -463,17 +495,17 @@ Modules: [AUTH](#auth--sessions) · [PERM](#perm--roles--permissions) ·
 | Module | Cases | Module | Cases |
 |---|---|---|---|
 | AUTH | 15 | CUST | 14 |
-| PERM | 9 | CIMP | 10 |
+| PERM | 15 | CIMP | 10 |
 | DASH | 20 | SUP | 15 |
 | PROD | 27 | SIMP | 8 |
 | PIMP | 13 | QB | 25 |
-| POS | 33 | SET | 9 |
+| POS | 38 | SET | 19 |
 | PAY | 22 | DOC | 11 |
-| SALE | 11 | ADM | 14 |
+| SALE | 20 | ADM | 14 |
 | RET | 18 | UI | 16 |
 | QUO | 20 | SEC | 12 |
 
-**Total: 322 test cases** (≈60% positive / 40% negative).
+**Total: 352 test cases** (≈60% positive / 40% negative).
 
 ### Notes for automation
 

@@ -98,6 +98,9 @@ The cart is client-side; the server equivalent is a **draft** sale.
 | ID | Request | Expected |
 | --- | --- | --- |
 | I-08-1 | `POST /v1/sales/complete` CASH = total | 201; `paymentStatus=PAID`, `balanceAmount=0`, `quickbooksDocumentType=SALES_RECEIPT`, `syncStatus=PENDING`. |
+| I-08-4 | Complete with a past `saleDate` | 201; `completedAt` falls on the picked day; stock still decremented in the same transaction. |
+| I-08-5 | Complete with a future `saleDate` | 400; no Sale row and no SyncJob created; stock unchanged. |
+| I-08-6 | Sales history is filtered by the invoice date | A backdated sale is returned for its picked day and absent from today's range. |
 | I-08-2 | SyncJob enqueued | One `SyncJob` (`SALES_SYNC`,`PENDING`) + `SyncLog` (`SALE/OUTBOUND/PENDING`) in the same tx. |
 | I-08-3 | Payment row | `method=CASH`, `syncStatus=NOT_SYNCED`. |
 
@@ -170,15 +173,17 @@ Use the stub's "force N failures" control. Worker disabled → drive the queue v
 
 Run the same protected request as each role; assert allow/deny.
 
-| ID | Endpoint | Owner | Admin | Manager | Cashier | Accountant |
-| --- | --- | --- | --- | --- | --- | --- |
-| I-15-1 | `POST /sales/complete` (`sale:create`) | ✅ | ✅ | ✅ | ✅ | ❌ 403 |
-| I-15-2 | `POST /discounts/approve` (`sale:create`) | ✅ | ✅ | ✅ | ✅ | ❌ |
-| I-15-3 | `POST /quickbooks/sync-products` (`quickbooks:manage`) | ✅ | ✅ | ❌ | ❌ | ❌ |
-| I-15-4 | `POST /quickbooks/sync-sale/:id` (`quickbooks:manage`) | ✅ | ✅ | ❌ | ❌ | ❌ |
-| I-15-5 | `GET /sync/logs` (`sync:read`) | ✅ | ✅ | ❌ | ❌ | ✅ |
-| I-15-6 | `POST /sync/sales/:id/retry` (`sync:read`) | ✅ | ✅ | ❌ | ❌ | ✅ |
-| I-15-7 | `GET /quickbooks/connect` (`@Roles OWNER/ADMIN`) | ✅ | ✅ | ❌ | ❌ | ❌ |
+Salesperson is an owner-equivalent role, so its column must match Owner's on every row.
+
+| ID | Endpoint | Owner | Admin | Salesperson | Manager | Cashier | Accountant |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| I-15-1 | `POST /sales/complete` (`sale:create`) | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ 403 |
+| I-15-2 | `POST /discounts/approve` (`sale:create`) | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
+| I-15-3 | `POST /quickbooks/sync-products` (`quickbooks:manage`) | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
+| I-15-4 | `POST /quickbooks/sync-sale/:id` (`quickbooks:manage`) | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
+| I-15-5 | `GET /sync/logs` (`sync:read`) | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ |
+| I-15-6 | `POST /sync/sales/:id/retry` (`sync:read`) | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ |
+| I-15-7 | `GET /quickbooks/connect` (`@Roles OWNER/ADMIN/SALESPERSON`) | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
 | I-15-8 | No / invalid JWT on any protected route | 401 for all. |
 | I-15-9 | Cross-tenant read (token tnt_dev, id from another tenant) | 404 (tenant-scoped), never leaks. |
 

@@ -2,9 +2,11 @@ import { BadRequestException, Injectable, Logger, NotFoundException } from '@nes
 import { Prisma } from '@hardware-pos/database';
 
 import { PrismaService } from '../../prisma/prisma.service';
+import { toQuickBooksTxnDate } from '../sales/sale-date';
 import { QuickBooksConfig } from './quickbooks.config';
 import { QuickBooksRepository } from './quickbooks.repository';
 import { QuickBooksService } from './quickbooks.service';
+import { SettingsService } from '../settings/settings.service';
 import {
   createInvoice,
   createPayment,
@@ -39,6 +41,7 @@ export class QuickBooksSalesSyncService {
     private readonly oauth: QuickBooksService,
     private readonly connections: QuickBooksRepository,
     private readonly config: QuickBooksConfig,
+    private readonly settings: SettingsService,
   ) {}
 
   /**
@@ -85,7 +88,8 @@ export class QuickBooksSalesSyncService {
 
       const customerRef = await this.resolveCustomerRef(tenantId, sale.customerId);
       const lines = await this.buildLines(tenantId, sale);
-      const docBody = this.buildDocumentBody(sale, lines, customerRef);
+      const txnDate = this.txnDate(tenantId, sale);
+      const docBody = this.buildDocumentBody(sale, lines, customerRef, txnDate);
 
       let documentId: string;
       let quickbooksPaymentId: string | null = null;
@@ -114,6 +118,9 @@ export class QuickBooksSalesSyncService {
             CustomerRef: customerRef,
             TotalAmt: paidAmount,
             PrivateNote: `POS sale ${sale.saleNumber}`,
+            // Match the invoice: a payment dated after it would sit in a later
+            // period than the sale it settles.
+            TxnDate: txnDate,
             Line: [{ Amount: paidAmount, LinkedTxn: [{ TxnId: documentId, TxnType: 'Invoice' }] }],
           });
           quickbooksPaymentId = payment.Id;
@@ -245,14 +252,26 @@ export class QuickBooksSalesSyncService {
     return parts.join(' ');
   }
 
+  /** The sale's invoice day as QuickBooks wants it, read in the shop's timezone. */
+  private txnDate(tenantId: string, sale: SaleWithSyncRelations): string {
+    return toQuickBooksTxnDate(
+      sale.completedAt ?? sale.createdAt,
+      this.settings.getSettings(tenantId).timezone,
+    );
+  }
+
   private buildDocumentBody(
     sale: SaleWithSyncRelations,
     lines: QboSalesLine[],
     customerRef: QboRef | null,
+    txnDate: string,
   ): QboSalesDocumentInput {
     const body: QboSalesDocumentInput = {
       DocNumber: sale.saleNumber,
       PrivateNote: `POS sale ${sale.saleNumber}`,
+      // File the document under the POS invoice date, so a backdated sale lands
+      // in the right QuickBooks period instead of defaulting to today.
+      TxnDate: txnDate,
       Line: lines,
     };
     if (customerRef) body.CustomerRef = customerRef;

@@ -67,6 +67,9 @@ Unit: POS cart reducer/store (`apps/web`, Vitest/Jest + Testing Library).
 | U-04-2 | Add same product again | Quantity merges to 2 (no duplicate line). |
 | U-04-3 | Cart totals | Subtotal/discount/tax/total recomputed on each change. |
 | U-04-4 | Remove line | Line removed; totals updated; empty cart disables checkout. |
+| U-04-7 | Dashboard day windows | The default range, the shift window and the per-day series slots are cut on the shop's midnights, not the server's; a sale in the small hours lands in the right shop day. Covered by `apps/api/src/modules/dashboard/dashboard.service.spec.ts`. |
+| U-04-6 | Timezone maths | `zonedTimeToUtc` / `dayInTimeZone` round-trip a calendar day in a named zone and use the offset in force on that day across a DST boundary; `safeTimeZone` degrades an unknown zone to the default. Covered by `apps/web/src/lib/timezone.test.ts`. |
+| U-04-5 | Invoice-date helpers | `todayIso` reports the LOCAL day (zero-padded), not the UTC one; `isValidYmd` rejects the partial/6-digit-year values a date input emits mid-typing. Covered by `apps/web/src/lib/dates.test.ts`. |
 
 ## 5. Quantity change
 
@@ -103,7 +106,7 @@ Units: `DiscountsService.approve`, `resolveApproval`, approval-token sign/verify
 | U-07-1 | Cashier 0% limit exceeded | Over-limit line without token → error requiring approval. |
 | U-07-2 | Manager approves ≤15% | `approve` returns `{approved:true, approvedByUserId, approvalToken}` (signed JWT). |
 | U-07-3 | Manager approves >15% | `approved:false` — over the manager's own cap. |
-| U-07-4 | Owner/Admin | Unlimited; no approval token needed. |
+| U-07-4 | Owner/Admin/Salesperson | Unlimited; no approval token needed. |
 | U-07-5 | Valid token covers the line | `resolveApproval` accepts a token matching product/type/value; sets `approvedByUserId`. |
 | U-07-6 | Tampered / expired / mismatched token | Rejected; line not approved. |
 | U-07-7 | Wrong manager PIN | `approve` fails auth; no token. |
@@ -117,6 +120,8 @@ Unit: payment-status derivation in `SalesService.complete`.
 | U-08-1 | Cash = total | `paymentStatus=PAID`, `balanceAmount=0`, `quickbooksDocumentType=SALES_RECEIPT`. |
 | U-08-2 | Cash > total (overpay) | `PAID`; `balanceAmount=0` (clamped `max(0, total−paid)`). |
 | U-08-3 | Method persisted | Payment row `method=CASH`, `syncStatus=NOT_SYNCED`. |
+| U-08-5 | Invoice date is judged in the shop zone | `resolveSaleDate` accepts a day that is already today in the shop's zone while still yesterday in UTC, and rejects one that is tomorrow there. |
+| U-08-4 | Invoice date resolution | `resolveSaleDate` keeps the picked calendar day in LOCAL time (never UTC-midnight), carries the current time of day, accepts today, and rejects tomorrow, an impossible day (2026-02-30) and an absurd year. Covered by `apps/api/src/modules/sales/sale-date.spec.ts`. |
 
 ## 9. Card payment
 
@@ -159,6 +164,7 @@ Unit: `QuickBooksSalesSyncService.buildLines` / `buildDocumentBody` for a fully-
 | U-12-4 | No-discount line | `Amount=lineSubtotal`, `UnitPrice` included. |
 | U-12-5 | Discounted line | `Amount=lineTotal` (net), `UnitPrice` omitted, discount noted in `Description`. |
 | U-12-6 | Tax | `TxnTaxDetail.TotalTax` only when `taxAmount>0`. |
+| U-12-7 | Invoice date | `TxnDate` = the sale's `completedAt` as a bare local `YYYY-MM-DD`; a late-evening sale does not roll to the next day. Covered by `apps/api/src/modules/quickbooks/quickbooks-sales-sync.service.spec.ts`. |
 
 ## 13. QuickBooks Invoice + Payment document build
 
@@ -169,6 +175,7 @@ Unit: `QuickBooksSalesSyncService.buildLines` / `buildDocumentBody` for a fully-
 | U-13-3 | Payment created when paid>0 | A `payment` body with `TotalAmt=paidAmount`, `LinkedTxn → invoice`. |
 | U-13-4 | Pure credit (paid=0) | Invoice only, no payment. |
 | U-13-5 | Paid>0 but no customer mapping | Fails with a clear message (payment needs CustomerRef). |
+| U-13-6 | Payment date | The linked Payment carries the same `TxnDate` as its invoice, so it is never dated ahead of the sale it settles. |
 
 ## 14. Sync queue & retry logic
 
@@ -195,10 +202,11 @@ Units: `PermissionsGuard`, `RolesGuard`, `roleHasPermission`, `ROLE_PERMISSIONS`
 | U-15-1 | Permission map correctness | Cashier lacks `discount:approve` & `quickbooks:manage`; Manager has `discount:approve`; Accountant has `sync:read`,`quickbooks:read` but not `sale:create`. |
 | U-15-2 | `@RequirePermissions` allow | User whose role includes the permission → guard returns true. |
 | U-15-3 | `@RequirePermissions` deny | Missing permission → `ForbiddenException`. |
-| U-15-4 | `@Roles` allow/deny | `quickbooks:connect` restricted to OWNER/ADMIN. |
+| U-15-4 | `@Roles` allow/deny | `quickbooks:connect` restricted to OWNER/ADMIN/SALESPERSON. |
 | U-15-5 | `@Public` bypass | Public routes skip auth. |
 | U-15-6 | Missing/invalid JWT | `JwtAuthGuard` → `UnauthorizedException`. |
 | U-15-7 | Tenant scoping | `@TenantId` from JWT (falls back to `x-tenant-id`); cross-tenant id is never trusted from the body. |
+| U-15-8 | Salesperson ↔ Owner parity | `ROLE_PERMISSIONS.SALESPERSON` equals `ROLE_PERMISSIONS.OWNER`; same unlimited discount limit; `isAdminLevelRole` true. Covered by `apps/api/src/modules/auth/permissions.spec.ts`. |
 
 ---
 

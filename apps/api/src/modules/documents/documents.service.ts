@@ -2,10 +2,13 @@ import { Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@hardware-pos/database';
 import {
   formatCurrency,
+  formatDateInTimeZone,
+  formatDateTimeInTimeZone,
   ITEM_CONDITION_LABELS,
   QUOTATION_STATUS_LABELS,
   QuotationStatusCode,
   RETURN_REASON_LABELS,
+  safeTimeZone,
   type ItemConditionCode,
   type ReturnReasonCode,
 } from '@hardware-pos/shared';
@@ -141,8 +144,8 @@ export class DocumentsService {
     summary.push({ label: 'Grand total', value: formatCurrency(q.grandTotal), strong: true });
 
     const meta = [
-      { label: 'Issue date', value: this.date(q.issueDate) },
-      { label: 'Valid until', value: q.validUntil ? this.date(q.validUntil) : '—' },
+      { label: 'Issue date', value: this.date(q.issueDate, this.tz(tenantId)) },
+      { label: 'Valid until', value: q.validUntil ? this.date(q.validUntil, this.tz(tenantId)) : '—' },
       { label: 'Status', value: QUOTATION_STATUS_LABELS[q.status] },
     ];
 
@@ -161,7 +164,7 @@ export class DocumentsService {
       terms: q.termsAndConditions,
       footerText: docs.footerText,
       signatures: docs.signatureFields,
-      ...this.layout(docs),
+      ...this.layout(docs, this.tz(tenantId)),
     };
   }
 
@@ -228,7 +231,7 @@ export class DocumentsService {
 
     const paymentMethods = sale.payments.map((p) => p.method).join(', ');
     const meta = [
-      { label: 'Date', value: this.date((sale.completedAt ?? sale.createdAt).toISOString()) },
+      { label: 'Date', value: this.date((sale.completedAt ?? sale.createdAt).toISOString(), this.tz(tenantId)) },
       { label: 'Payment', value: sale.paymentStatus },
       ...(paymentMethods ? [{ label: 'Method', value: paymentMethods }] : []),
     ];
@@ -259,7 +262,7 @@ export class DocumentsService {
       footerText: docs.footerText,
       billNote: docs.billNote || null,
       signatures: docs.signatureFields,
-      ...this.layout(docs),
+      ...this.layout(docs, this.tz(tenantId)),
     };
   }
 
@@ -322,7 +325,7 @@ export class DocumentsService {
     summary.push({ label: 'Refund status', value: ret.refundStatus });
 
     const meta = [
-      { label: 'Date', value: this.date((ret.completedAt ?? ret.createdAt).toISOString()) },
+      { label: 'Date', value: this.date((ret.completedAt ?? ret.createdAt).toISOString(), this.tz(tenantId)) },
       { label: 'Original sale', value: ret.originalSale.saleNumber },
     ];
 
@@ -352,7 +355,7 @@ export class DocumentsService {
       notes: ret.notes,
       footerText: docs.footerText,
       signatures: docs.signatureFields,
-      ...this.layout(docs),
+      ...this.layout(docs, this.tz(tenantId)),
     };
   }
 
@@ -418,13 +421,13 @@ export class DocumentsService {
       seller: this.seller(docs, sellerName, null, null, null),
       title: 'Exchange',
       number: exchangeNumber,
-      meta: [{ label: 'Date', value: this.date(new Date().toISOString()) }],
+      meta: [{ label: 'Date', value: this.date(new Date().toISOString(), this.tz(tenantId)) }],
       columns: this.columns({ ...docs, showTaxColumn: false, showDiscountColumn: false }),
       rows: this.rows(lines, { ...docs, showTaxColumn: false, showDiscountColumn: false }),
       summary,
       footerText: docs.footerText,
       signatures: docs.signatureFields,
-      ...this.layout(docs),
+      ...this.layout(docs, this.tz(tenantId)),
     };
   }
 
@@ -503,12 +506,12 @@ export class DocumentsService {
     const meta =
       type === 'quotation'
         ? [
-            { label: 'Issue date', value: this.date(new Date().toISOString()) },
-            { label: 'Valid until', value: this.date(new Date(Date.now() + 14 * 864e5).toISOString()) },
+            { label: 'Issue date', value: this.date(new Date().toISOString(), this.tz(tenantId)) },
+            { label: 'Valid until', value: this.date(new Date(Date.now() + 14 * 864e5).toISOString(), this.tz(tenantId)) },
             { label: 'Status', value: 'Sent' },
           ]
         : [
-            { label: 'Date', value: this.date(new Date().toISOString()) },
+            { label: 'Date', value: this.date(new Date().toISOString(), this.tz(tenantId)) },
             { label: 'Payment', value: type === 'return' ? 'Refunded' : 'Paid' },
             { label: 'Method', value: 'Cash' },
           ];
@@ -539,7 +542,7 @@ export class DocumentsService {
       footerText: docs.footerText,
       billNote: type === 'invoice' ? docs.billNote || null : null,
       signatures: docs.signatureFields,
-      ...this.layout(docs),
+      ...this.layout(docs, this.tz(tenantId)),
     };
   }
 
@@ -567,7 +570,7 @@ export class DocumentsService {
    * into each builder's return value so all document types honour the admin's
    * branding + layout settings from one place.
    */
-  private layout(docs: DocumentSettings): Pick<
+  private layout(docs: DocumentSettings, tz: string): Pick<
     A4Document,
     | 'accentColor'
     | 'logoAlignment'
@@ -586,18 +589,12 @@ export class DocumentsService {
       signatureImageUrl: docs.signatureUrl,
       stampImageUrl: docs.stampUrl,
       showPageNumbers: docs.showPageNumbers,
-      generatedAt: this.dateTime(new Date()),
+      generatedAt: this.dateTime(new Date(), tz),
     };
   }
 
-  private dateTime(d: Date): string {
-    return d.toLocaleString('en-GB', {
-      day: '2-digit',
-      month: 'short',
-      year: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-    });
+  private dateTime(d: Date, tz: string): string {
+    return formatDateTimeInTimeZone(d, tz);
   }
 
   private customerParty(
@@ -666,8 +663,17 @@ export class DocumentsService {
     return Number.isInteger(n) ? String(n) : String(n);
   }
 
-  private date(iso: string): string {
-    const d = new Date(iso);
-    return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+  private date(iso: string, tz: string): string {
+    return formatDateInTimeZone(new Date(iso), tz);
+  }
+
+  /**
+   * The zone printed documents are rendered in. Deliberately the SHOP's zone and
+   * not the requester's: an invoice is a business record, so a reprint — or the
+   * customer's emailed copy opened in another country — must carry the same date
+   * as the original. On-screen datetimes use the viewer's own zone instead.
+   */
+  private tz(tenantId: string): string {
+    return safeTimeZone(this.settings.getSettings(tenantId).timezone);
   }
 }

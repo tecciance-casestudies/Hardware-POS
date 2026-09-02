@@ -31,7 +31,7 @@ Two login methods issue the same bearer JWT (payload: `sub`, `tenantId`, `role`)
 `Authorization: Bearer <token>` on all other calls; the tenant is taken from the token.
 
 ```
-POST /v1/auth/login                   # email + password (owner / admin / accountant)
+POST /v1/auth/login                   # email + password (owner / admin / salesperson / accountant)
 body:  { "email": "owner@hardwarepos.test", "password": "password123" }
 200 →  { "data": { "token": "...", "user": { "id", "tenantId", "name", "email", "role" } } }
 401 →  invalid email or password
@@ -51,11 +51,11 @@ GET  /v1/auth/me                      # current user + effective permissions
 Each sale line may carry a manual discount (`PERCENTAGE` or `FIXED`), a `discountReason`, and —
 when it exceeds the operator's limit — an approver. Per-role limits (percentage of the line):
 
-| Role              | Max discount without approval |
-| ----------------- | ----------------------------- |
-| Cashier / Accountant | 0%                         |
-| Manager           | 15%                           |
-| Owner / Admin     | unlimited                     |
+| Role                         | Max discount without approval |
+| ---------------------------- | ----------------------------- |
+| Cashier / Accountant         | 0%                            |
+| Manager                      | 15%                           |
+| Owner / Admin / Salesperson  | unlimited                     |
 
 If a line's discount exceeds the acting user's limit, sale create returns **403** with a
 machine-readable body so the front-end can pop a manager-PIN modal:
@@ -82,18 +82,46 @@ sale item. The approver's own limit is re-checked against the real line at compl
 manager token cannot cover a discount beyond 15%). Completing a draft reuses the approver
 already recorded on the draft line — no re-approval needed.
 
+### Dates and times
+
+Every datetime is **stored and transmitted as a UTC instant** and crosses the wire as an ISO-8601
+string. Nothing is persisted as a bare calendar day. Conversion to a timezone happens only at the
+moment a value is shown, and which zone depends on what is being shown:
+
+| Surface | Timezone |
+| ------- | -------- |
+| On screen (sales list, dashboard, sync times) | the **viewer's own** browser timezone |
+| Documents — invoice, receipt, PDF/XLSX report, emailed or shared copies | the **shop's** timezone, from `settings.timezone` |
+
+Documents are pinned to the shop's zone deliberately: an invoice is a business record, so a reprint —
+or the customer's emailed copy opened in another country — must carry the same date as the original.
+`settings.timezone` is an IANA name (default `Asia/Colombo`) settable via `PUT /v1/settings`; an
+unknown zone is rejected with 400. Any zone the runtime knows is accepted, and the Settings picker
+offers the full IANA set grouped by region.
+
+The `saleDate` on `POST /v1/sales/complete` is likewise a calendar day **in the shop's timezone**, and
+"not in the future" is judged against the shop's current day.
+
+Business windows are cut on the shop's clock too. Dashboard ranges — "today", the default 7-day
+window, the per-day series buckets and a cashier's shift — run from one shop midnight to the next,
+not from the server's or the database session's. For a Colombo shop on a UTC host that is the
+difference between a day running 00:00–00:00 and one running 05:30–05:30.
+
 ### Roles & permissions
 
-Roles: `OWNER`, `ADMIN`, `MANAGER`, `CASHIER`, `ACCOUNTANT`. Routes are protected by a global
-JWT guard plus role/permission guards. Summary of enforced access:
+Roles: `OWNER`, `ADMIN`, `SALESPERSON`, `MANAGER`, `CASHIER`, `ACCOUNTANT`. Routes are
+protected by a global JWT guard plus role/permission guards. `SALESPERSON` is an
+owner-equivalent role — it carries exactly the `OWNER` permission set, the same
+unlimited discount ceiling, and the same admin-level overrides. Summary of enforced
+access:
 
-| Capability                         | Roles                          |
-| ---------------------------------- | ------------------------------ |
-| Create sales / take payments       | Cashier, Manager, Owner, Admin |
-| Approve high discounts             | Manager, Owner, Admin          |
-| View sync logs & QuickBooks status | Accountant, Owner, Admin       |
-| Connect QuickBooks / manage users / settings | Owner, Admin         |
-| Everything                         | Owner, Admin                   |
+| Capability                         | Roles                                       |
+| ---------------------------------- | ------------------------------------------- |
+| Create sales / take payments       | Cashier, Manager, Owner, Admin, Salesperson |
+| Approve high discounts             | Manager, Owner, Admin, Salesperson          |
+| View sync logs & QuickBooks status | Accountant, Owner, Admin, Salesperson       |
+| Connect QuickBooks / manage users / settings | Owner, Admin, Salesperson         |
+| Everything                         | Owner, Admin, Salesperson                   |
 
 Unauthenticated → `401`; authenticated but not permitted → `403`.
 
@@ -117,7 +145,7 @@ GET /v1/products/barcode/{barcode}
 GET /v1/products/{id}
 200 → single product   |   404 → not found
 
-POST /v1/products/sync/mock            # simulate a QuickBooks catalog pull (owner/admin only)
+POST /v1/products/sync/mock            # simulate a QuickBooks catalog pull (owner-level roles only)
 200 → { "data": { "created", "updated", "total", "categories" } }
 403 → lacks quickbooks:manage
 
@@ -149,13 +177,19 @@ body: { "branchId", "registerId?", "customerId?",
 200 → { "data": <sale with items, status DRAFT, syncStatus NOT_SYNCED> }
 
 POST /v1/sales/complete                # complete a draft (saleId) OR a full cart in one shot
-body (draft):    { "saleId", "customerId?", "payments": [ { "method", "amount", "reference?" } ] }
-body (one-shot): { "branchId", "registerId?", "customerId?", "items": [ ... ], "payments": [ ... ] }
+body (draft):    { "saleId", "customerId?", "saleDate?", "payments": [ { "method", "amount", "reference?" } ] }
+body (one-shot): { "branchId", "registerId?", "customerId?", "saleDate?", "items": [ ... ], "payments": [ ... ] }
 201 → { "data": <sale status COMPLETED, paymentStatus, quickbooksDocumentType, syncStatus PENDING> }
 400 → validation error (empty cart, price changed, insufficient stock,
-       unapproved high discount, or credit/partial sale without a customer)
+       unapproved high discount, credit/partial sale without a customer,
+       or a sale date in the future)
 
-# Completion pipeline: validate items → validate prices vs cache → check stock →
+# saleDate: the invoice date, as a YYYY-MM-DD calendar date. Omitted = now. It is
+#   interpreted in the SERVER's timezone and stored as the sale's `completedAt`, which
+#   is the date printed on the invoice/receipt, filed in QuickBooks, and used to place
+#   the sale in the sales history and dashboard. A future date is rejected; stock still
+#   moves at completion time, not on the chosen date.
+# Completion pipeline: resolve the sale date → validate items → validate prices vs cache → check stock →
 #   subtotal → product-wise discounts → tax (if rate > 0) → total → save sale,
 #   items, payments → enqueue an outbound QuickBooks sync job.
 # Transaction type: paidAmount >= total → SALES_RECEIPT; otherwise INVOICE (customer required).
@@ -240,7 +274,7 @@ Real Intuit OAuth 2.0. Configure `QUICKBOOKS_CLIENT_ID`, `QUICKBOOKS_CLIENT_SECR
 refresh tokens are stored **encrypted at rest** (AES-256-GCM) and never returned to the client.
 
 ```
-GET  /v1/quickbooks/connect            # owner/admin — 302 → Intuit authorization screen
+GET  /v1/quickbooks/connect            # owner/admin/salesperson — 302 → Intuit authorization screen
                                        # state is a signed, short-lived JWT carrying the tenant
 
 GET  /v1/quickbooks/callback           # public redirect target from Intuit
@@ -249,7 +283,7 @@ GET  /v1/quickbooks/callback           # public redirect target from Intuit
                                        # 302 → {WEB_ORIGIN}/quickbooks?connected=1
                                        # on failure → …/quickbooks?error=<message>
 
-POST /v1/quickbooks/disconnect         # owner/admin — revokes the token and removes the connection
+POST /v1/quickbooks/disconnect         # owner/admin/salesperson — revokes the token and removes the connection
 200 → { "data": { "disconnected": true } }
 
 GET  /v1/quickbooks/status             # quickbooks:read — never exposes tokens
@@ -277,7 +311,10 @@ POST /v1/quickbooks/sync-products      # quickbooks:manage — requires an activ
 
 Pushes a completed sale to QuickBooks. A **fully paid** sale becomes a **Sales Receipt**; a
 **credit / partial** sale becomes an **Invoice**, and when any amount was paid a **Payment** is
-created and linked to that invoice. Sale line items reference their `quickbooksItemId` when the
+created and linked to that invoice. Both the document and its linked Payment carry a `TxnDate`
+equal to the sale's invoice date (a bare `YYYY-MM-DD` in server-local time), so a backdated POS
+sale is filed in QuickBooks on the day it happened rather than the day it was keyed in.
+Sale line items reference their `quickbooksItemId` when the
 product has been synced. Product-wise discounts are baked into each line's net amount (QuickBooks
 has no per-line discount field) and noted in the line description — see the `TODO(accountant)`
 comments where an itemised discount line or document-level discount would need confirmation.
