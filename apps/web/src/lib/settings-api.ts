@@ -44,6 +44,48 @@ export interface DocumentSettings {
   showPageNumbers: boolean;
   defaultBillFormat: BillFormat;
   signatureFields: boolean;
+
+  /*
+   * D99 — the thermal bill's paper geometry. Read by `resolveBillGeometry`,
+   * never by a component: the template and the print frame both take their
+   * width from that one resolver so the two cannot drift.
+   */
+  billPaperWidthMm: number;
+  billLeftInsetMm: number;
+  billRightInsetMm: number;
+  billFitToContent: boolean;
+}
+
+/**
+ * D125 Part 3 (`5.4`) and Phase 5 `5.8` — barcode prefixes and label geometry.
+ *
+ * `barcodePrefix` is `string | null`, REQUIRED on this type. Null is a real
+ * value meaning "not configured", and allocation refuses while it holds — the
+ * D125 sequencing constraint. Making it optional would let a mapper drop it and
+ * turn a deliberate refusal into an accidental one, which is the `4.15` /
+ * `4.21` shape exactly.
+ */
+export interface CatalogueSettings {
+  barcodePrefix: string | null;
+  barcodePrefixByCategoryId: Record<string, string>;
+  label: LabelSettings;
+}
+
+/** Millimetres throughout — a label is a physical object. */
+export interface LabelSettings {
+  widthMm: number;
+  heightMm: number;
+  columns: number;
+  rows: number;
+  marginTopMm: number;
+  marginLeftMm: number;
+  gapXMm: number;
+  gapYMm: number;
+  showProductName: boolean;
+  showVariantOptions: boolean;
+  showPrice: boolean;
+  showSku: boolean;
+  symbology: 'EAN13' | 'CODE128';
 }
 
 export interface AppSettings {
@@ -62,6 +104,7 @@ export interface AppSettings {
   quotation: Record<string, unknown>;
   documents: DocumentSettings;
   sharing: Record<string, unknown>;
+  catalogue: CatalogueSettings;
 }
 
 /** A partial settings update; only the groups/fields present are changed. */
@@ -73,6 +116,11 @@ export interface UpdateSettingsInput {
   highDiscountThresholdPercent?: number;
   receiptFooter?: string;
   documents?: Partial<DocumentSettings>;
+  catalogue?: {
+    barcodePrefix?: string | null;
+    barcodePrefixByCategoryId?: Record<string, string>;
+    label?: Partial<LabelSettings>;
+  };
 }
 
 export function fetchSettings(session: Session): Promise<AppSettings> {

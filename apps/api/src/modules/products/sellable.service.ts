@@ -1,0 +1,635 @@
+import { BadRequestException, Injectable } from '@nestjs/common';
+import { OrderChannel, Prisma, QuantityType, SellableKind } from '@hardware-pos/database';
+import { coerceAttributeQueryValue, domainFor } from '@hardware-pos/shared';
+import type { TenantCapabilities } from '@hardware-pos/shared';
+
+import { PrismaService } from '../../prisma/prisma.service';
+import {
+  aggregateVariantStock,
+  stockStateFor,
+  type StockState,
+  type VariantStockCell,
+} from '../../common/stock-state';
+import { variantDisplayName } from '../../common/variant-display';
+import { isPromotionActive } from '../promotions/promotions.evaluator';
+import { PromotionsRepository } from '../promotions/promotions.repository';
+import { BusinessProfileService } from '../platform/business-profile.service';
+import { SettingsService } from '../settings/settings.service';
+
+/**
+ * D62 — `GET /products/sellable`: the ONE POS read model (convergence plan
+ * §9.3, Phase 5). Replaces `GET /restaurant/pos-catalogue`, which now
+ * delegates here and reshapes to its legacy contract until its sunset.
+ *
+ * ## Capability-shaped, not domain-shaped
+ *
+ * Which blocks appear is decided by the tenant's capabilities, resolved
+ * once server-side. A retail tenant gets NO `modifierGroups` key — not an
+ * empty array, which would be indistinguishable from "has none configured"
+ * (the plan's §9.5 nullability rule). A new domain gets a working POS grid
+ * from this endpoint without a new endpoint.
+ *
+ * ## Money is a decimal STRING
+ *
+ * A JSON number cannot hold 0.1 + 0.2 and every client re-parses anyway.
+ *
+ * ## Price resolution happens HERE, once
+ *
+ * base → collection override → channel override, and the response says
+ * which rule won (`priceSource`), so no client re-derives pricing.
+ */
+
+export interface SellableQuery {
+  branchId: string;
+  channel?: OrderChannel;
+  collectionId?: string;
+  categoryId?: string;
+  sellableKind?: SellableKind;
+  foodType?: 'FOOD' | 'BEVERAGE' | 'DESSERT';
+  search?: string;
+  cursor?: string;
+  limit?: number;
+  /** D64 — raw `attr[key]=value` filters; validated against the domain schema. */
+  attr?: Record<string, string>;
+}
+
+export type PriceSource = 'BASE' | 'COLLECTION_OVERRIDE' | 'CHANNEL_OVERRIDE';
+// D101's SOLD_OUT and D121's variant rollup share one `StockState`, declared
+// in common/stock-state.ts (D136); re-exported so consumers keep this path.
+export type { StockState };
+
+export interface SellableItem {
+  id: string;
+  name: string;
+  /**
+   * D120 — the legacy single-SKU identifier, for scanning and typed search.
+   *
+   * **Null for a variant product.** D44 is explicit that once `hasVariants` is
+   * set "the variant rows own price, cost, SKU, barcode… the parent-level
+   * unitPrice / sku / quantityOnHand remain as legacy fallbacks and are not
+   * read." Returning it anyway would hand the till a value the domain says is
+   * meaningless — the same rule `unitPrice` already follows below.
+   */
+  sku: string | null;
+  description: string | null;
+  imageUrl: string | null;
+  sellableKind: SellableKind;
+  /**
+   * The QuickBooks item type — Inventory | NonInventory | Service. Carried so
+   * the till can LABEL an untracked item the way main always has ("Non-
+   * Inventory" is not "Service"); the stock question is answered by
+   * `stockState` alone (D136).
+   */
+  type: string;
+  /** Null when variants own the price. Decimal string otherwise. */
+  unitPrice: string | null;
+  effectivePrice: string | null;
+  priceSource: PriceSource;
+  category: { id: string; name: string } | null;
+  subcategory: { id: string; name: string } | null;
+  hasVariants: boolean;
+  /**
+   * D122 (3.14) — whether this product attracts tax.
+   *
+   * The till needs it to preview the same total the server will charge. 3.10
+   * narrowed the taxable base on the server only, so a cashier was quoted 18%
+   * on an exempt item the server then charged nothing for.
+   */
+  taxable: boolean;
+  /**
+   * D134 (`6.2`) — sold by the piece, or by weight/measure.
+   *
+   * The till cannot intercept what it cannot see: without this on the read
+   * model there is no way for the cart to know a numpad is needed. **Read,
+   * never inferred** — no component may guess "this looks like rice" (D56).
+   */
+  quantityType: QuantityType;
+  /** D134b — `"kg"`, `"L"`. Null for a WHOLE product, which has no unit. */
+  unitOfMeasure: string | null;
+  variants?: {
+    id: string;
+    sku: string;
+    /**
+     * D120 — the scannable code. Only `ProductVariant` has one; `Product` has no
+     * barcode column at all, which is why scanning is inherently a variant-level
+     * operation in this data model.
+     */
+    barcode: string | null;
+    name: string;
+    unitPrice: string;
+    isDefault: boolean;
+    isActive: boolean;
+    /**
+     * D120 — this variant's own branch stock, so the till can grey out a size and
+     * cap its stepper. `null` when the tenant does not track stock; `"0.000"`
+     * when the variant has no `BranchInventory` row, which is no stock rather
+     * than unknown (decision 8).
+     */
+    availableQuantity: string | null;
+    stockState: StockState;
+  }[];
+  // Present only when capabilities.catalogue.preparation.
+  prepMinutes?: number | null;
+  dietaryTags?: string[];
+  foodType?: 'FOOD' | 'BEVERAGE' | 'DESSERT' | null;
+  // Present only when capabilities.catalogue.modifiers.
+  modifierGroups?: {
+    id: string;
+    name: string;
+    selection: 'SINGLE' | 'MULTIPLE';
+    minSelections: number;
+    maxSelections: number;
+    role: string | null;
+    options: { id: string; name: string; priceDelta: string; isActive: boolean }[];
+  }[];
+  // Present only when capabilities.fulfilment.stationRouting.
+  stations?: { id: string; code: string; name: string; category: string }[];
+  promotions: { id: string; name: string; type: string; description: string | null }[];
+  // Present only when the tenant tracks stock.
+  availableQuantity?: string | null;
+  stockState?: StockState;
+}
+
+/**
+ * D123 (4.3) — a promotion in the shape the APPLIER needs, not the badge.
+ *
+ * `SellableItem.promotions` above carries `{ id, name, type, description }`: enough
+ * to show "Buy 2 Get 1" on a tile, and nothing to price it with. The till could
+ * therefore advertise an offer it was unable to apply — which is why 4.4 needs
+ * this, and why the badge shape is left exactly as it was.
+ *
+ * Sent ONCE per response rather than copied onto every participating product. A
+ * bundle rule spans products by nature, so a per-product copy would repeat the
+ * same rule on each of its members and invite two readers to diverge — the
+ * one-rule-many-implementations failure this branch has paid for three times.
+ *
+ * Decimals are STRINGS, like `unitPrice`, `priceDelta` and `availableQuantity`
+ * everywhere else in this payload: JSON numbers cannot carry a Decimal safely.
+ * The client converts once, in `catalog.ts`, on the way into the applier.
+ */
+export interface SellablePromotionRule {
+  id: string;
+  name: string;
+  type: string;
+  fixedPrice: string | null;
+  percentageOff: string | null;
+  amountOff: string | null;
+  /** D126 — the cart threshold for a cart-level FIXED_AMOUNT_DISCOUNT. */
+  minimumSpend: string | null;
+  buyQuantity: number | null;
+  getQuantity: number | null;
+  /** Promotion-to-promotion stacking. Read by 4.4, not by the applier itself. */
+  stackable: boolean;
+  items: { productId: string; role: string; quantity: number }[];
+}
+
+export interface SellableResponse {
+  items: SellableItem[];
+  total: number;
+  nextCursor: string | null;
+  /**
+   * Every promotion eligible for THIS request — same `isPromotionActive` pass
+   * that decides the badges above, so the badge and the price can never disagree
+   * about which promotions are live.
+   */
+  promotionRules: SellablePromotionRule[];
+}
+
+const MAX_LIMIT = 200;
+const DEFAULT_LIMIT = 100;
+
+/** Keyset cursor over (name, id) — the listing's stable order. */
+function encodeCursor(name: string, id: string): string {
+  return Buffer.from(JSON.stringify([name, id])).toString('base64url');
+}
+function decodeCursor(cursor: string): { name: string; id: string } | null {
+  try {
+    const [name, id] = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
+    if (typeof name === 'string' && typeof id === 'string') return { name, id };
+  } catch {
+    /* fall through */
+  }
+  return null;
+}
+
+@Injectable()
+export class SellableService {
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly promotions: PromotionsRepository,
+    private readonly profiles: BusinessProfileService,
+    // D139 — the tenant's zone, so a promotion's day/time window is read on
+    // the clock the operator set it on rather than the server's.
+    private readonly settings: SettingsService,
+  ) {}
+
+  /**
+   * The tenant's own spellings of a dietary tag that equal `term` ignoring case.
+   *
+   * One small tenant-scoped query (covered by `@@index([tenantId])`), run only
+   * when a search term is present. `unnest` flattens the `String[]` column so
+   * `lower()` can be applied per element — the comparison stays an equality,
+   * not a substring, so "veg" does not start matching "vegan".
+   */
+  private async resolveTagSpellings(tenantId: string, term: string): Promise<string[]> {
+    const rows = await this.prisma.$queryRaw<Array<{ tag: string }>>(Prisma.sql`
+      SELECT DISTINCT t AS tag
+      FROM "Product" p, unnest(p."dietaryTags") AS t
+      WHERE p."tenantId" = ${tenantId}
+        AND lower(t) = lower(${term})
+    `);
+    return rows.map((r) => r.tag);
+  }
+
+  async list(tenantId: string, query: SellableQuery): Promise<SellableResponse> {
+    const profile = await this.profiles.getEffectiveProfile(tenantId);
+    const caps: TenantCapabilities = profile.capabilities;
+    const tracksStock = profile.inventoryMode !== 'DISABLED';
+    const limit = Math.min(Math.max(query.limit ?? DEFAULT_LIMIT, 1), MAX_LIMIT);
+    const after = query.cursor ? decodeCursor(query.cursor) : null;
+
+    /*
+     * Composable AND-clauses instead of one object literal: the variants
+     * rule, the search OR and the keyset OR would otherwise fight over the
+     * single top-level `OR` key.
+     */
+    const and: Prisma.ProductWhereInput[] = [
+      // A hasVariants product with no active variants must not surface —
+      // every render path would offer options that error out when tapped.
+      { OR: [{ hasVariants: false }, { hasVariants: true, variants: { some: { isActive: true } } }] },
+    ];
+    if (query.search) {
+      /*
+       * `has` is exact array-element equality, and Prisma has no
+       * case-insensitive form of it. That made the tag half of this search
+       * case-sensitive while the other two halves were not: a cashier typing
+       * "veg" got only the rows with "Veg" in the NAME, while "Veg" matched
+       * fourteen. Lower-case is what actually gets typed at a till.
+       *
+       * Tags are free text, so there is no vocabulary to fold against and
+       * generating case variants does not work — title-casing "gluten-free"
+       * gives "Gluten-free", not the stored "Gluten-Free". Instead the
+       * tenant's real spellings are resolved first and matched with
+       * `hasSome`, which keeps the exact-match semantics `has` had and only
+       * changes the casing rule. No column and no migration (D-rule: no
+       * Prisma migration without a decision record).
+       */
+      const tagSpellings = await this.resolveTagSpellings(tenantId, query.search);
+      and.push({
+        OR: [
+          { name: { contains: query.search, mode: 'insensitive' } },
+          // Omitted entirely when the term names no tag — an empty `hasSome`
+          // matches nothing in Prisma, which would be harmless here but reads
+          // as though a tag filter applied.
+          ...(tagSpellings.length > 0
+            ? [{ dietaryTags: { hasSome: tagSpellings } } as Prisma.ProductWhereInput]
+            : []),
+          { subcategory: { name: { contains: query.search, mode: 'insensitive' } } },
+        ],
+      });
+    }
+    // D64 — attribute filters. Keys must exist in the tenant domain's schema
+    // and values must coerce to the field's type: an unknown key or an
+    // uncoercible value is a 400 naming itself, never a silently-empty page.
+    if (query.attr && Object.keys(query.attr).length > 0) {
+      const schema = domainFor(profile.businessType).catalogue.attributeSchema;
+      const byKey = new Map(schema.map((f) => [f.key, f]));
+      for (const [attrKey, raw] of Object.entries(query.attr)) {
+        const field = byKey.get(attrKey);
+        if (!field) {
+          throw new BadRequestException({
+            code: 'PRODUCT_ATTRIBUTE_FILTER_INVALID',
+            message: `Unknown attribute filter "${attrKey}" for this business type.`,
+          });
+        }
+        const coerced = coerceAttributeQueryValue(field, raw);
+        if (!coerced.ok) {
+          throw new BadRequestException({
+            code: 'PRODUCT_ATTRIBUTE_FILTER_INVALID',
+            message: coerced.message,
+          });
+        }
+        and.push({ attributes: { path: [attrKey], equals: coerced.value } });
+      }
+    }
+    // The keyset clause pages; the clauses above FILTER. `total` counts the
+    // filter only, so it is stable across pages.
+    const filterAnd = [...and];
+    if (after) {
+      and.push({
+        OR: [{ name: { gt: after.name } }, { name: after.name, id: { gt: after.id } }],
+      });
+    }
+    const where: Prisma.ProductWhereInput = {
+      tenantId,
+      isActive: true,
+      ...(query.sellableKind ? { sellableKind: query.sellableKind } : {}),
+      ...(query.categoryId ? { categoryId: query.categoryId } : {}),
+      ...(caps.catalogue.preparation && query.foodType ? { foodType: query.foodType } : {}),
+      ...(query.collectionId
+        ? {
+            catalogueEntries: {
+              some: {
+                isActive: true,
+                section: {
+                  menuId: query.collectionId,
+                  // D66 — a channel-scoped assortment only serves its
+                  // channels: asking a DINE_IN-only collection for TAKEAWAY
+                  // yields an empty page, not the collection anyway.
+                  ...(query.channel
+                    ? {
+                        menu: {
+                          OR: [
+                            { channels: { isEmpty: true } },
+                            { channels: { has: query.channel } },
+                          ],
+                        },
+                      }
+                    : {}),
+                },
+              },
+            },
+          }
+        : {}),
+      AND: and,
+    };
+
+    // ONE query for the page (+1 row to learn whether there is a next page),
+    // one count, one promotions read. Constant in the number of products.
+    const [rows, total, activePromotions] = await Promise.all([
+      this.prisma.product.findMany({
+        where,
+        orderBy: [{ name: 'asc' }, { id: 'asc' }],
+        take: limit + 1,
+        include: {
+          category: { select: { id: true, name: true } },
+          subcategory: { select: { id: true, name: true } },
+          variants: {
+            where: { isActive: true },
+            orderBy: [{ position: 'asc' }, { sku: 'asc' }],
+            include: { optionValues: { include: { option: { select: { name: true } } } } },
+          },
+          modifierGroups: {
+            orderBy: [{ position: 'asc' }],
+            include: {
+              modifierGroup: {
+                include: { options: { orderBy: [{ position: 'asc' }, { name: 'asc' }] } },
+              },
+            },
+          },
+          stationLinks: {
+            where: { station: { branchId: query.branchId } },
+            include: { station: true },
+          },
+          promotionItems: { select: { promotionId: true } },
+          ...(query.collectionId
+            ? {
+                catalogueEntries: {
+                  where: { section: { menuId: query.collectionId }, isActive: true },
+                  include: { channelPrices: true },
+                },
+              }
+            : {}),
+        },
+      }),
+      this.prisma.product.count({ where: { ...where, AND: filterAnd } }),
+      this.promotions.listForCatalogue(tenantId),
+    ]);
+
+    // D120 — one read for every variant on the page, so the till can badge each
+    // size. Keyed by variant; a variant with no row is simply absent, and reads
+    // below as zero (decision 8: variant stock comes from goods receipts).
+    const variantIds = rows.flatMap((p) => p.variants.map((v) => v.id));
+    const variantStock = new Map<string, { qty: Prisma.Decimal; reorderLevel: Prisma.Decimal | null }>();
+    if (variantIds.length > 0) {
+      const cells = await this.prisma.branchInventory.findMany({
+        where: {
+          tenantId,
+          branchId: query.branchId,
+          productVariantId: { in: variantIds },
+        },
+        select: { productVariantId: true, quantityOnHand: true, reorderLevel: true },
+      });
+      for (const cell of cells) {
+        if (cell.productVariantId === null) continue;
+        variantStock.set(cell.productVariantId, {
+          qty: cell.quantityOnHand,
+          reorderLevel: cell.reorderLevel,
+        });
+      }
+    }
+
+    const now = new Date();
+    const tenantTimeZone = this.settings.getSettings(tenantId).timezone;
+    const validPromotionsById = new Map<
+      string,
+      { id: string; name: string; type: string; description: string | null }
+    >();
+    // 4.3 — built in the SAME pass as the badges, deliberately. Two loops with
+    // two copies of the eligibility test is how a badge and a price come to
+    // disagree about which promotions are live.
+    const promotionRules: SellablePromotionRule[] = [];
+    for (const promo of activePromotions) {
+      if (
+        isPromotionActive(promo, {
+          now,
+          branchId: query.branchId,
+          channel: query.channel,
+          tenantTimeZone,
+        })
+      ) {
+        validPromotionsById.set(promo.id, {
+          id: promo.id,
+          name: promo.name,
+          type: promo.type,
+          description: promo.description,
+        });
+        promotionRules.push({
+          id: promo.id,
+          name: promo.name,
+          type: promo.type,
+          fixedPrice: promo.fixedPrice?.toString() ?? null,
+          percentageOff: promo.percentageOff?.toString() ?? null,
+          amountOff: promo.amountOff?.toString() ?? null,
+          // D126 — a cart-level promotion carries no PromotionItem rows, and
+          // reaches the till anyway because these rules are built from the
+          // tenant's active promotions rather than from the promotions hanging
+          // off each product.
+          minimumSpend: promo.minimumSpend?.toString() ?? null,
+          buyQuantity: promo.buyQuantity,
+          getQuantity: promo.getQuantity,
+          stackable: promo.stackable,
+          items: promo.items.map((it) => ({
+            productId: it.productId,
+            role: it.role,
+            quantity: it.quantity,
+          })),
+        });
+      }
+    }
+
+    const page = rows.slice(0, limit);
+    const items: SellableItem[] = page.map((p) => {
+      // ── price resolution, once, server-side ─────────────────────────────
+      const base = p.hasVariants ? null : p.unitPrice;
+      let effective = base;
+      let priceSource: PriceSource = 'BASE';
+      const entry =
+        'catalogueEntries' in p
+          ? (p as typeof p & { catalogueEntries: { priceOverride: Prisma.Decimal | null; channelPrices: { channel: string; price: Prisma.Decimal }[] }[] }).catalogueEntries[0]
+          : undefined;
+      if (entry) {
+        const channelPrice = query.channel
+          ? entry.channelPrices.find((cp) => cp.channel === query.channel)
+          : undefined;
+        if (channelPrice) {
+          effective = channelPrice.price;
+          priceSource = 'CHANNEL_OVERRIDE';
+        } else if (entry.priceOverride) {
+          effective = entry.priceOverride;
+          priceSource = 'COLLECTION_OVERRIDE';
+        }
+      }
+
+      const item: SellableItem = {
+        id: p.id,
+        name: p.name,
+        // Mirrors the `base` price rule two lines below: a variant product's
+        // parent-level SKU is a legacy fallback D44 says is not read, so the
+        // till is not handed one to match a scan against.
+        sku: p.hasVariants ? null : p.sku,
+        description: p.description,
+        imageUrl: p.imageUrl,
+        sellableKind: p.sellableKind,
+        type: p.type,
+        unitPrice: base ? base.toFixed(2) : null,
+        effectivePrice: effective ? effective.toFixed(2) : null,
+        priceSource,
+        category: p.category ? { id: p.category.id, name: p.category.name } : null,
+        subcategory: p.subcategory ? { id: p.subcategory.id, name: p.subcategory.name } : null,
+        hasVariants: p.hasVariants,
+        taxable: p.taxable,
+        quantityType: p.quantityType,
+        unitOfMeasure: p.unitOfMeasure,
+        promotions: p.promotionItems
+          .map((pi) => validPromotionsById.get(pi.promotionId))
+          .filter((v): v is NonNullable<typeof v> => Boolean(v)),
+      };
+
+      // What has no count to answer to. SERVICE and COMPOSED_ITEM by kind
+      // (D101), and — main's rule, 1ba3900 — anything whose QuickBooks type is
+      // not Inventory: the product form, the wizard and the importer force a
+      // NonInventory item's count to 0, nothing ever moves it, and the sale
+      // guard never reads it (`trackInventory: product.type === 'Inventory'`,
+      // sales.service.ts). `sellableKind` cannot stand in for the type here:
+      // deriveSellableKind maps NonInventory to STOCK_ITEM, and the D-migration
+      // that added the column defaulted every legacy Service row to STOCK_ITEM
+      // too. Reading those rows as OUT at zero greyed out on the retail till
+      // what the server would happily sell — the POL-1976 regression main had
+      // already fixed once (D136).
+      const untracked =
+        p.sellableKind === 'SERVICE' ||
+        p.sellableKind === 'COMPOSED_ITEM' ||
+        p.type !== 'Inventory';
+      const countsStock = tracksStock && !untracked;
+
+      if (caps.catalogue.variants) {
+        item.variants = p.variants.map((v) => {
+          // Same UNTRACKED reasoning as the item level: a tenant that tracks no
+          // stock — or a product that has no count — gets null rather than a
+          // fabricated zero.
+          const cell = variantStock.get(v.id);
+          const qty = cell?.qty ?? new Prisma.Decimal(0);
+          return {
+            id: v.id,
+            sku: v.sku,
+            barcode: v.barcode,
+            name: variantDisplayName(v.optionValues, v.sku),
+            unitPrice: v.unitPrice.toFixed(2),
+            isDefault: v.isDefault,
+            isActive: v.isActive,
+            availableQuantity: countsStock ? qty.toFixed(3) : null,
+            stockState: countsStock ? stockStateFor(qty, cell?.reorderLevel ?? null) : 'UNTRACKED',
+          };
+        });
+      }
+      if (caps.catalogue.preparation) {
+        item.prepMinutes = p.prepMinutes;
+        item.dietaryTags = p.dietaryTags;
+        item.foodType = p.foodType as SellableItem['foodType'];
+      }
+      if (caps.catalogue.modifiers) {
+        item.modifierGroups = p.modifierGroups.map((row) => ({
+          id: row.modifierGroup.id,
+          name: row.modifierGroup.name,
+          selection: row.modifierGroup.selection,
+          minSelections: row.modifierGroup.minSelections,
+          maxSelections: row.modifierGroup.maxSelections,
+          role: row.modifierGroup.role,
+          options: row.modifierGroup.options.map((o) => ({
+            id: o.id,
+            name: o.name,
+            priceDelta: o.priceDelta.toFixed(2),
+            isActive: o.isActive,
+          })),
+        }));
+      }
+      if (caps.fulfilment.stationRouting) {
+        item.stations = p.stationLinks.map((row) => ({
+          id: row.station.id,
+          code: row.station.code,
+          name: row.station.name,
+          category: row.station.category,
+        }));
+      }
+      if (tracksStock) {
+        // UNTRACKED is a real, distinct state — a SERVICE sells with no
+        // stock claim and must not read as OUT. COMPOSED_ITEM joins it until
+        // Phase 8 wires component depletion: restaurant orders have never
+        // moved stock (plan D-5), so a dish's quantityOnHand is a number
+        // nothing maintains — claiming OUT from it would grey out food the
+        // kitchen is happily cooking. A NonInventory item joins for main's
+        // reason, above.
+        if (untracked) {
+          item.availableQuantity = null;
+          // D101 — the 86 switch is the ONLY thing that can make an
+          // untracked item unavailable; its meaningless count never does.
+          item.stockState = p.soldOutAt ? 'SOLD_OUT' : 'UNTRACKED';
+        } else if (p.hasVariants && p.variants.length > 0) {
+          // D120 (1c.6) — stock is tracked by variant, not by product. The
+          // parent's `quantityOnHand` is the D10 rollup mirror; it is maintained
+          // on sale and receipt but it is not the authority, and it had drifted
+          // to 350 against 22 real units on the shelf. Derive from the rows that
+          // are authoritative and leave the mirror alone.
+          //
+          // Not gated on `caps.catalogue.variants`: that capability decides
+          // whether the client is SHOWN the sizes, and how much stock exists is
+          // not a display question.
+          const cells: VariantStockCell[] = p.variants.map((v) => {
+            const cell = variantStock.get(v.id);
+            return {
+              qty: cell?.qty ?? new Prisma.Decimal(0),
+              reorderLevel: cell?.reorderLevel ?? null,
+            };
+          });
+          const rolled = aggregateVariantStock(cells);
+          item.availableQuantity = rolled.quantity.toFixed(3);
+          item.stockState = rolled.state;
+        } else {
+          const qty = p.quantityOnHand;
+          item.availableQuantity = qty.toFixed(3);
+          item.stockState = stockStateFor(qty, p.reorderLevel);
+        }
+      }
+      return item;
+    });
+
+    const last = page[page.length - 1];
+    return {
+      items,
+      total,
+      nextCursor: rows.length > limit && last ? encodeCursor(last.name, last.id) : null,
+      promotionRules,
+    };
+  }
+}

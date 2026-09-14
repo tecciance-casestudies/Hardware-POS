@@ -1,13 +1,27 @@
 /**
- * Development seed — creates a demo tenant, a branch/register, and the login
- * users described in the docs. Idempotent: safe to run repeatedly.
+ * Development seed — creates two demo tenants, each with a branch/register and the
+ * login users described in the docs. Idempotent: safe to run repeatedly.
  *
  * Run with: pnpm db:seed  (from the repo root)
+ *
+ * ## Two tenants, deliberately unlike each other (Slice 8.9)
+ *
+ * `tnt_dev` is the hardware store and is left with **no platform profile row**, so
+ * a developer's default database exercises the legacy-default path that every
+ * existing production tenant is on. `tnt_resto` carries an explicit RESTAURANT
+ * profile. Between them, both branches of every profile-dependent screen are
+ * reachable without editing the database by hand — which is what made the
+ * restaurant navigation testable at all.
  */
 import { PrismaClient, UserRole } from '@prisma/client';
 import * as bcrypt from 'bcryptjs';
 
+import { BUSINESS_PROFILE_PRESETS } from '../src/business-profile-presets';
+import { linkUsersToRoles, seedTenantRoles, syncPermissionCatalogue } from '../src/seed-roles';
 import { MOCK_HARDWARE_PRODUCTS, mockCategoryId, mockCategoryNames } from '../src/mock-catalog';
+import { type CataloguePack, seedCatalogue } from '../src/catalogue-pack';
+import { CLOTHING_CATALOGUE } from '../src/mock-clothing';
+import { GROCERY_CATALOGUE } from '../src/mock-grocery';
 
 const prisma = new PrismaClient();
 
@@ -15,6 +29,62 @@ const TENANT_ID = 'tnt_dev';
 const BRANCH_ID = 'brn_dev';
 const REGISTER_ID = 'reg_dev';
 const SALT_ROUNDS = 10;
+
+const RESTAURANT_TENANT_ID = 'tnt_resto';
+/**
+ * D55 — the platform console's own tenant. It owns no business data; it exists
+ * so a cross-tenant operator satisfies `User.tenantId` and reuses the whole
+ * auth stack instead of a parallel one. `PlatformBoundaryGuard` refuses their
+ * token on every workspace route.
+ */
+const PLATFORM_TENANT_ID = 'tnt_platform';
+const PLATFORM_ADMIN_EMAIL = 'admin@axlopos.test';
+const PLATFORM_ADMIN_PASSWORD = 'Platform123!';
+/**
+ * Development-only credentials for the Restaurant demo tenant.
+ *
+ * Hashed with the same bcrypt cost as every other seeded user. **Never logged**,
+ * and never created outside development: `provision-tenant.ts` is the production
+ * path and requires a caller-supplied password or generates a random one.
+ */
+const RESTAURANT_OWNER_EMAIL = 'restaurant.owner@axlopos.test';
+const RESTAURANT_OWNER_PASSWORD = 'Restaurant123!';
+const RESTAURANT_BRANCH_ID = 'brn_resto';
+const RESTAURANT_REGISTER_ID = 'reg_resto';
+
+/*
+ * D190/D191 — the two RETAIL workspaces.
+ *
+ * The seed grew a hardware tenant, a restaurant tenant and a platform console,
+ * and never a retail one — so every retail workspace on the team was
+ * hand-provisioned on one machine. Credentials for it are useless to anyone
+ * else, because the tenant does not exist in their database: sharing a password
+ * cannot share a row.
+ *
+ * D191 made it TWO. `RETAIL` covers both trades and they exercise opposite
+ * halves of the catalogue: clothing sells a variant chain (Size x Colour, a
+ * barcode and a stock row each), grocery sells by weight (`DECIMAL` quantity,
+ * `kg` and `L`). One demo tenant could only ever show one of them, and a
+ * developer reviewing grocery work in a clothing shop is reviewing nothing.
+ *
+ * Both carry the catalogue the Product Owner actually built in the app,
+ * exported by `prisma/export-catalogue.ts` — not an invented stand-in. The
+ * whole point is that a teammate opens the same shop the PO is describing.
+ */
+const CLOTHING_TENANT_ID = 'tnt_clothing';
+const CLOTHING_BRANCH_ID = 'brn_clothing';
+const CLOTHING_REGISTER_ID = 'reg_clothing';
+const CLOTHING_SLUG = 'clothing-demo';
+const CLOTHING_OWNER_EMAIL = 'owner@kandyapparel.test';
+
+const GROCERY_TENANT_ID = 'tnt_grocery';
+const GROCERY_BRANCH_ID = 'brn_grocery';
+const GROCERY_REGISTER_ID = 'reg_grocery';
+const GROCERY_SLUG = 'grocery-demo';
+const GROCERY_OWNER_EMAIL = 'owner@grocery.test';
+
+/** Shared by both retail workspaces; documented in README.md, never printed. */
+const RETAIL_OWNER_PASSWORD = 'Retail123!';
 
 async function main(): Promise<void> {
   const tenant = await prisma.tenant.upsert({
@@ -53,29 +123,40 @@ async function main(): Promise<void> {
     bcrypt.hash('1111', SALT_ROUNDS),
   ]);
 
+  /*
+   * 2026-08-17: the hardware template staffs an Owner and Cashiers — and,
+   * since D108, an owner-equivalent Salesperson — so the demo does too; the
+   * old Manager and Accountant users are gone (and
+   * `removeRetiredDemoUsers` below clears them from a re-seeded database, so
+   * the console never shows a user whose role no longer exists). The OWNER
+   * carries the approval PIN now: the Salesperson signs in like the owner and
+   * deliberately has no PIN, so the owner is who answers the in-POS approval
+   * prompts (D48: PINs answer prompts, not the login
+   * form), and their unlimited discount cap covers everything a manager's did.
+   */
   const users = [
     {
       id: 'usr_owner',
       name: 'Owner',
       email: 'owner@hardwarepos.test',
       role: UserRole.OWNER,
-      passwordHash: password123,
-      pinHash: null as string | null,
+      passwordHash: password123 as string | null,
+      pinHash: pin2222 as string | null,
       branchId: null as string | null,
     },
     {
-      id: 'usr_accountant',
-      name: 'Accountant',
-      email: 'accountant@hardwarepos.test',
-      role: UserRole.ACCOUNTANT,
-      passwordHash: password123,
-      pinHash: null,
-      branchId: null,
-    },
-    {
-      // Owner-equivalent role, so it mirrors the owner's credentials exactly:
-      // email + password, no PIN. A 4-digit PIN is a weak credential for an
-      // account holding every permission, and `POST /auth/pin-login` is public.
+      // Owner-equivalent role (main, 2026-08-31): email + password, and — the
+      // one deliberate difference from the owner — no PIN. Main's reasoning was
+      // that a 4-digit PIN is a weak credential for an account holding every
+      // permission; on this branch PINs only answer in-POS approval prompts
+      // (D48), so what the difference means here is that the demo salesperson
+      // cannot act as an approver, and the owner's 2222 answers those prompts.
+      // A real salesperson can be given a PIN like any other user.
+      //
+      // D108 gave the hardware template a SALESPERSON row, and
+      // `linkUsersToRoles` below links this user to it by enum key like the
+      // owner and the cashier — it resolves from the database, not the enum
+      // fallback.
       id: 'usr_salesperson',
       name: 'Salesperson',
       email: 'salesperson@hardwarepos.test',
@@ -85,20 +166,11 @@ async function main(): Promise<void> {
       branchId: null,
     },
     {
-      id: 'usr_manager',
-      name: 'Manager',
-      email: null as string | null,
-      role: UserRole.MANAGER,
-      passwordHash: null as string | null,
-      pinHash: pin2222,
-      branchId: branch.id,
-    },
-    {
       id: 'usr_cashier',
       name: 'Cashier',
-      email: null,
+      email: 'cashier@hardwarepos.test',
       role: UserRole.CASHIER,
-      passwordHash: null,
+      passwordHash: password123,
       pinHash: pin1111,
       branchId: branch.id,
     },
@@ -159,16 +231,821 @@ async function main(): Promise<void> {
     });
   }
 
+  // Phase 1.5: the permission catalogue is global; roles are per tenant (D36).
+  // Landed inert — nothing resolves authorization from these rows yet.
+  const permissionCount = await syncPermissionCatalogue(prisma);
+  const tileRoles = await seedTenantRoles(prisma, tenant.id, 'HARDWARE');
+
+  /*
+   * D57: the pilot tenant is classified for real. It ran for months with no
+   * profile row, resolving through LEGACY_TENANT_DEFAULTS — verified
+   * behaviour-preserving to make explicit, because HARDWARE's default module
+   * set is exactly the legacy 13-module list. The seed mirrors what the
+   * production backfill script (backfill-pilot-profile.ts) does there.
+   */
+  await prisma.tenantBusinessProfile.upsert({
+    where: { tenantId: tenant.id },
+    update: {},
+    create: {
+      tenantId: tenant.id,
+      businessType: 'HARDWARE',
+      ...BUSINESS_PROFILE_PRESETS.HARDWARE,
+    },
+  });
+
+  const platform = await seedPlatformConsole(await bcrypt.hash(PLATFORM_ADMIN_PASSWORD, SALT_ROUNDS));
+  const restaurant = await seedRestaurant(await bcrypt.hash(RESTAURANT_OWNER_PASSWORD, SALT_ROUNDS));
+  const restaurantRoles = await seedTenantRoles(prisma, restaurant.id, 'RESTAURANT');
+  const retailHash = await bcrypt.hash(RETAIL_OWNER_PASSWORD, SALT_ROUNDS);
+  const clothing = await seedRetailShop(retailHash, CLOTHING_SHOP);
+  const grocery = await seedRetailShop(retailHash, GROCERY_SHOP);
+  const clothingRoles = clothing ? await seedTenantRoles(prisma, clothing.id, 'RETAIL') : [];
+  const groceryRoles = grocery ? await seedTenantRoles(prisma, grocery.id, 'RETAIL') : [];
+
+  // Phase 1.5.4: link seeded users to their role rows so a development database
+  // exercises DATABASE resolution rather than the legacy fallback. Safe because
+  // parity is proven — the rows grant exactly what the enum granted.
+  /*
+   * D190 — retail needs no explicit role wiring, unlike the waiter and the
+   * kitchen below. Its templates are Owner and Cashier, whose keys match
+   * their `UserRole` values, so `linkUsersToRoles` matches them by name.
+   */
+  const linked =
+    (await linkUsersToRoles(prisma, tenant.id)) +
+    (await linkUsersToRoles(prisma, restaurant.id)) +
+    (clothing ? await linkUsersToRoles(prisma, clothing.id) : 0) +
+    (grocery ? await linkUsersToRoles(prisma, grocery.id) : 0);
+
+  /*
+   * The waiter is the one user whose permissions do NOT come from their enum
+   * role. `linkUsersToRoles` only links where the role key matches the enum
+   * value, and there is no `UserRole.WAITER` — so a floor waiter would
+   * otherwise resolve as a full CASHIER, which carries SALE_READ and would put
+   * Sales back in their rail. Link it explicitly.
+   */
+  const waiterRole = await prisma.role.findFirst({
+    where: { tenantId: restaurant.id, key: 'WAITER' },
+    select: { id: true },
+  });
+  if (waiterRole) {
+    await prisma.user.update({
+      where: { id: 'usr_resto_waiter' },
+      data: { roleId: waiterRole.id },
+    });
+  }
+
+  /*
+   * Same reasoning for the restaurant cashier: their enum is CASHIER, but the
+   * food-service tenant's cashier row is RESTAURANT_CASHIER (displayed
+   * "Cashier"), so `linkUsersToRoles` cannot match it — and an unlinked user
+   * shows "Not set" in the platform console.
+   */
+  const restoCashierRole = await prisma.role.findFirst({
+    where: { tenantId: restaurant.id, key: 'RESTAURANT_CASHIER' },
+    select: { id: true },
+  });
+  if (restoCashierRole) {
+    await prisma.user.update({
+      where: { id: 'usr_resto_cashier' },
+      data: { roleId: restoCashierRole.id },
+    });
+  }
+
+  // D68 — and the kitchen, for the same reason (no matching enum value).
+  const kitchenRole = await prisma.role.findFirst({
+    where: { tenantId: restaurant.id, key: 'KITCHEN_STAFF' },
+    select: { id: true },
+  });
+  if (kitchenRole) {
+    await prisma.user.update({
+      where: { id: 'usr_resto_kitchen' },
+      data: { roleId: kitchenRole.id },
+    });
+  }
+
+  // 2026-08-17: clear the retired demo users from a database seeded before
+  // the role trim. Delete where nothing references them; deactivate where
+  // history does — a re-run must converge, not crash.
+  for (const id of ['usr_manager', 'usr_accountant']) {
+    try {
+      await prisma.user.delete({ where: { id } });
+    } catch {
+      await prisma.user
+        .update({ where: { id }, data: { isActive: false } })
+        .catch(() => undefined); // absent on a fresh database — nothing to do
+    }
+  }
+
   /* eslint-disable no-console */
   console.log('Seeded tenant:', tenant.id);
   console.log(`Seeded ${MOCK_HARDWARE_PRODUCTS.length} products across ${mockCategoryNames().length} categories`);
   console.log('Login users:');
-  console.log('  Owner       owner@hardwarepos.test / password123');
-  console.log('  Accountant  accountant@hardwarepos.test / password123');
-  console.log('  Salesperson salesperson@hardwarepos.test / password123');
-  console.log('  Manager     PIN 2222  (x-tenant-id: ' + tenant.id + ')');
-  console.log('  Cashier     PIN 1111  (x-tenant-id: ' + tenant.id + ')');
+  console.log('  Owner       owner@hardwarepos.test / password123  (approval PIN 2222)');
+  console.log('  Salesperson salesperson@hardwarepos.test / password123  (owner-equivalent)');
+  console.log('  Cashier     cashier@hardwarepos.test / password123  (approval PIN 1111)');
+  console.log('');
+  console.log('Seeded tenant:', restaurant.id, '(RESTAURANT · LOCAL inventory · no accounting)');
+  console.log('Login users:');
+  // The password is deliberately NOT printed. It is a development-only credential
+  // documented in docs/restaurant-pos/09-phase-1-acceptance.md; echoing secrets to
+  // a terminal is how they end up in scrollback, CI logs and screenshots.
+  console.log(`  Owner       ${RESTAURANT_OWNER_EMAIL}   workspace: restaurant-demo`);
+  console.log('              password: see docs/restaurant-pos/09-phase-1-acceptance.md');
+  console.log('  Cashier     restaurant.cashier@axlopos.test  (approval PIN 3333)');
+  console.log('  Waiter      waiter@axlopos.test  (approval PIN 4444) — no Kitchen/Sales/Reports, read-only catalogue');
+  console.log('  Kitchen     kitchen@axlopos.test  (approval PIN 5555) — the kitchen board only');
+  console.log('');
+  for (const [shop, seeded] of [
+    [CLOTHING_SHOP, clothing],
+    [GROCERY_SHOP, grocery],
+  ] as const) {
+    if (!seeded) continue;
+    const { categories, products, variants, stockRows } = seeded.pack;
+    console.log('Seeded tenant:', seeded.id, '(RETAIL · LOCAL inventory · no accounting)');
+    console.log(
+      `  ${shop.name} — ${products} products, ${variants} variants, ` +
+        `${categories} categories, ${stockRows} stock rows`,
+    );
+    console.log(`  ${shop.blurb}`);
+    console.log('Login users:');
+    // Same rule as the restaurant above: the password is documented, not echoed.
+    console.log(`  Owner       ${shop.ownerEmail.padEnd(30)} workspace: ${shop.slug}`);
+    console.log('              password: see the seeded-logins table in README.md');
+    console.log(`  Cashier     ${shop.cashierEmail.padEnd(30)} (approval PIN ${shop.cashierPin})`);
+    console.log('');
+  }
+  console.log(`\nPlatform console: ${platform.id}`);
+  console.log(`  Platform admin  ${PLATFORM_ADMIN_EMAIL} / ${PLATFORM_ADMIN_PASSWORD}`);
+  console.log('                  manages workspaces and users; refused every workspace route.\n');
+
+  console.log(`Permission catalogue: ${permissionCount} keys`);
+  console.log(
+    `Roles: ${tileRoles.length} for ${tenant.id}, ${restaurantRoles.length} for ${restaurant.id}, ` +
+      `${clothingRoles.length} for ${CLOTHING_TENANT_ID}, ${groceryRoles.length} for ${GROCERY_TENANT_ID}`,
+  );
+  console.log(`Users linked to role rows: ${linked} (these resolve permissions from the database)`);
   /* eslint-enable no-console */
+}
+
+/**
+ * D191 — what distinguishes one retail workspace from another.
+ *
+ * Everything a clothing shop and a grocery need from the seed is the same
+ * except these fields and the catalogue. Writing the seeder twice would mean
+ * two places to fix the day a third trade appears, and the second copy would
+ * be the one that drifts.
+ */
+interface RetailShop {
+  tenantId: string;
+  branchId: string;
+  registerId: string;
+  slug: string;
+  name: string;
+  branchName: string;
+  /*
+   * The staff the Product Owner actually signs in as, not a house style.
+   *
+   * `clothing.owner@axlopos.test` read tidily and was wrong in the way that
+   * matters: the PO would demo with `owner@kandyapparel.test` and the team
+   * would be handed a different address for the same shop, so "use my login"
+   * stopped being true the moment it was written down. `@@unique([tenantId,
+   * email])` is per TENANT, so the seeded workspace and the PO's own hand-made
+   * one can hold the same address without colliding.
+   */
+  ownerName: string;
+  ownerEmail: string;
+  cashierName: string;
+  cashierEmail: string;
+  /** PINs answer in-POS approval prompts (D48); they are not a login. */
+  ownerPin: string;
+  cashierPin: string;
+  catalogue: CataloguePack;
+  /** One line for the seed console, so a reader knows why both exist. */
+  blurb: string;
+}
+
+const CLOTHING_SHOP: RetailShop = {
+  tenantId: CLOTHING_TENANT_ID,
+  branchId: CLOTHING_BRANCH_ID,
+  registerId: CLOTHING_REGISTER_ID,
+  slug: CLOTHING_SLUG,
+  name: 'Kandy Apparel',
+  branchName: 'Main Store',
+  ownerName: 'Nimal Perera',
+  ownerEmail: CLOTHING_OWNER_EMAIL,
+  cashierName: 'Sanduni Silva',
+  cashierEmail: 'cashier@kandyapparel.test',
+  ownerPin: '6666',
+  cashierPin: '7777',
+  catalogue: CLOTHING_CATALOGUE,
+  blurb: 'variants across Size and Colour, barcodes, per-variant stock',
+};
+
+const GROCERY_SHOP: RetailShop = {
+  tenantId: GROCERY_TENANT_ID,
+  branchId: GROCERY_BRANCH_ID,
+  registerId: GROCERY_REGISTER_ID,
+  slug: GROCERY_SLUG,
+  name: 'Colombo Grocery Mart',
+  branchName: 'Main Store',
+  ownerName: 'Grocery Owner',
+  ownerEmail: GROCERY_OWNER_EMAIL,
+  cashierName: 'Grocery Cashier',
+  cashierEmail: 'cashier@grocery.test',
+  ownerPin: '8888',
+  cashierPin: '9999',
+  catalogue: GROCERY_CATALOGUE,
+  blurb: 'sold by weight — DECIMAL quantities in kg and L',
+};
+
+/**
+ * D191 — one retail workspace, carrying a catalogue exported from the real shop.
+ *
+ * ## Why this can return `null`
+ *
+ * `Tenant.slug` is globally `@unique`, and the Product Owner's own hand-made
+ * workspaces hold `grocery-demo` on their machine. Creating the seeded tenant
+ * there would raise `P2002` and take the whole seed down with it — on the one
+ * machine whose database matters most.
+ *
+ * The alternatives were worse. Renaming their tenant to claim the slug takes
+ * their work hostage to a convention, which D190 already refused. Adopting the
+ * row and writing into it makes the seed overwrite a workspace someone is
+ * actively using. So the seed **stands aside**: it says plainly that the slug is
+ * spoken for, and seeds nothing.
+ *
+ * On every other machine — every teammate's, and CI's — nothing holds the slug
+ * and the workspace is created normally. That is the case this decision exists
+ * to serve, which is why it is verified against a database seeded from EMPTY
+ * rather than against the author's: the author's is the one database where the
+ * skip fires, so it is the one database that cannot prove the happy path.
+ */
+async function seedRetailShop(passwordHash: string, shop: RetailShop) {
+  const holder = await prisma.tenant.findUnique({
+    where: { slug: shop.slug },
+    select: { id: true, name: true },
+  });
+  if (holder && holder.id !== shop.tenantId) {
+    /* eslint-disable-next-line no-console */
+    console.warn(
+      `  ! '${shop.slug}' is already used by '${holder.name}' (${holder.id}); ` +
+        `skipping the seeded ${shop.name}. Rename or remove that workspace to seed it.`,
+    );
+    return null;
+  }
+
+  const tenant = await prisma.tenant.upsert({
+    where: { id: shop.tenantId },
+    update: { name: shop.name, slug: shop.slug },
+    create: { id: shop.tenantId, name: shop.name, slug: shop.slug },
+  });
+
+  const branch = await prisma.branch.upsert({
+    where: { id: shop.branchId },
+    update: {},
+    create: { id: shop.branchId, tenantId: tenant.id, name: shop.branchName, code: 'MAIN' },
+  });
+
+  await prisma.register.upsert({
+    where: { id: shop.registerId },
+    update: {},
+    create: {
+      id: shop.registerId,
+      tenantId: tenant.id,
+      branchId: branch.id,
+      name: 'Counter 1',
+      code: 'C1',
+    },
+  });
+
+  const profile = { businessType: 'RETAIL' as const, ...BUSINESS_PROFILE_PRESETS.RETAIL };
+  await prisma.tenantBusinessProfile.upsert({
+    where: { tenantId: tenant.id },
+    update: profile,
+    create: { tenantId: tenant.id, ...profile },
+  });
+
+  /*
+   * Pin the shop timezone, exactly as `provision-tenant` does, so the workspace
+   * a developer reviews has the same shape as one a shop is given. The value
+   * equals `DEFAULT_TIME_ZONE`, so nothing renders differently today — what the
+   * row buys is that it is a STATED setting rather than a fallback, and a later
+   * change to the default cannot silently re-date this tenant.
+   *
+   * Guarded by a lookup rather than upserted: `(tenantId, branchId)` carries no
+   * unique index, so a re-seed would otherwise stack a second row.
+   *
+   * No business detail DEFINITIONS are written. D161 makes them a tenant
+   * override and `schemaFor` falls back to RETAIL's shipped fields when there is
+   * none, so restating Material / Fit / Care instructions / Gender / Season here
+   * would freeze today's list into this tenant and stop it tracking the domain.
+   * The VALUES the PO set on each product travel in the catalogue `attributes`.
+   */
+  const settings = await prisma.tenantSettings.findFirst({
+    where: { tenantId: tenant.id, branchId: null },
+    select: { id: true },
+  });
+  if (!settings) {
+    await prisma.tenantSettings.create({
+      data: { tenantId: tenant.id, branchId: null, data: { timezone: 'Asia/Colombo' } },
+    });
+  }
+
+  const ownerPin = await bcrypt.hash(shop.ownerPin, SALT_ROUNDS);
+  const cashierPin = await bcrypt.hash(shop.cashierPin, SALT_ROUNDS);
+  const key = shop.slug.replace(/-demo$/, '').replace(/-/g, '_');
+  const users = [
+    {
+      id: `usr_${key}_owner`,
+      name: shop.ownerName,
+      email: shop.ownerEmail as string | null,
+      role: UserRole.OWNER,
+      passwordHash: passwordHash as string | null,
+      pinHash: ownerPin as string | null,
+      /*
+       * Branch-scoped, matching the source workspaces. The hardware and
+       * restaurant owners are branch-less because those tenants are modelled as
+       * multi-branch; a one-shop retailer signs in at their shop, and an owner
+       * with no branch has no register to open a till on.
+       */
+      branchId: branch.id as string | null,
+    },
+    {
+      id: `usr_${key}_cashier`,
+      name: shop.cashierName,
+      email: shop.cashierEmail,
+      role: UserRole.CASHIER,
+      passwordHash,
+      pinHash: cashierPin,
+      branchId: branch.id,
+    },
+  ];
+
+  for (const u of users) {
+    await prisma.user.upsert({
+      where: { id: u.id },
+      update: {
+        name: u.name,
+        email: u.email,
+        role: u.role,
+        passwordHash: u.passwordHash,
+        pinHash: u.pinHash,
+        branchId: u.branchId,
+        isActive: true,
+      },
+      create: {
+        id: u.id,
+        tenantId: tenant.id,
+        name: u.name,
+        email: u.email,
+        role: u.role,
+        passwordHash: u.passwordHash,
+        pinHash: u.pinHash,
+        branchId: u.branchId,
+      },
+    });
+  }
+
+  const pack = await seedCatalogue(prisma, tenant.id, branch.id, shop.catalogue);
+  return { ...tenant, pack };
+}
+
+/**
+ * The restaurant demo tenant.
+ *
+ * Its products are ordinary catalogue rows with no `quickbooksItemId` and
+ * `NOT_SYNCED` status — a LOCAL-inventory tenant has no QuickBooks item to point
+ * at, and giving one sample data that looked synced would misrepresent the mode
+ * the whole tenant exists to demonstrate. There is no menu, no table and no order:
+ * those models do not exist until the Restaurant phases, and the screens say so.
+ */
+/** D55 — the platform console tenant and its first operator. */
+async function seedPlatformConsole(passwordHash: string) {
+  const tenant = await prisma.tenant.upsert({
+    where: { id: PLATFORM_TENANT_ID },
+    update: { name: 'Axlo Platform', slug: 'platform' },
+    create: { id: PLATFORM_TENANT_ID, name: 'Axlo Platform', slug: 'platform' },
+  });
+  await prisma.user.upsert({
+    where: { id: 'usr_platform_admin' },
+    update: {
+      name: 'Platform Administrator',
+      email: PLATFORM_ADMIN_EMAIL,
+      passwordHash,
+      isPlatformAdmin: true,
+      isActive: true,
+    },
+    create: {
+      id: 'usr_platform_admin',
+      tenantId: tenant.id,
+      name: 'Platform Administrator',
+      email: PLATFORM_ADMIN_EMAIL,
+      // The enum role is immaterial — authority comes from `isPlatformAdmin`,
+      // and the boundary guard refuses this account every workspace route
+      // regardless of what OWNER would otherwise grant.
+      role: UserRole.OWNER,
+      passwordHash,
+      isPlatformAdmin: true,
+    },
+  });
+  return tenant;
+}
+
+async function seedRestaurant(passwordHash: string) {
+  const tenant = await prisma.tenant.upsert({
+    where: { id: RESTAURANT_TENANT_ID },
+    // The slug IS updated, unlike the Tile Shop's: the Product Owner renamed this
+    // workspace after it had already been seeded, and a re-seed that left the old
+    // slug in place would make the documented sign-in fail on exactly the machines
+    // that had followed the instructions earliest.
+    update: { name: 'Axlo Restaurant Demo', slug: 'restaurant-demo' },
+    create: { id: RESTAURANT_TENANT_ID, name: 'Axlo Restaurant Demo', slug: 'restaurant-demo' },
+  });
+
+  const branch = await prisma.branch.upsert({
+    where: { id: RESTAURANT_BRANCH_ID },
+    update: {},
+    create: { id: RESTAURANT_BRANCH_ID, tenantId: tenant.id, name: 'Main Dining', code: 'MAIN' },
+  });
+
+  await prisma.register.upsert({
+    where: { id: RESTAURANT_REGISTER_ID },
+    update: {},
+    create: {
+      id: RESTAURANT_REGISTER_ID,
+      tenantId: tenant.id,
+      branchId: branch.id,
+      name: 'Counter 1',
+      code: 'C1',
+    },
+  });
+
+  // The profile is upserted rather than created so re-seeding repairs a
+  // hand-edited row; `version` is left to the API, which owns it.
+  const profile = { businessType: 'RESTAURANT' as const, ...BUSINESS_PROFILE_PRESETS.RESTAURANT };
+  await prisma.tenantBusinessProfile.upsert({
+    where: { tenantId: tenant.id },
+    update: profile,
+    create: { tenantId: tenant.id, ...profile },
+  });
+
+  const pin3333 = await bcrypt.hash('3333', SALT_ROUNDS);
+  const pin4444 = await bcrypt.hash('4444', SALT_ROUNDS);
+  const pin5555 = await bcrypt.hash('5555', SALT_ROUNDS);
+  const users = [
+    {
+      id: 'usr_resto_owner',
+      name: 'Restaurant Owner',
+      email: RESTAURANT_OWNER_EMAIL as string | null,
+      role: UserRole.OWNER,
+      passwordHash: passwordHash as string | null,
+      pinHash: null as string | null,
+      branchId: null as string | null,
+    },
+    /*
+     * A floor waiter. Deliberately created with the CASHIER enum role and then
+     * linked to the WAITER custom role below: `linkUsersToRoles` only links a
+     * user to a role whose key matches their enum value, and there is no
+     * `UserRole.WAITER`, so the link has to be explicit. The WAITER template is
+     * what removes Kitchen / Sales / Reports from their rail and makes the
+     * catalogue read-only.
+     */
+    {
+      id: 'usr_resto_waiter',
+      name: 'Restaurant Waiter',
+      email: 'waiter@axlopos.test',
+      role: UserRole.CASHIER,
+      passwordHash,
+      pinHash: pin4444,
+      branchId: branch.id,
+    },
+    /*
+     * D68 — the kitchen board's user. Same enum trick as the waiter: there is
+     * no `UserRole.KITCHEN_STAFF`, so they are created as CASHIER and linked
+     * to the KITCHEN_STAFF row below. Without the link they would resolve as
+     * a full cashier, which is the opposite of the point — the whole reason
+     * this template exists is that the pass holds no money permissions.
+     */
+    {
+      id: 'usr_resto_kitchen',
+      name: 'Kitchen Staff',
+      email: 'kitchen@axlopos.test',
+      role: UserRole.CASHIER,
+      passwordHash,
+      pinHash: pin5555,
+      branchId: branch.id,
+    },
+    // D48: email+password is the only login path; the PIN stays for approvals.
+    {
+      id: 'usr_resto_cashier',
+      name: 'Restaurant Cashier',
+      email: 'restaurant.cashier@axlopos.test',
+      role: UserRole.CASHIER,
+      passwordHash,
+      pinHash: pin3333,
+      branchId: branch.id,
+    },
+  ];
+
+  for (const u of users) {
+    await prisma.user.upsert({
+      where: { id: u.id },
+      update: {
+        name: u.name,
+        email: u.email,
+        role: u.role,
+        passwordHash: u.passwordHash,
+        pinHash: u.pinHash,
+        branchId: u.branchId,
+        isActive: true,
+      },
+      create: {
+        id: u.id,
+        tenantId: tenant.id,
+        name: u.name,
+        email: u.email,
+        role: u.role,
+        passwordHash: u.passwordHash,
+        pinHash: u.pinHash,
+        branchId: u.branchId,
+      },
+    });
+  }
+
+  // ── The floor ────────────────────────────────────────────────
+  //
+  // Four areas with genuinely different table shapes, because one area of
+  // identical four-tops exercises none of the interesting paths: open tables
+  // (D49/D50) need a mix of sizes to join, reservations (D47) need enough
+  // tables for a calendar to be legible, and capacity rules need two-tops and
+  // ten-tops to differ.
+  const areas: Array<{ id: string; name: string; description: string; position: number }> = [
+    { id: 'area_resto_main', name: 'Main Hall', description: 'Ground floor, main service', position: 0 },
+    { id: 'area_resto_terrace', name: 'Terrace', description: 'Outdoor, weather permitting', position: 1 },
+    { id: 'area_resto_bar', name: 'Bar', description: 'High tops and bar rail', position: 2 },
+    { id: 'area_resto_private', name: 'Private Room', description: 'Bookable for functions', position: 3 },
+  ];
+  for (const a of areas) {
+    await prisma.diningArea.upsert({
+      where: { id: a.id },
+      update: { name: a.name, description: a.description, position: a.position, isActive: true },
+      create: {
+        id: a.id,
+        tenantId: tenant.id,
+        branchId: branch.id,
+        name: a.name,
+        description: a.description,
+        position: a.position,
+        createdByUserId: 'usr_resto_owner',
+      },
+    });
+  }
+
+  const tables: Array<{ id: string; areaId: string; code: string; capacity: number; label?: string }> = [
+    // Main Hall — the bulk of the covers, mixed sizes.
+    { id: 'tbl_resto_m1', areaId: 'area_resto_main', code: 'M1', capacity: 2 },
+    { id: 'tbl_resto_m2', areaId: 'area_resto_main', code: 'M2', capacity: 2 },
+    { id: 'tbl_resto_m3', areaId: 'area_resto_main', code: 'M3', capacity: 4 },
+    { id: 'tbl_resto_m4', areaId: 'area_resto_main', code: 'M4', capacity: 4 },
+    { id: 'tbl_resto_m5', areaId: 'area_resto_main', code: 'M5', capacity: 4 },
+    { id: 'tbl_resto_m6', areaId: 'area_resto_main', code: 'M6', capacity: 6 },
+    { id: 'tbl_resto_m7', areaId: 'area_resto_main', code: 'M7', capacity: 6 },
+    { id: 'tbl_resto_m8', areaId: 'area_resto_main', code: 'M8', capacity: 8, label: 'Long table' },
+    // Terrace — smaller, weather-dependent.
+    { id: 'tbl_resto_t1', areaId: 'area_resto_terrace', code: 'T1', capacity: 2 },
+    { id: 'tbl_resto_t2', areaId: 'area_resto_terrace', code: 'T2', capacity: 2 },
+    { id: 'tbl_resto_t3', areaId: 'area_resto_terrace', code: 'T3', capacity: 4 },
+    { id: 'tbl_resto_t4', areaId: 'area_resto_terrace', code: 'T4', capacity: 4 },
+    { id: 'tbl_resto_t5', areaId: 'area_resto_terrace', code: 'T5', capacity: 6 },
+    // Bar — high tops, the natural candidates for joining.
+    { id: 'tbl_resto_b1', areaId: 'area_resto_bar', code: 'B1', capacity: 2 },
+    { id: 'tbl_resto_b2', areaId: 'area_resto_bar', code: 'B2', capacity: 2 },
+    { id: 'tbl_resto_b3', areaId: 'area_resto_bar', code: 'B3', capacity: 3 },
+    { id: 'tbl_resto_b4', areaId: 'area_resto_bar', code: 'B4', capacity: 4 },
+    // Private room — one big table for functions.
+    { id: 'tbl_resto_p1', areaId: 'area_resto_private', code: 'P1', capacity: 10, label: 'Function table' },
+    { id: 'tbl_resto_p2', areaId: 'area_resto_private', code: 'P2', capacity: 6 },
+  ];
+  for (const t of tables) {
+    await prisma.restaurantTable.upsert({
+      where: { id: t.id },
+      update: { code: t.code, capacity: t.capacity, label: t.label ?? null, isActive: true },
+      create: {
+        id: t.id,
+        tenantId: tenant.id,
+        branchId: branch.id,
+        areaId: t.areaId,
+        code: t.code,
+        capacity: t.capacity,
+        label: t.label ?? null,
+        createdByUserId: 'usr_resto_owner',
+      },
+    });
+  }
+
+  /*
+   * D90 — opening hours. Seeded so a fresh workspace shows the feature
+   * working rather than an empty form: 07:00–23:00 every day, and the
+   * shorter Monday from the PO's own example. A branch with no rows is a
+   * valid state (it falls back to 08:00–23:00) — this one is configured on
+   * purpose.
+   */
+  for (let dayOfWeek = 0; dayOfWeek < 7; dayOfWeek += 1) {
+    const monday = dayOfWeek === 1;
+    await prisma.branchOpeningHours.upsert({
+      where: { branchId_dayOfWeek: { branchId: branch.id, dayOfWeek } },
+      update: {
+        isClosed: false,
+        opensAt: monday ? 9 * 60 : 7 * 60,
+        closesAt: monday ? 22 * 60 : 23 * 60,
+      },
+      create: {
+        tenantId: tenant.id,
+        branchId: branch.id,
+        dayOfWeek,
+        isClosed: false,
+        opensAt: monday ? 9 * 60 : 7 * 60,
+        closesAt: monday ? 22 * 60 : 23 * 60,
+      },
+    });
+  }
+
+  // ── Kitchen stations ─────────────────────────────────────────
+  //
+  // D152 — `MAIN` comes first and is not optional. Every branch has one,
+  // because it is where a menu item with no station link routes: the API
+  // upserts it at submit time rather than trusting this seed, and seeding it
+  // here keeps a freshly seeded tenant's five stations identical to a
+  // long-running one's. It is deliberately NOT 'Main Kitchen' below — that is
+  // a hot line the demo menu routes dishes to on purpose, and collapsing the
+  // two would hide whether the fallback or a real link put a dish on a card.
+  const stations = [
+    { id: 'kst_resto_main', code: 'MAIN', name: 'Main', category: 'KITCHEN' },
+    { id: 'kst_resto_kitchen', code: 'KIT', name: 'Main Kitchen', category: 'KITCHEN' },
+    { id: 'kst_resto_grill', code: 'GRL', name: 'Grill', category: 'GRILL' },
+    { id: 'kst_resto_bar', code: 'BAR', name: 'Bar', category: 'BAR' },
+    { id: 'kst_resto_dessert', code: 'DST', name: 'Pastry', category: 'DESSERT' },
+  ];
+  for (const st of stations) {
+    /*
+     * Keyed on (branchId, code), not on the fixed id. D152's API UPSERTS the
+     * MAIN station at round-submit time and gives it a cuid, so on any
+     * database the app has already run against, a seed keyed on
+     * `kst_resto_main` would find nothing, try to create, and die on
+     * `@@unique([branchId, code])`. The create still pins the fixed id, so a
+     * fresh seed produces the same ids the product links below reference.
+     */
+    await prisma.kitchenStation.upsert({
+      where: { branchId_code: { branchId: branch.id, code: st.code } },
+      update: { name: st.name, category: st.category, isActive: true },
+      create: {
+        id: st.id,
+        tenantId: tenant.id,
+        branchId: branch.id,
+        code: st.code,
+        name: st.name,
+        category: st.category,
+      },
+    });
+  }
+
+  // ── The menu ─────────────────────────────────────────────────
+  //
+  // Products, not MenuItems: D45 made the Product wizard the single authoring
+  // surface for a Restaurant tenant, and `GET /restaurant/pos-catalogue` reads
+  // Products. `foodType` drives the POS picker's sections, so every row sets
+  // one — a catalogue of nulls would collapse into a single "Other" tab.
+  const categories = [
+    { id: 'cat_resto_starters', name: 'Starters' },
+    { id: 'cat_resto_mains', name: 'Mains' },
+    { id: 'cat_resto_rice', name: 'Rice & Noodles' },
+    { id: 'cat_resto_sides', name: 'Sides' },
+    { id: 'cat_resto_desserts', name: 'Desserts' },
+    { id: 'cat_resto_hot', name: 'Hot Drinks' },
+    { id: 'cat_resto_cold', name: 'Cold Drinks' },
+    // Kept: the original id, so re-seeding an existing database does not
+    // orphan products that already point at it.
+    { id: 'cat_resto_food', name: 'Food' },
+  ];
+  for (const c of categories) {
+    await prisma.productCategory.upsert({
+      where: { id: c.id },
+      update: { name: c.name, isActive: true },
+      create: { id: c.id, tenantId: tenant.id, name: c.name },
+    });
+  }
+
+  type MenuRow = {
+    id: string;
+    name: string;
+    sku: string;
+    price: number;
+    cat: string;
+    food: 'FOOD' | 'BEVERAGE' | 'DESSERT';
+    station: string;
+    prep?: number;
+    tags?: string[];
+  };
+  /*
+   * D101 — three dishes ship 86'd so the switch has something to act on from a
+   * fresh seed. One per station, so kitchen routing stays exercised on the
+   * items that remain sellable.
+   */
+  const SOLD_OUT_SKUS = new Set(['MN-STK', 'BEV-CAP', 'DS-ICE']);
+
+  const menu: MenuRow[] = [
+    // Starters
+    { id: 'prd_resto_10', name: 'Fish Cutlets (4 pc)', sku: 'ST-CUT', price: 650, cat: 'cat_resto_starters', food: 'FOOD', station: 'kst_resto_kitchen', prep: 10 },
+    { id: 'prd_resto_11', name: 'Devilled Cashew', sku: 'ST-CSH', price: 850, cat: 'cat_resto_starters', food: 'FOOD', station: 'kst_resto_kitchen', prep: 12, tags: ['Veg'] },
+    { id: 'prd_resto_12', name: 'Chicken Wings', sku: 'ST-WNG', price: 1150, cat: 'cat_resto_starters', food: 'FOOD', station: 'kst_resto_grill', prep: 18, tags: ['Spicy'] },
+    { id: 'prd_resto_13', name: 'Garlic Bread', sku: 'ST-GRB', price: 450, cat: 'cat_resto_starters', food: 'FOOD', station: 'kst_resto_kitchen', prep: 8, tags: ['Veg'] },
+    { id: 'prd_resto_14', name: 'Soup of the Day', sku: 'ST-SOP', price: 550, cat: 'cat_resto_starters', food: 'FOOD', station: 'kst_resto_kitchen', prep: 6, tags: ['Veg'] },
+    // Mains
+    { id: 'prd_resto_20', name: 'Grilled Seer Fish', sku: 'MN-SEE', price: 2450, cat: 'cat_resto_mains', food: 'FOOD', station: 'kst_resto_grill', prep: 25 },
+    { id: 'prd_resto_21', name: 'Chicken Curry', sku: 'MN-CHC', price: 1450, cat: 'cat_resto_mains', food: 'FOOD', station: 'kst_resto_kitchen', prep: 20, tags: ['Spicy'] },
+    { id: 'prd_resto_22', name: 'Beef Steak', sku: 'MN-STK', price: 3200, cat: 'cat_resto_mains', food: 'FOOD', station: 'kst_resto_grill', prep: 28 },
+    { id: 'prd_resto_23', name: 'Vegetable Curry', sku: 'MN-VEG', price: 1100, cat: 'cat_resto_mains', food: 'FOOD', station: 'kst_resto_kitchen', prep: 18, tags: ['Veg'] },
+    { id: 'prd_resto_24', name: 'Prawn Curry', sku: 'MN-PRW', price: 2650, cat: 'cat_resto_mains', food: 'FOOD', station: 'kst_resto_kitchen', prep: 22, tags: ['Spicy'] },
+    { id: 'prd_resto_25', name: 'Mixed Grill Platter', sku: 'MN-MGP', price: 3850, cat: 'cat_resto_mains', food: 'FOOD', station: 'kst_resto_grill', prep: 35 },
+    // Rice & noodles
+    { id: 'prd_resto_1', name: 'Chicken Fried Rice', sku: 'FR-CHK', price: 950, cat: 'cat_resto_rice', food: 'FOOD', station: 'kst_resto_kitchen', prep: 15 },
+    { id: 'prd_resto_2', name: 'Kottu Roti', sku: 'KTU-CHK', price: 1100, cat: 'cat_resto_rice', food: 'FOOD', station: 'kst_resto_kitchen', prep: 18, tags: ['Spicy'] },
+    { id: 'prd_resto_30', name: 'Seafood Fried Rice', sku: 'FR-SEA', price: 1450, cat: 'cat_resto_rice', food: 'FOOD', station: 'kst_resto_kitchen', prep: 16 },
+    { id: 'prd_resto_31', name: 'Vegetable Fried Rice', sku: 'FR-VEG', price: 800, cat: 'cat_resto_rice', food: 'FOOD', station: 'kst_resto_kitchen', prep: 14, tags: ['Veg'] },
+    { id: 'prd_resto_32', name: 'Egg Noodles', sku: 'ND-EGG', price: 900, cat: 'cat_resto_rice', food: 'FOOD', station: 'kst_resto_kitchen', prep: 14, tags: ['Egg'] },
+    { id: 'prd_resto_33', name: 'Rice & Curry (Chicken)', sku: 'RC-CHK', price: 1250, cat: 'cat_resto_rice', food: 'FOOD', station: 'kst_resto_kitchen', prep: 12, tags: ['Spicy'] },
+    // Sides
+    { id: 'prd_resto_40', name: 'French Fries', sku: 'SD-FRY', price: 550, cat: 'cat_resto_sides', food: 'FOOD', station: 'kst_resto_kitchen', prep: 8, tags: ['Veg'] },
+    { id: 'prd_resto_41', name: 'Papadam (4 pc)', sku: 'SD-PAP', price: 200, cat: 'cat_resto_sides', food: 'FOOD', station: 'kst_resto_kitchen', prep: 4, tags: ['Veg'] },
+    { id: 'prd_resto_42', name: 'Garden Salad', sku: 'SD-SAL', price: 650, cat: 'cat_resto_sides', food: 'FOOD', station: 'kst_resto_kitchen', prep: 6, tags: ['Veg', 'Gluten-Free'] },
+    { id: 'prd_resto_43', name: 'Steamed Rice', sku: 'SD-RIC', price: 300, cat: 'cat_resto_sides', food: 'FOOD', station: 'kst_resto_kitchen', prep: 5, tags: ['Veg'] },
+    // Desserts
+    { id: 'prd_resto_50', name: 'Watalappan', sku: 'DS-WAT', price: 600, cat: 'cat_resto_desserts', food: 'DESSERT', station: 'kst_resto_dessert', prep: 5, tags: ['Egg'] },
+    { id: 'prd_resto_51', name: 'Chocolate Biscuit Pudding', sku: 'DS-CBP', price: 750, cat: 'cat_resto_desserts', food: 'DESSERT', station: 'kst_resto_dessert', prep: 5 },
+    { id: 'prd_resto_52', name: 'Ice Cream (2 scoops)', sku: 'DS-ICE', price: 500, cat: 'cat_resto_desserts', food: 'DESSERT', station: 'kst_resto_dessert', prep: 3 },
+    { id: 'prd_resto_53', name: 'Fruit Platter', sku: 'DS-FRT', price: 850, cat: 'cat_resto_desserts', food: 'DESSERT', station: 'kst_resto_dessert', prep: 7, tags: ['Veg', 'Gluten-Free'] },
+    // Hot drinks
+    { id: 'prd_resto_3', name: 'Plain Tea', sku: 'BEV-TEA', price: 150, cat: 'cat_resto_hot', food: 'BEVERAGE', station: 'kst_resto_bar', prep: 4 },
+    { id: 'prd_resto_60', name: 'Milk Tea', sku: 'BEV-MTE', price: 250, cat: 'cat_resto_hot', food: 'BEVERAGE', station: 'kst_resto_bar', prep: 4 },
+    { id: 'prd_resto_61', name: 'Black Coffee', sku: 'BEV-COF', price: 300, cat: 'cat_resto_hot', food: 'BEVERAGE', station: 'kst_resto_bar', prep: 4 },
+    { id: 'prd_resto_62', name: 'Cappuccino', sku: 'BEV-CAP', price: 550, cat: 'cat_resto_hot', food: 'BEVERAGE', station: 'kst_resto_bar', prep: 6 },
+    // Cold drinks
+    { id: 'prd_resto_70', name: 'Lime Juice', sku: 'BEV-LIM', price: 350, cat: 'cat_resto_cold', food: 'BEVERAGE', station: 'kst_resto_bar', prep: 5, tags: ['Veg'] },
+    { id: 'prd_resto_71', name: 'King Coconut', sku: 'BEV-KCO', price: 400, cat: 'cat_resto_cold', food: 'BEVERAGE', station: 'kst_resto_bar', prep: 3, tags: ['Veg', 'Gluten-Free'] },
+    { id: 'prd_resto_72', name: 'Soft Drink (can)', sku: 'BEV-SFT', price: 300, cat: 'cat_resto_cold', food: 'BEVERAGE', station: 'kst_resto_bar', prep: 2 },
+    { id: 'prd_resto_73', name: 'Fresh Fruit Juice', sku: 'BEV-FRJ', price: 650, cat: 'cat_resto_cold', food: 'BEVERAGE', station: 'kst_resto_bar', prep: 6, tags: ['Veg'] },
+    { id: 'prd_resto_74', name: 'Mineral Water', sku: 'BEV-WAT', price: 150, cat: 'cat_resto_cold', food: 'BEVERAGE', station: 'kst_resto_bar', prep: 1, tags: ['Veg', 'Gluten-Free'] },
+  ];
+
+  for (const m of menu) {
+    const data = {
+      name: m.name,
+      sku: m.sku,
+      categoryId: m.cat,
+      unitPrice: m.price,
+      quantityOnHand: 0,
+      type: 'NonInventory',
+      isActive: true,
+      syncStatus: 'NOT_SYNCED' as const,
+      foodType: m.food,
+      prepMinutes: m.prep ?? null,
+      dietaryTags: m.tags ?? [],
+      /*
+       * D65/D101 — a food-typed row with no Track-stock answer is a prepared
+       * item: availability is the 86 switch, never the count (restaurant
+       * orders move no stock). This seed writes Prisma directly, so it must mirror what
+       * `deriveSellableKind` (products.service.ts) would return for these rows:
+       * a foodType with no trackStock is a COMPOSED_ITEM. Leaving it to the
+       * schema default (STOCK_ITEM) hands the dish to the count branch of
+       * `sellable.service.ts`, and a quantityOnHand nothing maintains then
+       * reads as OUT — greying out food the kitchen is happily cooking, and
+       * disabling the 86 switch (D101) that governs these kinds instead.
+       */
+      sellableKind: 'COMPOSED_ITEM' as const,
+      // Explicit on both create and update, so re-seeding is idempotent.
+      soldOutAt: SOLD_OUT_SKUS.has(m.sku) ? new Date() : null,
+    };
+    await prisma.product.upsert({
+      where: { id: m.id },
+      update: data,
+      create: { id: m.id, tenantId: tenant.id, ...data },
+    });
+    // Link every dish to a station: D152 routes a round to one ticket PER
+    // STATION again, so this is what decides which card each dish lands on.
+    //
+    // It is no longer a SAFETY net, which is the part worth remembering. Before
+    // D147 an unlinked dish at a multi-station branch was dropped silently
+    // (audit C1) and seeding these links was the only thing hiding it. D152
+    // catches an unlinked dish at Main instead, so a seed that forgot one would
+    // now be merely unrealistic rather than invisible.
+    await prisma.productStationLink.upsert({
+      where: { productId_stationId: { productId: m.id, stationId: m.station } },
+      update: {},
+      create: { productId: m.id, stationId: m.station },
+    });
+  }
+
+  return tenant;
 }
 
 main()

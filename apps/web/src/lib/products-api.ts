@@ -1,5 +1,6 @@
 import { api, authorizedFetch } from './api';
 import type { Session } from './auth';
+import type { ClientQuantityType } from './catalog';
 
 export type ProductSyncStatus = 'NOT_SYNCED' | 'PENDING' | 'SYNCING' | 'SYNCED' | 'FAILED';
 
@@ -21,6 +22,25 @@ export interface ManagedProduct {
   description: string | null;
   categoryId: string | null;
   subcategoryId: string | null;
+  /**
+   * D133 (`8.9`) — the brand this product carries, or null.
+   *
+   * D169 — DECLARED, not added: `GET /products/:id` returns the whole
+   * Prisma row and `toManaged` spreads it, so this field has always crossed
+   * the wire and always survived the mapper. It was simply not written down
+   * here, which is why nothing could read it. Verified against a live
+   * response before the declaration was added.
+   *
+   * OPTIONAL, unlike `categoryId` above, for one reason only: this type is
+   * built by 28 test fixtures, and a required field would have edited every
+   * one of them — restaurant and hardware fixtures included — to declare
+   * a null they do not care about. Nothing WRITES it (`ProductInput` has no
+   * brand, and the API's update guards on `!== undefined`, so an omitted
+   * brand is preserved rather than cleared), so the argument D134 makes for
+   * `quantityType` being required — that a dropped field is silently saved
+   * back as a wrong value — does not apply here.
+   */
+  brandId?: string | null;
   /** Sales price/rate. */
   unitPrice: number;
   /** QBO income account name (auto-resolved on sync; read-only). */
@@ -41,10 +61,75 @@ export interface ManagedProduct {
   /** POS-side product photo (S3) — never pushed to QuickBooks. */
   imageUrl: string | null;
   isActive: boolean;
+  /** D122 — read back so the edit wizard can round-trip it. */
+  taxable: boolean;
+  /**
+   * D134 (`6.1`) — sold by the piece, or by weight/measure.
+   *
+   * REQUIRED, not optional, for the reason `taxable` above is: the edit
+   * wizard reads this to re-populate its own control, and an optional field
+   * crossing a wire is the one a mapper drops in silence. A product opened
+   * for editing would then be saved back as WHOLE without anyone touching
+   * the control — rice would quietly stop being sold by the kilo.
+   */
+  quantityType: ClientQuantityType;
+  /** D134b — `"kg"`, `"L"`. Null for a WHOLE product, which has no unit. */
+  unitOfMeasure: string | null;
   quickbooksItemId: string | null;
   syncStatus: ProductSyncStatus;
   lastSyncedAt: string | null;
+  /**
+   * True once the product has any active variants (D44). Wizards use this to
+   * decide between the simple single-SKU form and the matrix editor without
+   * having to re-fetch the variants list first.
+   */
+  hasVariants: boolean;
+  /**
+   * Weighted-average cost across all branches for the parent product. Null on a
+   * fresh Inventory item until the first receipt lands.
+   */
+  averageCost: number | null;
+  /**
+   * D44 — active variants, and the span of their prices.
+   *
+   * Once `hasVariants` is true the parent `unitPrice` and `sku` are legacy
+   * fallbacks the schema says are "not read": the variant rows own them. Screens
+   * that showed `unitPrice` were therefore rendering Rs 0.00 against every
+   * variant product. Read these instead — see `variantPriceLabel`.
+   *
+   * `variantCount` is 0 and both bounds are null for a legacy single-SKU product.
+   * Optional so a response predating the aggregate degrades to the old reading
+   * rather than to `undefined` arithmetic.
+   */
+  variantCount?: number;
+  variantPriceMin?: number | null;
+  variantPriceMax?: number | null;
+  /**
+   * D64 — domain attributes, keyed per the tenant descriptor's attribute
+   * schema (`GET /products/attribute-schema`). `{}` for every tenant whose
+   * domain declares none.
+   */
+  attributes: Record<string, unknown>;
+  /**
+   * D60/D101 — what the item IS for stock purposes. STOCK_ITEM answers to a
+   * count; COMPOSED_ITEM / SERVICE answer to the 86 switch below; the
+   * booking kinds answer to their calendars.
+   */
+  sellableKind: SellableKind;
+  /** D101 — the 86 switch: null = available, a timestamp = sold out since. */
+  soldOutAt: string | null;
+  /** D45 — FOOD / BEVERAGE / DESSERT for restaurant rows, null on retail. */
+  foodType: 'FOOD' | 'BEVERAGE' | 'DESSERT' | null;
 }
+
+/** Web mirror of the Prisma SellableKind enum (D60). */
+export type SellableKind =
+  | 'STOCK_ITEM'
+  | 'COMPOSED_ITEM'
+  | 'SERVICE'
+  | 'BUNDLE'
+  | 'TIME_SLOT'
+  | 'STAY_UNIT';
 
 export interface ProductsPage {
   items: ManagedProduct[];
@@ -58,6 +143,8 @@ export interface ProductsQuery {
   pageSize?: number;
   search?: string;
   categoryId?: string;
+  /** D133 (`8.9`) — everything carrying one label. */
+  brandId?: string;
   subcategoryId?: string;
   isActive?: 'true' | 'false';
   type?: ProductItemType;
@@ -79,6 +166,41 @@ export interface ProductInput {
   quantityAsOfDate?: string | null;
   reorderLevel?: number | null;
   isActive?: boolean;
+  /**
+   * D122 (3.13) — whether the product attracts tax. Omitted means TAXABLE: the
+   * server defaults it to true, so a client that never learned about this field
+   * cannot zero-rate a product by silence.
+   */
+  taxable?: boolean;
+  /**
+   * URL for a POS-side photo that was pre-uploaded via `POST /products/image`
+   * before the product existed (Add Product wizard, D44). Once created, use
+   * `uploadProductImage(id, file)` for replacements — the pre-create endpoint
+   * is one-shot.
+   */
+  imageUrl?: string | null;
+  /**
+   * D45 — Restaurant Product wizard fields. Backend accepts them on every
+   * tenant; Retail tenants leave them null / empty and they don't render
+   * anywhere. Sent through so a Restaurant tenant's Category (Food /
+   * Beverage / Dessert), prep-time, and dietary tags round-trip.
+   */
+  foodType?: 'FOOD' | 'BEVERAGE' | 'DESSERT' | null;
+  prepMinutes?: number | null;
+  dietaryTags?: string[];
+  /**
+   * D101 — the restaurant wizard's Track-stock answer. Consulted server-side
+   * only for food-typed items: true = a packaged good the branch counts
+   * (STOCK_ITEM — bottled water), false/absent = a prepared item
+   * (COMPOSED_ITEM). Ignored for retail rows, whose `type` already says it.
+   */
+  trackStock?: boolean;
+  /**
+   * D64 — domain attributes. REPLACE semantics: when present the object is
+   * the whole stored document; omit the key to leave it unchanged. Only sent
+   * when the tenant's attribute schema is non-empty.
+   */
+  attributes?: Record<string, string | number | boolean>;
 }
 
 export interface Category {
@@ -148,12 +270,25 @@ export interface SubcategoryUpdate {
 /** Raw product JSON (decimals arrive as strings). */
 type ApiProduct = Omit<
   ManagedProduct,
-  'unitPrice' | 'costPrice' | 'quantityOnHand' | 'reorderLevel'
+  | 'unitPrice'
+  | 'costPrice'
+  | 'quantityOnHand'
+  | 'reorderLevel'
+  | 'averageCost'
+  | 'hasVariants'
+  | 'sellableKind'
+  | 'soldOutAt'
+  | 'foodType'
 > & {
   unitPrice: string | number;
   costPrice: string | number | null;
   quantityOnHand: string | number;
   reorderLevel: string | number | null;
+  averageCost?: string | number | null;
+  hasVariants?: boolean;
+  sellableKind?: SellableKind;
+  soldOutAt?: string | null;
+  foodType?: 'FOOD' | 'BEVERAGE' | 'DESSERT' | null;
 };
 
 function auth(session: Session): { token: string; tenantId: string } {
@@ -180,6 +315,15 @@ function toManaged(p: ApiProduct): ManagedProduct {
     costPrice: p.costPrice != null ? Number(p.costPrice) : null,
     quantityOnHand: Number(p.quantityOnHand),
     reorderLevel: p.reorderLevel != null ? Number(p.reorderLevel) : null,
+    // hasVariants and averageCost are D44 additions; older responses may omit
+    // them, so read defensively rather than blowing up during rollout.
+    hasVariants: p.hasVariants ?? false,
+    averageCost: p.averageCost != null ? Number(p.averageCost) : null,
+    // D60/D101 additions, same defensive read. STOCK_ITEM is the schema
+    // default, so it is also the honest fallback.
+    sellableKind: p.sellableKind ?? 'STOCK_ITEM',
+    soldOutAt: p.soldOutAt ?? null,
+    foodType: p.foodType ?? null,
   };
 }
 
@@ -189,6 +333,10 @@ function buildQuery(q: ProductsQuery): string {
   params.set('pageSize', String(q.pageSize ?? 25));
   if (q.search) params.set('search', q.search);
   if (q.categoryId) params.set('categoryId', q.categoryId);
+  // D133 (`8.9`). This builder names every field explicitly, so a new one that
+  // is not listed here is dropped in silence and the filter looks broken rather
+  // than absent — which is exactly what happened on the first pass.
+  if (q.brandId) params.set('brandId', q.brandId);
   if (q.subcategoryId) params.set('subcategoryId', q.subcategoryId);
   if (q.isActive) params.set('isActive', q.isActive);
   if (q.type) params.set('type', q.type);
@@ -253,6 +401,21 @@ export async function setProductActive(
   return updateProduct(session, id, { isActive });
 }
 
+/**
+ * D101 — the 86 switch. Gated on `product:availability:set` (NOT
+ * product:manage — the till holds it); the server refuses kinds whose
+ * availability stock or bookings govern.
+ */
+export async function setProductAvailability(
+  session: Session,
+  id: string,
+  available: boolean,
+): Promise<ManagedProduct> {
+  return toManaged(
+    await api.put<ApiProduct>(`/products/${id}/availability`, { available }, auth(session)),
+  );
+}
+
 /** Upload a product image (multipart). Returns the updated product. */
 export async function uploadProductImage(
   session: Session,
@@ -278,6 +441,31 @@ export async function deleteProductImage(session: Session, id: string): Promise<
   return toManaged(await api.del<ApiProduct>(`/products/${id}/image`, auth(session)));
 }
 
+/**
+ * Upload a product photo BEFORE the product exists (Add Product wizard, D44).
+ * Symmetric to the menu-item wizard's pre-create image endpoint: hands back the
+ * stored URL, which the wizard then passes as `imageUrl` on the create call.
+ * An orphan upload (wizard abandoned) is swept by the storage GC follow-up.
+ */
+export async function uploadProductImagePreCreate(
+  session: Session,
+  file: File,
+): Promise<{ imageUrl: string }> {
+  const form = new FormData();
+  form.append('file', file);
+  const res = await authorizedFetch('/products/image', session, {
+    method: 'POST',
+    body: form,
+  });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) {
+    const message =
+      json?.message ?? (res.status === 413 ? 'Image is too large (max 5MB)' : 'Image upload failed');
+    throw new Error(Array.isArray(message) ? message.join(', ') : message);
+  }
+  return (json?.data ?? json) as { imageUrl: string };
+}
+
 export type ReportFormat = 'pdf' | 'xlsx';
 
 /**
@@ -294,6 +482,7 @@ export async function downloadProductsReport(
   params.set('format', format);
   if (query.search) params.set('search', query.search);
   if (query.categoryId) params.set('categoryId', query.categoryId);
+  if (query.brandId) params.set('brandId', query.brandId);
   if (query.subcategoryId) params.set('subcategoryId', query.subcategoryId);
   if (query.isActive) params.set('isActive', query.isActive);
   if (query.type) params.set('type', query.type);

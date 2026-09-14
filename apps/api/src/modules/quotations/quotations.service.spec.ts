@@ -1,4 +1,5 @@
 import { BadRequestException, ConflictException } from '@nestjs/common';
+import { ADMIN_LEVEL_ROLES, ALL_USER_ROLES } from '@hardware-pos/shared';
 
 import { QuotationsService } from './quotations.service';
 import type { QuotationsRepository } from './quotations.repository';
@@ -25,8 +26,24 @@ const SETTINGS = {
   },
 };
 
-const CASHIER: AuthenticatedUser = { id: 'u1', tenantId: 't1', role: 'CASHIER' };
-const OWNER: AuthenticatedUser = { id: 'u2', tenantId: 't1', role: 'OWNER' };
+const CASHIER: AuthenticatedUser = {
+  id: 'u1',
+  tenantId: 't1',
+  role: 'CASHIER',
+  activeBranchId: null,
+};
+const OWNER: AuthenticatedUser = { id: 'u2', tenantId: 't1', role: 'OWNER', activeBranchId: null };
+/**
+ * D108 — the hardware template's owner-equivalent. Owner-level for the
+ * re-conversion override below exactly as OWNER is: the service asks
+ * `isAdminLevelRole`, never the enum by name.
+ */
+const SALESPERSON: AuthenticatedUser = {
+  id: 'u3',
+  tenantId: 't1',
+  role: 'SALESPERSON',
+  activeBranchId: null,
+};
 
 function makeService(repo: Partial<QuotationsRepository>) {
   const settings = { getSettings: () => SETTINGS } as unknown as SettingsService;
@@ -134,6 +151,79 @@ describe('QuotationsService guards', () => {
     await expect(
       service.convertToSale('t1', CASHIER, 'q1', {}),
     ).rejects.toBeInstanceOf(ConflictException);
+  });
+
+  /**
+   * The override is honoured for owner-level roles only (`isAdminLevelRole`).
+   * D108 put SALESPERSON in that set, so it is exercised by name on both sides
+   * of the flag beside the CASHIER negative above, and the exact-set test at
+   * the end derives the same fact from the authority so a role added to
+   * `ADMIN_LEVEL_ROLES` cannot be skipped here silently.
+   */
+  function reconversion(actor: AuthenticatedUser, dto: { override?: boolean }) {
+    const complete = jest.fn().mockResolvedValue({ id: 's2', saleNumber: 'S-2' });
+    const linkConvertedSale = jest.fn().mockResolvedValue(undefined);
+    const service = makeServiceWithSales(
+      {
+        findDetail: jest
+          .fn()
+          .mockResolvedValue(makeRow({ status: 'SENT', convertedSaleId: 'sale1' })),
+        linkConvertedSale,
+      },
+      complete,
+    );
+    return { result: service.convertToSale('t1', actor, 'q1', dto), complete, linkConvertedSale };
+  }
+
+  it('a SALESPERSON with { override: true } re-converts, exactly as the owner does (D108)', async () => {
+    for (const actor of [SALESPERSON, OWNER]) {
+      const { result, complete, linkConvertedSale } = reconversion(actor, { override: true });
+      await expect(result).resolves.toEqual({ saleId: 's2', saleNumber: 'S-2', quotationId: 'q1' });
+      expect(complete).toHaveBeenCalledTimes(1);
+      expect(complete).toHaveBeenCalledWith(
+        't1',
+        actor,
+        expect.objectContaining({ branchId: 'brn1', customerId: 'c1' }),
+      );
+      expect(linkConvertedSale).toHaveBeenCalledWith('t1', 'q1', 's2');
+    }
+  });
+
+  it('a SALESPERSON without the override still gets the conflict — owner-level is not a bypass', async () => {
+    for (const dto of [{}, { override: false }]) {
+      const { result, complete } = reconversion(SALESPERSON, dto);
+      await expect(result).rejects.toBeInstanceOf(ConflictException);
+      expect(complete).not.toHaveBeenCalled();
+    }
+  });
+
+  it('a CASHIER with { override: true } is still refused — the flag is not the authority', async () => {
+    const { result, complete } = reconversion(CASHIER, { override: true });
+    await expect(result).rejects.toBeInstanceOf(ConflictException);
+    expect(complete).not.toHaveBeenCalled();
+  });
+
+  it('exactly the owner-level roles may override — derived from the authority, pinned by name', async () => {
+    const honoured: string[] = [];
+    const refused: string[] = [];
+    for (const role of ALL_USER_ROLES) {
+      const actor: AuthenticatedUser = { id: `u_${role}`, tenantId: 't1', role, activeBranchId: null };
+      const { result, complete } = reconversion(actor, { override: true });
+      try {
+        await result;
+        honoured.push(role);
+        expect(complete).toHaveBeenCalledTimes(1);
+      } catch (e) {
+        refused.push(role);
+        expect(e).toBeInstanceOf(ConflictException);
+        expect(complete).not.toHaveBeenCalled();
+      }
+    }
+    expect(honoured.sort()).toEqual([...ADMIN_LEVEL_ROLES].sort());
+    // The complement is written out: an enum value added to neither list lands
+    // here, where it fails by name instead of passing by derivation.
+    expect(refused.sort()).toEqual(['ACCOUNTANT', 'CASHIER', 'MANAGER']);
+    expect(honoured).toContain('SALESPERSON');
   });
 
   it('refuses to convert a cancelled quotation', async () => {

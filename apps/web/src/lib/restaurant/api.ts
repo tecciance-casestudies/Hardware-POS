@@ -1,0 +1,1252 @@
+/**
+ * Restaurant API client.
+ *
+ * Thin wrappers around the shared `api` object; every function corresponds to
+ * an audited backend route. The client is grouped by module (menu, dining,
+ * sessions, kitchen, takeaway, billing, reports, delivery) so a screen can
+ * import the whole namespace and every callable is discoverable.
+ *
+ * Notes on conventions:
+ * - Every call passes `token` + `tenantId` explicitly. The base `api` client
+ *   also reads `Authorization` from options, so callers use `authFor(session)`.
+ * - `submitRound` and `takeaway.create` require an `idempotencyKey`. Scenario
+ *   11 (double-submit) is prevented by the caller generating a stable key per
+ *   user intent and passing it in.
+ * - The backend returns Decimal-string money fields (`"12.50"`); the client
+ *   does not parse them into numbers — they are display strings.
+ */
+
+import { api } from '../api';
+import type { Session } from '../session-store';
+import type {
+  AssignableWaiter,
+  BillView,
+  ChannelBreakdownRow,
+  DiningAreaView,
+  ExternalOrderView,
+  KitchenHistoryPage,
+  KitchenLaneCounts,
+  KitchenPrinterKind,
+  KitchenPrinterView,
+  PrintAgentView,
+  PrintJobStatusView,
+  PrintQueueStatus,
+  PrinterRole,
+  TestPrintResult,
+  KitchenTicketStatus,
+  KitchenTicketView,
+  MenuItemView,
+  MenuView,
+  ModifierGroupView,
+  OrderItemInput,
+  OrderView,
+  PaymentBreakdownRow,
+  PaymentMethod,
+  RestaurantBranchConfigView,
+  RestaurantTableView,
+  RoundView,
+  SalesSummaryView,
+  SectionView,
+  SessionDetail,
+  OpenSessionView,
+  TableSessionView,
+  TakeawayOrderStatus,
+  TakeawayView,
+  TopMenuItemView,
+  UnifiedChannel,
+  UnifiedOrderDetail,
+  UnifiedOrderStatus,
+  UnifiedOrderView,
+  VoidReportRow,
+  WaiterPerformanceRow,
+  OpenTableReleaseSummary,
+  OpenTableView,
+  ReservationView,
+  SessionBillPreview,
+  KitchenOrderView,
+} from './types';
+
+function auth(session: Session) {
+  return { token: session.token, tenantId: session.user.tenantId };
+}
+
+// ── Restaurant config ──────────────────────────────────────────────────────
+export const restaurantConfig = {
+  get(session: Session, branchId: string) {
+    return api.get<RestaurantBranchConfigView>(
+      `/restaurant/branches/${branchId}/config`,
+      auth(session),
+    );
+  },
+  update(
+    session: Session,
+    branchId: string,
+    body: {
+      serviceChargePercent?: number;
+      /** D84 — which channels levy the service charge. */
+      serviceChargeChannels?: string[];
+      serviceChargeTaxable?: boolean;
+      packagingChargeAmount?: number;
+      takeawayEnabled?: boolean;
+      dineInEnabled?: boolean;
+      defaultTicketTargetMinutes?: number;
+      /** D181 — auto-printing switches and the branch's default printers. */
+      autoPrintKot?: boolean;
+      autoPrintBill?: boolean;
+      billCopies?: number;
+      defaultReceiptPrinterId?: string | null;
+      defaultKitchenPrinterId?: string | null;
+      expectedVersion?: number;
+    },
+  ) {
+    return api.put<RestaurantBranchConfigView>(
+      `/restaurant/branches/${branchId}/config`,
+      body,
+      auth(session),
+    );
+  },
+};
+
+// ── Opening hours (D90) ────────────────────────────────────────────────────
+export const openingHours = {
+  get(session: Session, branchId: string) {
+    return api.get<import('./types').OpeningHoursView>(
+      `/restaurant/branches/${branchId}/opening-hours`,
+      auth(session),
+    );
+  },
+  /**
+   * Replaces the WHOLE schedule — the owner edits the week as a unit, and a
+   * partial update would need a delete verb for the weekday they just put
+   * back to "same as usual".
+   */
+  update(
+    session: Session,
+    branchId: string,
+    body: {
+      weekly: { dayOfWeek: number; isClosed: boolean; opensAt: number; closesAt: number }[];
+      overrides: {
+        date: string;
+        isClosed: boolean;
+        opensAt: number;
+        closesAt: number;
+        note?: string;
+      }[];
+    },
+  ) {
+    return api.put<import('./types').OpeningHoursView>(
+      `/restaurant/branches/${branchId}/opening-hours`,
+      body,
+      auth(session),
+    );
+  },
+};
+
+// ── Kitchen stations ───────────────────────────────────────────────────────
+export const kitchenStations = {
+  list(session: Session, branchId: string, includeArchived = false) {
+    const query = includeArchived ? '?includeArchived=true' : '';
+    return api.get<import('./types').KitchenStationView[]>(
+      `/restaurant/branches/${branchId}/kitchen-stations${query}`,
+      auth(session),
+    );
+  },
+  create(
+    session: Session,
+    branchId: string,
+    body: { code: string; name: string; category?: string },
+  ) {
+    return api.post<import('./types').KitchenStationView>(
+      `/restaurant/branches/${branchId}/kitchen-stations`,
+      body,
+      auth(session),
+    );
+  },
+  update(
+    session: Session,
+    branchId: string,
+    stationId: string,
+    body: { name?: string; category?: string; isActive?: boolean },
+  ) {
+    return api.patch<import('./types').KitchenStationView>(
+      `/restaurant/branches/${branchId}/kitchen-stations/${stationId}`,
+      body,
+      auth(session),
+    );
+  },
+};
+
+// ── Menu ───────────────────────────────────────────────────────────────────
+export const menus = {
+  list(session: Session, branchId: string, includeArchived = false) {
+    const query = includeArchived ? '?includeArchived=true' : '';
+    return api.get<MenuView[]>(
+      `/restaurant/branches/${branchId}/menus${query}`,
+      auth(session),
+    );
+  },
+  create(session: Session, branchId: string, body: { name: string; description?: string }) {
+    return api.post<MenuView>(
+      `/restaurant/branches/${branchId}/menus`,
+      body,
+      auth(session),
+    );
+  },
+  update(
+    session: Session,
+    branchId: string,
+    menuId: string,
+    body: {
+      name?: string;
+      description?: string;
+      isActive?: boolean;
+      expectedVersion?: number;
+    },
+  ) {
+    return api.patch<MenuView>(
+      `/restaurant/branches/${branchId}/menus/${menuId}`,
+      body,
+      auth(session),
+    );
+  },
+  remove(session: Session, branchId: string, menuId: string) {
+    return api.del<void>(
+      `/restaurant/branches/${branchId}/menus/${menuId}`,
+      auth(session),
+    );
+  },
+};
+
+export const menuSections = {
+  list(session: Session, menuId: string) {
+    return api.get<SectionView[]>(`/restaurant/menus/${menuId}/sections`, auth(session));
+  },
+  create(
+    session: Session,
+    menuId: string,
+    body: { name: string; description?: string; position?: number },
+  ) {
+    return api.post<SectionView>(
+      `/restaurant/menus/${menuId}/sections`,
+      body,
+      auth(session),
+    );
+  },
+  update(
+    session: Session,
+    menuId: string,
+    sectionId: string,
+    body: {
+      name?: string;
+      description?: string;
+      position?: number;
+      isActive?: boolean;
+    },
+  ) {
+    return api.patch<SectionView>(
+      `/restaurant/menus/${menuId}/sections/${sectionId}`,
+      body,
+      auth(session),
+    );
+  },
+  remove(session: Session, menuId: string, sectionId: string) {
+    return api.del<void>(
+      `/restaurant/menus/${menuId}/sections/${sectionId}`,
+      auth(session),
+    );
+  },
+};
+
+/**
+ * Standalone image upload used by the Add Menu Item wizard. Uploads a File
+ * before the MenuItem exists; the returned `imageUrl` is what the wizard
+ * sends as `imageUrl` on the subsequent create call.
+ *
+ * Multipart, tenant-scoped on the server. 5 MB limit enforced by the API's
+ * FileInterceptor.
+ */
+export async function uploadMenuItemImage(
+  session: Session,
+  file: File,
+): Promise<{ imageUrl: string }> {
+  const form = new FormData();
+  form.append('file', file);
+  const res = await fetch(`${api.baseUrl}/restaurant/menu-items/image`, {
+    method: 'POST',
+    body: form,
+    // Multipart requires the browser to set Content-Type + boundary; do not
+    // send it manually. Auth headers only.
+    headers: {
+      Authorization: `Bearer ${session.token}`,
+      'x-tenant-id': session.user.tenantId,
+    },
+  });
+  const payload = (await res.json().catch(() => ({}))) as {
+    data?: { imageUrl: string };
+    message?: string;
+  };
+  if (!res.ok) {
+    throw new Error(payload.message ?? `Upload failed (${res.status})`);
+  }
+  return payload.data ?? { imageUrl: '' };
+}
+
+/** Upload an image and attach it to an existing menu item (edit flow). */
+export async function attachMenuItemImage(
+  session: Session,
+  sectionId: string,
+  itemId: string,
+  file: File,
+): Promise<MenuItemView> {
+  const form = new FormData();
+  form.append('file', file);
+  const res = await fetch(
+    `${api.baseUrl}/restaurant/menu-sections/${sectionId}/items/${itemId}/image`,
+    {
+      method: 'POST',
+      body: form,
+      headers: {
+        Authorization: `Bearer ${session.token}`,
+        'x-tenant-id': session.user.tenantId,
+      },
+    },
+  );
+  const payload = (await res.json().catch(() => ({}))) as {
+    data?: MenuItemView;
+    message?: string;
+  };
+  if (!res.ok) throw new Error(payload.message ?? `Upload failed (${res.status})`);
+  return payload.data as MenuItemView;
+}
+
+export const menuItems = {
+  list(session: Session, sectionId: string, includeArchived = false) {
+    const query = includeArchived ? '?includeArchived=true' : '';
+    return api.get<MenuItemView[]>(
+      `/restaurant/menu-sections/${sectionId}/items${query}`,
+      auth(session),
+    );
+  },
+  create(
+    session: Session,
+    sectionId: string,
+    body: {
+      name: string;
+      description?: string;
+      basePrice: number;
+      productId?: string;
+      position?: number;
+      modifierGroupIds?: string[];
+      channelPrices?: { channel: string; price: number }[];
+      availability?: { dayOfWeek: string; startTime: string; endTime: string }[];
+      stationIds?: string[];
+      itemType?: 'FOOD' | 'BEVERAGE' | 'DESSERT';
+      prepMinutes?: number;
+      dietaryTags?: string[];
+      imageUrl?: string;
+    },
+  ) {
+    return api.post<MenuItemView>(
+      `/restaurant/menu-sections/${sectionId}/items`,
+      body,
+      auth(session),
+    );
+  },
+  /** Permanent delete. See D42 (updated in this slice) — server refuses if the
+   * item is on any open order and returns a structured 409 with count. */
+  remove(session: Session, sectionId: string, itemId: string) {
+    return api.del<void>(
+      `/restaurant/menu-sections/${sectionId}/items/${itemId}`,
+      auth(session),
+    );
+  },
+  update(
+    session: Session,
+    sectionId: string,
+    itemId: string,
+    body: Partial<{
+      name: string;
+      description: string;
+      basePrice: number;
+      productId: string;
+      position: number;
+      isActive: boolean;
+      modifierGroupIds: string[];
+      channelPrices: { channel: string; price: number }[];
+      availability: { dayOfWeek: string; startTime: string; endTime: string }[];
+      stationIds: string[];
+      itemType: 'FOOD' | 'BEVERAGE' | 'DESSERT';
+      prepMinutes: number;
+      dietaryTags: string[];
+      imageUrl: string;
+    }>,
+  ) {
+    return api.patch<MenuItemView>(
+      `/restaurant/menu-sections/${sectionId}/items/${itemId}`,
+      body,
+      auth(session),
+    );
+  },
+};
+
+export const modifierGroups = {
+  list(session: Session, includeArchived = false) {
+    const query = includeArchived ? '?includeArchived=true' : '';
+    return api.get<ModifierGroupView[]>(
+      `/restaurant/modifier-groups${query}`,
+      auth(session),
+    );
+  },
+  get(session: Session, groupId: string) {
+    return api.get<ModifierGroupView>(
+      `/restaurant/modifier-groups/${groupId}`,
+      auth(session),
+    );
+  },
+  create(
+    session: Session,
+    body: {
+      name: string;
+      selection?: 'SINGLE' | 'MULTIPLE';
+      minSelections?: number;
+      maxSelections?: number;
+      options: { name: string; priceDelta?: number; position?: number }[];
+      role?: string;
+    },
+  ) {
+    return api.post<ModifierGroupView>(
+      `/restaurant/modifier-groups`,
+      body,
+      auth(session),
+    );
+  },
+  update(
+    session: Session,
+    groupId: string,
+    body: Partial<{
+      name: string;
+      selection: 'SINGLE' | 'MULTIPLE';
+      minSelections: number;
+      maxSelections: number;
+      isActive: boolean;
+      options: { name: string; priceDelta?: number; position?: number }[];
+      role: string;
+    }>,
+  ) {
+    return api.patch<ModifierGroupView>(
+      `/restaurant/modifier-groups/${groupId}`,
+      body,
+      auth(session),
+    );
+  },
+};
+
+// ── Reservations (D47) ─────────────────────────────────────────────────────
+export const reservations = {
+  /**
+   * Everything intersecting `[from, to)`. The caller passes explicit instants
+   * (its local day window) — the server never guesses the display timezone.
+   */
+  list(session: Session, branchId: string, from: Date, to: Date, includeClosed = false) {
+    const query = new URLSearchParams({ from: from.toISOString(), to: to.toISOString() });
+    if (includeClosed) query.set('includeClosed', 'true');
+    return api.get<ReservationView[]>(
+      `/restaurant/branches/${branchId}/reservations?${query.toString()}`,
+      auth(session),
+    );
+  },
+  create(
+    session: Session,
+    branchId: string,
+    body: {
+      tableId: string;
+      customerId?: string;
+      customerName: string;
+      customerPhone?: string;
+      partySize: number;
+      startAt: string;
+      durationMinutes: number;
+      notes?: string;
+    },
+  ) {
+    return api.post<ReservationView>(
+      `/restaurant/branches/${branchId}/reservations`,
+      body,
+      auth(session),
+    );
+  },
+  update(
+    session: Session,
+    reservationId: string,
+    body: Partial<{
+      tableId: string;
+      /** `null` unlinks the customer record; absent leaves the link alone. */
+      customerId: string | null;
+      customerName: string;
+      customerPhone: string;
+      partySize: number;
+      startAt: string;
+      durationMinutes: number;
+      notes: string;
+    }>,
+  ) {
+    return api.patch<ReservationView>(`/restaurant/reservations/${reservationId}`, body, auth(session));
+  },
+  setStatus(
+    session: Session,
+    reservationId: string,
+    status: 'BOOKED' | 'SEATED' | 'COMPLETED' | 'CANCELLED' | 'NO_SHOW',
+  ) {
+    return api.post<ReservationView>(
+      `/restaurant/reservations/${reservationId}/status`,
+      { status },
+      auth(session),
+    );
+  },
+};
+
+// ── Dining ─────────────────────────────────────────────────────────────────
+export const diningAreas = {
+  list(session: Session, branchId: string, includeArchived = false) {
+    const query = includeArchived ? '?includeArchived=true' : '';
+    return api.get<DiningAreaView[]>(
+      `/restaurant/branches/${branchId}/dining-areas${query}`,
+      auth(session),
+    );
+  },
+  create(
+    session: Session,
+    branchId: string,
+    body: { name: string; description?: string; position?: number },
+  ) {
+    return api.post<DiningAreaView>(
+      `/restaurant/branches/${branchId}/dining-areas`,
+      body,
+      auth(session),
+    );
+  },
+  /**
+   * PATCH — creator-scoped (Restaurant Pilot Change 1). Only `name`,
+   * `description`, `position` travel; the DTO on the server does not accept
+   * `isActive`, which is archive's job (see `archive` below), or `status`
+   * (that is not a field on areas). Fields have been narrowed accordingly.
+   */
+  update(
+    session: Session,
+    branchId: string,
+    areaId: string,
+    body: Partial<{ name: string; description: string; position: number }>,
+  ) {
+    return api.patch<DiningAreaView>(
+      `/restaurant/branches/${branchId}/dining-areas/${areaId}`,
+      body,
+      auth(session),
+    );
+  },
+  archive(session: Session, branchId: string, areaId: string) {
+    return api.del<DiningAreaView>(
+      `/restaurant/branches/${branchId}/dining-areas/${areaId}`,
+      auth(session),
+    );
+  },
+};
+
+// ── Open tables (D49) ──────────────────────────────────────────────────────
+export const openTables = {
+  list(session: Session, branchId: string) {
+    return api.get<OpenTableView[]>(`/restaurant/branches/${branchId}/open-tables`, auth(session));
+  },
+  create(
+    session: Session,
+    branchId: string,
+    body: { name: string; seats?: number; memberTableIds: string[] },
+  ) {
+    return api.post<OpenTableView>(`/restaurant/branches/${branchId}/open-tables`, body, auth(session));
+  },
+  dissolve(session: Session, branchId: string, openTableId: string) {
+    return api.del<OpenTableView & { release: OpenTableReleaseSummary }>(
+      `/restaurant/branches/${branchId}/open-tables/${openTableId}`,
+      auth(session),
+    );
+  },
+  /** D50 — manually unreserve one shared member table (compaction). */
+  releaseMember(session: Session, branchId: string, tableId: string) {
+    return api.post<{
+      table: RestaurantTableView;
+      releasedFrom: Array<{ id: string; code: string; label: string | null }>;
+    }>(
+      `/restaurant/branches/${branchId}/open-tables/members/${tableId}/release`,
+      {},
+      auth(session),
+    );
+  },
+};
+
+export const restaurantTables = {
+  list(session: Session, areaId: string, includeArchived = false) {
+    const query = includeArchived ? '?includeArchived=true' : '';
+    return api.get<RestaurantTableView[]>(
+      `/restaurant/dining-areas/${areaId}/tables${query}`,
+      auth(session),
+    );
+  },
+  create(
+    session: Session,
+    areaId: string,
+    body: {
+      code: string;
+      label?: string;
+      capacity: number;
+      positionX?: number;
+      positionY?: number;
+    },
+  ) {
+    return api.post<RestaurantTableView>(
+      `/restaurant/dining-areas/${areaId}/tables`,
+      body,
+      auth(session),
+    );
+  },
+  /**
+   * PATCH — creator-scoped. `status` and `isActive` no longer travel through
+   * this endpoint (status is set operationally by the sessions system;
+   * archive is its own endpoint). `code` is intentionally not editable —
+   * it is the shared shorthand callers use out loud.
+   */
+  update(
+    session: Session,
+    areaId: string,
+    tableId: string,
+    body: Partial<{
+      label: string;
+      capacity: number;
+      positionX: number;
+      positionY: number;
+    }>,
+  ) {
+    return api.patch<RestaurantTableView>(
+      `/restaurant/dining-areas/${areaId}/tables/${tableId}`,
+      body,
+      auth(session),
+    );
+  },
+  archive(session: Session, areaId: string, tableId: string) {
+    return api.del<RestaurantTableView>(
+      `/restaurant/dining-areas/${areaId}/tables/${tableId}`,
+      auth(session),
+    );
+  },
+};
+
+// ── Table sessions ──────────────────────────────────────────────────────────
+export const tableSessions = {
+  open(
+    session: Session,
+    branchId: string,
+    // D104 — `tabName` names THIS tab when an arrangement carries several
+    // parties. The server requires it from the second tab onwards.
+    body: { tableId: string; guestCount?: number; waiterUserId?: string; tabName?: string },
+  ) {
+    return api.post<TableSessionView>(
+      `/restaurant/branches/${branchId}/table-sessions`,
+      body,
+      auth(session),
+    );
+  },
+  get(session: Session, sessionId: string) {
+    return api.get<TableSessionView>(
+      `/restaurant/table-sessions/${sessionId}`,
+      auth(session),
+    );
+  },
+  listOpen(session: Session, branchId: string) {
+    return api.get<OpenSessionView[]>(
+      `/restaurant/branches/${branchId}/open-sessions`,
+      auth(session),
+    );
+  },
+  /**
+   * D159 — who this branch can put on a table (the reassign picker's list).
+   * D159a — with how many tables each already holds, which is what makes a
+   * fifteen-waiter list decidable rather than merely complete.
+   */
+  listAssignableWaiters(session: Session, branchId: string) {
+    return api.get<AssignableWaiter[]>(
+      `/restaurant/branches/${branchId}/assignable-waiters`,
+      auth(session),
+    );
+  },
+  /** D159 — hand an open session to a different waiter. */
+  reassignWaiter(session: Session, branchId: string, sessionId: string, waiterUserId: string) {
+    return api.post<TableSessionView>(
+      `/restaurant/branches/${branchId}/table-sessions/${sessionId}/waiter`,
+      { waiterUserId },
+      auth(session),
+    );
+  },
+  getDetail(session: Session, sessionId: string) {
+    return api.get<SessionDetail>(
+      `/restaurant/table-sessions/${sessionId}/detail`,
+      auth(session),
+    );
+  },
+  /** D71 — the running bill for an OPEN session, priced by the server. */
+  billPreview(session: Session, sessionId: string) {
+    return api.get<SessionBillPreview>(
+      `/restaurant/table-sessions/${sessionId}/bill-preview`,
+      auth(session),
+    );
+  },
+  createOrder(session: Session, sessionId: string) {
+    return api.post<OrderView>(
+      `/restaurant/table-sessions/${sessionId}/orders`,
+      undefined,
+      auth(session),
+    );
+  },
+  submitRound(
+    session: Session,
+    orderId: string,
+    body: { items: OrderItemInput[]; idempotencyKey: string; channel?: string },
+  ) {
+    return api.post<RoundView>(
+      `/restaurant/orders/${orderId}/rounds`,
+      body,
+      auth(session),
+    );
+  },
+  voidItem(session: Session, itemId: string, body: { reason: string }) {
+    return api.post<void>(
+      `/restaurant/order-items/${itemId}/void`,
+      body,
+      auth(session),
+    );
+  },
+  /**
+   * D178 — "Proceed to pay". Raises the bill and holds the table (BILLING)
+   * until the cashier records the payment that clears it. Idempotent: a
+   * second call on a table already at the till returns the same sale.
+   */
+  sendToCashier(session: Session, sessionId: string, body: { idempotencyKey?: string } = {}) {
+    return api.post<{ session: TableSessionView; saleId: string }>(
+      `/restaurant/table-sessions/${sessionId}/send-to-cashier`,
+      body,
+      auth(session),
+    );
+  },
+  /**
+   * Pre-D178 route, same behaviour as `sendToCashier` since D178. Kept so an
+   * older client keeps working; new code calls `sendToCashier`.
+   */
+  close(session: Session, sessionId: string, body: { idempotencyKey?: string } = {}) {
+    return api.post<{ session: TableSessionView; saleId: string }>(
+      `/restaurant/table-sessions/${sessionId}/close`,
+      body,
+      auth(session),
+    );
+  },
+};
+
+// ── Kitchen ─────────────────────────────────────────────────────────────────
+
+/**
+ * D154 — what one board tick reads: the lane the board is showing, and the
+ * three lane counts alongside it.
+ *
+ * The counts ride WITH the tickets rather than following in a second request,
+ * which halves a 5 s poll's traffic — but the reason they are in the same
+ * envelope rather than merely in the same round trip is correctness. Two reads
+ * see two moments: a ticket bumped between them leaves the card gone while the
+ * chip still counts it, or the reverse. One envelope is one snapshot, so the
+ * cards and the numbers agree by construction.
+ *
+ * `counts` never varies with `status`: D142b's rule is that every lane chip
+ * carries its number whichever lane is open, so these cannot be the filtered
+ * read's own tally. They are the BRANCH's three lanes — or, with `stationId`
+ * (D174), that station's three, scoped by the same clause as `items`.
+ */
+export interface KitchenTicketListResult {
+  items: KitchenTicketView[];
+  counts: KitchenLaneCounts;
+}
+
+export const kitchen = {
+  listTickets(
+    session: Session,
+    branchId: string,
+    /**
+     * D115 — `CANCELLED` is a pseudo-filter: order-side cancellation.
+     * D142 — so is `COMPLETED_TODAY`: the Done lane cut to the shop's own day,
+     * which is the server's reckoning and not the browser's.
+     */
+    status?: KitchenTicketStatus | 'OUTSTANDING' | 'CANCELLED' | 'COMPLETED_TODAY' | 'ALL',
+    /**
+     * D174 — scopes BOTH `items` and `counts` to one station. Omitted, the
+     * read is the whole branch, exactly as before D174. A D147-window ticket
+     * belongs to no station, so it is in no station's read and only in the
+     * unscoped one.
+     */
+    stationId?: string,
+  ) {
+    const params = new URLSearchParams();
+    if (status && status !== 'ALL') params.set('status', status);
+    if (stationId) params.set('stationId', stationId);
+    const qs = params.toString();
+    return api.get<KitchenTicketListResult>(
+      `/restaurant/branches/${branchId}/kitchen-tickets${qs ? `?${qs}` : ''}`,
+      auth(session),
+    );
+  },
+  /**
+   * D142b — the three lane counts, for the chips the board cannot count itself.
+   *
+   * D154 moved the BOARD off this and onto the counts `listTickets` now
+   * carries, so the poll is one request. The endpoint and this wrapper stay:
+   * they are the cheap read for anything that wants the numbers WITHOUT the
+   * tickets, and making a caller fetch a whole lane to learn three integers
+   * would be the same waste D154 just removed, pointed the other way.
+   *
+   * D174 — and the board is that caller again, under a station cut: it needs
+   * the station's three numbers beside a list it must read UNSCOPED (the
+   * station strip counts every station), which is three integers exactly.
+   * `stationId` scopes the numbers the same way it scopes `listTickets`, so
+   * the two routes answer the same question with the same clause (D174 pins
+   * them to each other server-side).
+   */
+  laneCounts(session: Session, branchId: string, stationId?: string) {
+    const query = stationId ? `?stationId=${encodeURIComponent(stationId)}` : '';
+    return api.get<KitchenLaneCounts>(
+      `/restaurant/branches/${branchId}/kitchen-tickets/counts${query}`,
+      auth(session),
+    );
+  },
+  /**
+   * D142 — every ticket this branch holds, today's included. D150 widened it
+   * past the Done lane: work still on the pass is on this screen too.
+   *
+   * A sibling of `listTickets` rather than an option on it: this one pages and
+   * searches, so its envelope carries `total`/`page`/`pageSize` where the
+   * board's (D154) carries the lane counts. Two reads with genuinely different
+   * questions; folding them together would make both callers carry half a
+   * shape they never asked for.
+   */
+  history(
+    session: Session,
+    branchId: string,
+    query: {
+      page?: number;
+      pageSize?: number;
+      /** D175 — ticket number, order number and item name; nothing else. */
+      search?: string;
+      /**
+       * D175 — structured filters, each a set of ids. A ticket matches when its
+       * station is IN `stationIds` AND its table is IN `tableIds`; an empty (or
+       * absent) set is no filter on that axis. A takeaway ticket has no table,
+       * so it matches only while `tableIds` is empty.
+       */
+      stationIds?: string[];
+      tableIds?: string[];
+    } = {},
+  ) {
+    const params = new URLSearchParams();
+    if (query.page !== undefined) params.set('page', String(query.page));
+    if (query.pageSize !== undefined) params.set('pageSize', String(query.pageSize));
+    // An empty term is no term: sending `search=` would have the server treat
+    // the blank as a filter that matches nothing rather than as no filter.
+    if (query.search) params.set('search', query.search);
+    // Repeated keys (`stationId=a&stationId=b`), which is what the server's
+    // array param reads; a joined `a,b` would arrive as one id nothing matches.
+    for (const id of query.stationIds ?? []) params.append('stationId', id);
+    for (const id of query.tableIds ?? []) params.append('tableId', id);
+    const qs = params.toString();
+    return api.get<KitchenHistoryPage>(
+      `/restaurant/branches/${branchId}/kitchen-tickets/history${qs ? `?${qs}` : ''}`,
+      auth(session),
+    );
+  },
+  /** D83 — the whole order behind a ticket, across every station. */
+  order(session: Session, branchId: string, ticketId: string) {
+    return api.get<KitchenOrderView>(
+      `/restaurant/branches/${branchId}/kitchen-tickets/${ticketId}/order`,
+      auth(session),
+    );
+  },
+  /** D68 — kitchen staff saying the food is done. */
+  /** D113 — first tap of the bump bar: QUEUED → Preparing. */
+  start(session: Session, branchId: string, ticketId: string) {
+    return api.post<KitchenTicketView>(
+      `/restaurant/branches/${branchId}/kitchen-tickets/${ticketId}/start`,
+      undefined,
+      auth(session),
+    );
+  },
+  complete(session: Session, branchId: string, ticketId: string) {
+    return api.post<KitchenTicketView>(
+      `/restaurant/branches/${branchId}/kitchen-tickets/${ticketId}/complete`,
+      undefined,
+      auth(session),
+    );
+  },
+  /** D100 — recall: pulling a wrongly bumped ticket back onto the pass. */
+  reopen(session: Session, branchId: string, ticketId: string) {
+    return api.post<KitchenTicketView>(
+      `/restaurant/branches/${branchId}/kitchen-tickets/${ticketId}/reopen`,
+      undefined,
+      auth(session),
+    );
+  },
+  kdsBoard(session: Session, branchId: string, status?: KitchenTicketStatus) {
+    const query = status ? `?status=${status}` : '';
+    // D154 — the same envelope `listTickets` answers with: one service read,
+    // one shape on both routes. A caller wanting only the cards reads `items`.
+    return api.get<KitchenTicketListResult>(
+      `/restaurant/branches/${branchId}/kds/board${query}`,
+      auth(session),
+    );
+  },
+};
+
+export const kitchenPrinters = {
+  list(session: Session, branchId: string) {
+    return api.get<KitchenPrinterView[]>(
+      `/restaurant/branches/${branchId}/kitchen-printers`,
+      auth(session),
+    );
+  },
+  create(
+    session: Session,
+    branchId: string,
+    body: {
+      code: string;
+      name: string;
+      kind: KitchenPrinterKind;
+      address: string;
+      role?: PrinterRole;
+      columns?: number;
+    },
+  ) {
+    return api.post<KitchenPrinterView>(
+      `/restaurant/branches/${branchId}/kitchen-printers`,
+      body,
+      auth(session),
+    );
+  },
+  update(
+    session: Session,
+    branchId: string,
+    printerId: string,
+    body: Partial<{
+      name: string;
+      kind: KitchenPrinterKind;
+      address: string;
+      isActive: boolean;
+      role: PrinterRole;
+      columns: number;
+    }>,
+  ) {
+    return api.patch<KitchenPrinterView>(
+      `/restaurant/branches/${branchId}/kitchen-printers/${printerId}`,
+      body,
+      auth(session),
+    );
+  },
+  /** D181 — which stations this printer serves. Replace-all. */
+  setStations(session: Session, branchId: string, printerId: string, stationIds: string[]) {
+    return api.put<KitchenPrinterView>(
+      `/restaurant/branches/${branchId}/kitchen-printers/${printerId}/stations`,
+      { stationIds },
+      auth(session),
+    );
+  },
+  /** D181 — a self-test page: printed now, or queued for the branch's agent. */
+  testPrint(session: Session, branchId: string, printerId: string) {
+    return api.post<TestPrintResult>(
+      `/restaurant/branches/${branchId}/kitchen-printers/${printerId}/test-print`,
+      {},
+      auth(session),
+    );
+  },
+};
+
+// ── Printing (D181) ─────────────────────────────────────────────────────────
+export const printing = {
+  /** The queue's depth and its recent failures, for the settings screen. */
+  queue(session: Session, branchId: string) {
+    return api.get<PrintQueueStatus>(
+      `/printing/queue?branchId=${encodeURIComponent(branchId)}`,
+      auth(session),
+    );
+  },
+  /** One job's outcome — a queued test page, a stuck bill. */
+  job(session: Session, jobId: string) {
+    return api.get<PrintJobStatusView>(`/printing/jobs/${jobId}`, auth(session));
+  },
+  retryJob(session: Session, jobId: string) {
+    return api.post<{ ok: true }>(`/printing/jobs/${jobId}/retry`, {}, auth(session));
+  },
+  agents(session: Session, branchId: string) {
+    return api.get<PrintAgentView[]>(
+      `/printing/agents?branchId=${encodeURIComponent(branchId)}`,
+      auth(session),
+    );
+  },
+  /** Pair an on-site agent. The token comes back ONCE. */
+  pairAgent(session: Session, branchId: string, name: string) {
+    return api.post<{ id: string; name: string; token: string }>(
+      '/printing/agents',
+      { branchId, name },
+      auth(session),
+    );
+  },
+  revokeAgent(session: Session, agentId: string) {
+    return api.post<{ ok: true }>(`/printing/agents/${agentId}/revoke`, {}, auth(session));
+  },
+};
+
+// ── Takeaway ────────────────────────────────────────────────────────────────
+export const takeaway = {
+  list(session: Session, branchId: string) {
+    return api.get<TakeawayView[]>(
+      `/restaurant/takeaway?branchId=${encodeURIComponent(branchId)}`,
+      auth(session),
+    );
+  },
+  create(
+    session: Session,
+    body: {
+      branchId: string;
+      customerName?: string;
+      customerPhone?: string;
+      pickupAt?: string;
+      notes?: string;
+      items: OrderItemInput[];
+      idempotencyKey: string;
+    },
+  ) {
+    return api.post<TakeawayView>(`/restaurant/takeaway`, body, auth(session));
+  },
+  updateStatus(session: Session, profileId: string, body: { status: TakeawayOrderStatus }) {
+    return api.patch<TakeawayView>(
+      `/restaurant/takeaway/${profileId}/status`,
+      body,
+      auth(session),
+    );
+  },
+  /** D117 — close the session into a Sale (idempotent) WITHOUT handing over. */
+  settle(session: Session, profileId: string) {
+    return api.post<TakeawayView>(
+      `/restaurant/takeaway/${profileId}/settle`,
+      undefined,
+      auth(session),
+    );
+  },
+};
+
+// ── Billing ────────────────────────────────────────────────────────────────
+export const billing = {
+  get(session: Session, saleId: string) {
+    return api.get<BillView>(`/restaurant/bills/${saleId}`, auth(session));
+  },
+  collectPayment(
+    session: Session,
+    saleId: string,
+    body: { amount: number; method: PaymentMethod; reference?: string; splitId?: string },
+  ) {
+    return api.post<BillView>(
+      `/restaurant/bills/${saleId}/payments`,
+      body,
+      auth(session),
+    );
+  },
+  setSplits(
+    session: Session,
+    saleId: string,
+    body: { splits: { label?: string; share: number }[] },
+  ) {
+    return api.post<BillView>(
+      `/restaurant/bills/${saleId}/splits`,
+      body,
+      auth(session),
+    );
+  },
+  /** D51 — split by the lines each party ate; the server derives the money. */
+  splitByItems(
+    session: Session,
+    saleId: string,
+    body: {
+      splits: Array<{
+        label?: string;
+        items: Array<{ orderItemId: string; quantity: number }>;
+      }>;
+    },
+  ) {
+    return api.post<BillView>(
+      `/restaurant/bills/${saleId}/split-by-items`,
+      body,
+      auth(session),
+    );
+  },
+  reopen(session: Session, saleId: string, body: { reason: string }) {
+    return api.post<BillView>(
+      `/restaurant/bills/${saleId}/reopen`,
+      body,
+      auth(session),
+    );
+  },
+};
+
+// ── Restaurant reports ─────────────────────────────────────────────────────
+function reportQuery(range?: { from?: string; to?: string; limit?: number }): string {
+  if (!range) return '';
+  const q = new URLSearchParams();
+  if (range.from) q.set('from', range.from);
+  if (range.to) q.set('to', range.to);
+  if (range.limit) q.set('limit', String(range.limit));
+  return q.toString() ? `?${q.toString()}` : '';
+}
+
+export const restaurantReports = {
+  salesSummary(session: Session, branchId: string, range?: { from?: string; to?: string }) {
+    return api.get<SalesSummaryView>(
+      `/restaurant/reports/branches/${branchId}/sales-summary${reportQuery(range)}`,
+      auth(session),
+    );
+  },
+  topItems(
+    session: Session,
+    branchId: string,
+    range?: { from?: string; to?: string; limit?: number },
+  ) {
+    return api.get<TopMenuItemView[]>(
+      `/restaurant/reports/branches/${branchId}/top-items${reportQuery(range)}`,
+      auth(session),
+    );
+  },
+  waiterPerformance(session: Session, branchId: string, range?: { from?: string; to?: string }) {
+    return api.get<WaiterPerformanceRow[]>(
+      `/restaurant/reports/branches/${branchId}/waiter-performance${reportQuery(range)}`,
+      auth(session),
+    );
+  },
+  paymentBreakdown(session: Session, branchId: string, range?: { from?: string; to?: string }) {
+    return api.get<PaymentBreakdownRow[]>(
+      `/restaurant/reports/branches/${branchId}/payment-breakdown${reportQuery(range)}`,
+      auth(session),
+    );
+  },
+  voids(session: Session, branchId: string, range?: { from?: string; to?: string }) {
+    return api.get<VoidReportRow[]>(
+      `/restaurant/reports/branches/${branchId}/voids${reportQuery(range)}`,
+      auth(session),
+    );
+  },
+  channels(session: Session, branchId: string, range?: { from?: string; to?: string }) {
+    return api.get<ChannelBreakdownRow[]>(
+      `/restaurant/reports/branches/${branchId}/channels${reportQuery(range)}`,
+      auth(session),
+    );
+  },
+};
+
+// ── Unified orders (Pilot Change 2 Slice D) ────────────────────────────────
+export interface OrdersQuery {
+  /**
+   * D157 — whose orders. Omitted on a first load so the SERVER picks (mine
+   * when the caller has any, else all) and reports what it chose; set once the
+   * operator taps a chip, from then on riding in the URL like every other
+   * filter on this screen.
+   */
+  scope?: 'mine' | 'all';
+  channel?: UnifiedChannel | 'ALL';
+  /**
+   * D179 — a unified status, or one of two buckets the tabs use:
+   * `OUTSTANDING` (everything not finished — the "All Orders" tab) and
+   * `DONE` (COMPLETED or HANDED_OVER — the "Completed" tab). `ALL` is still
+   * literally everything.
+   */
+  status?: UnifiedOrderStatus | 'ALL' | 'OUTSTANDING' | 'DONE';
+  paymentStatus?: 'UNPAID' | 'PARTIAL' | 'PAID' | 'REFUNDED' | 'ALL';
+  search?: string;
+  from?: string;
+  to?: string;
+  /** 1-based. Omit for the first page. */
+  page?: number;
+  pageSize?: number;
+}
+
+export interface UnifiedOrdersPage {
+  items: UnifiedOrderView[];
+  /** Rows matching the filter across every page, not the page length. */
+  total: number;
+  page: number;
+  pageSize: number;
+  /** The server's scan was capped, so `total` is a floor. Narrow the filters. */
+  truncated: boolean;
+  /** Per-status totals across every page, counted before the status filter. */
+  statusCounts: Record<UnifiedOrderStatus, number>;
+  /**
+   * D114 — READY takeaway + third-party rows (never dine-in: that alert is
+   * the floor's). Status-filter independent, like statusCounts — the ready
+   * bell rings whichever tab is open.
+   */
+  readyHandoverCount: number;
+  /**
+   * D157 — the numbers on the Mine/All chips, counted before the scope
+   * narrowing so both are known whichever view is showing. `resolvedScope` is
+   * what the server actually applied, which is how the screen knows which chip
+   * to light up on a first load that did not ask for one.
+   */
+  mineCount: number;
+  allCount: number;
+  resolvedScope: 'mine' | 'all';
+}
+
+export const restaurantOrders = {
+  list(session: Session, branchId: string, q: OrdersQuery = {}) {
+    const params = new URLSearchParams();
+    if (q.scope) params.set('scope', q.scope);
+    if (q.channel && q.channel !== 'ALL') params.set('channel', q.channel);
+    if (q.status && q.status !== 'ALL') params.set('status', q.status);
+    if (q.paymentStatus && q.paymentStatus !== 'ALL') params.set('paymentStatus', q.paymentStatus);
+    if (q.search) params.set('search', q.search);
+    if (q.from) params.set('from', q.from);
+    if (q.to) params.set('to', q.to);
+    if (q.page && q.page > 1) params.set('page', String(q.page));
+    if (q.pageSize) params.set('pageSize', String(q.pageSize));
+    const query = params.toString() ? `?${params.toString()}` : '';
+    return api.get<UnifiedOrdersPage>(
+      `/restaurant/branches/${branchId}/orders${query}`,
+      auth(session),
+    );
+  },
+  /** Full record for the drawer. Null when the row is gone — not an error. */
+  detail(session: Session, branchId: string, orderId: string) {
+    return api.get<UnifiedOrderDetail | null>(
+      `/restaurant/branches/${branchId}/orders/${encodeURIComponent(orderId)}`,
+      auth(session),
+    );
+  },
+};
+
+// ── Delivery hub ────────────────────────────────────────────────────────────
+export const deliveryHub = {
+  listExternalOrders(session: Session, branchId: string) {
+    return api.get<ExternalOrderView[]>(
+      `/delivery-hub/branches/${branchId}/external-orders`,
+      auth(session),
+    );
+  },
+  getExternalOrder(session: Session, externalOrderId: string) {
+    return api.get<ExternalOrderView | null>(
+      `/delivery-hub/external-orders/${externalOrderId}`,
+      auth(session),
+    );
+  },
+  acceptExternal(session: Session, externalOrderId: string) {
+    return api.post<ExternalOrderView>(
+      `/delivery-hub/external-orders/${externalOrderId}/accept`,
+      undefined,
+      auth(session),
+    );
+  },
+};

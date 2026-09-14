@@ -1,7 +1,7 @@
 'use client';
 
 import { useRouter } from 'next/navigation';
-import { Building2, ChevronDown, LogOut, MonitorSmartphone, PanelLeft } from 'lucide-react';
+import { ChevronDown, LogOut, PanelLeft } from 'lucide-react';
 import * as React from 'react';
 
 import { CommandPalette } from '@/components/command-palette';
@@ -11,6 +11,12 @@ import { Button } from '@/components/ui/button';
 import { useAuth } from '@/lib/auth';
 import { useSidebar } from '@/lib/sidebar';
 import { cn } from '@/lib/utils';
+
+/** "SALESPERSON" → "Salesperson", "KITCHEN_STAFF" → "Kitchen staff": the enum, spelt for a person. */
+export function enumRoleLabel(role: string): string {
+  const words = role.toLowerCase().replace(/_/g, ' ');
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
 
 function initials(name: string): string {
   return name
@@ -33,16 +39,17 @@ export function Header() {
   };
 
   return (
-    <header className="flex h-16 items-center justify-between gap-3 border-b border-border bg-surface px-4 md:px-6">
-      {/* Mobile-only drawer opener — on desktop the rail has its own collapse
-          control at the bottom of the sidebar. */}
+    <header className="flex h-16 items-center justify-between gap-3 border-b border-border bg-surface px-4 pt-safe md:px-6">
+      {/* Drawer opener — visible below the `tab:` (900) cutover so portrait
+          iPad still has a way to reach navigation. Above the cutover the
+          rail has its own collapse control at the bottom of the sidebar. */}
       <div className="flex min-w-0 items-center">
         <Button
           variant="ghost"
           size="icon"
           onClick={openMobile}
           aria-label="Open navigation"
-          className="md:hidden"
+          className="touch-target-coarse tab:hidden"
         >
           <PanelLeft className="h-5 w-5" />
         </Button>
@@ -51,12 +58,17 @@ export function Header() {
       <div className="flex min-w-0 items-center justify-end gap-2 md:gap-3">
         <CommandPalette />
         <SyncStatus />
-        <ThemeToggle className="hidden md:inline-flex" />
+        {/* Theme toggle collapses into the profile menu below the tab
+            cutover so the header row does not overflow on portrait
+            tablet. */}
+        <ThemeToggle className="hidden tab:inline-flex" />
         <ProfileMenu
           name={session.user.name}
-          role={session.user.role}
-          branch={session.branchName}
-          register={session.registerName}
+          // The role row's display name, verbatim — "Kitchen staff" is how the
+          // row spells it. The enum is a legacy label that can disagree (a
+          // waiter's enum says CASHIER), and is only re-cased for a session
+          // minted before roleName existed.
+          role={session.user.roleName ?? enumRoleLabel(session.user.role)}
           onLogout={onLogout}
         />
       </div>
@@ -64,17 +76,20 @@ export function Header() {
   );
 }
 
+/*
+ * D109 — the menu names the person and their role, and nothing else. It used
+ * to list the branch and the register underneath; the PO asked for both to go
+ * (2026-09-08): a menu about the account is not where the till's location
+ * belongs, and on a one-branch shop the two lines were noise under every name.
+ * The session still carries both for the screens that need them.
+ */
 function ProfileMenu({
   name,
   role,
-  branch,
-  register,
   onLogout,
 }: {
   name: string;
   role: string;
-  branch: string;
-  register: string;
   onLogout: () => void;
 }) {
   const [open, setOpen] = React.useState(false);
@@ -103,7 +118,9 @@ function ProfileMenu({
         aria-expanded={open}
         aria-label="Account menu"
         className={cn(
-          'flex items-center gap-2 rounded-xl border border-transparent p-1 pr-1.5 transition-colors hover:bg-muted',
+          // Padding + the h-9 avatar keep this ~40px on mouse. `touch-target-coarse`
+          // bumps it to 44px on touch input without changing the desktop look.
+          'touch-target-coarse flex items-center gap-2 rounded-xl border border-transparent p-1 pr-1.5 transition-colors hover:bg-muted',
           open && 'border-border bg-muted',
         )}
       >
@@ -112,7 +129,7 @@ function ProfileMenu({
         </span>
         <span className="hidden leading-tight sm:block">
           <span className="block text-sm font-medium">{name}</span>
-          <span className="block text-xs capitalize text-muted-foreground">{role.toLowerCase()}</span>
+          <span className="block text-xs text-muted-foreground">{role}</span>
         </span>
         <ChevronDown className="hidden h-4 w-4 shrink-0 text-muted-foreground sm:block" aria-hidden />
       </button>
@@ -124,20 +141,12 @@ function ProfileMenu({
         >
           <div className="px-3 py-2.5">
             <p className="truncate text-sm font-semibold">{name}</p>
-            <p className="text-xs capitalize text-muted-foreground">{role.toLowerCase()}</p>
-            <div className="mt-2 space-y-1 text-xs text-muted-foreground">
-              <p className="flex items-center gap-1.5">
-                <Building2 className="h-3.5 w-3.5" aria-hidden />
-                {branch}
-              </p>
-              <p className="flex items-center gap-1.5">
-                <MonitorSmartphone className="h-3.5 w-3.5" aria-hidden />
-                {register}
-              </p>
-            </div>
+            <p className="text-xs text-muted-foreground">{role}</p>
           </div>
-          <div className="my-1 border-t border-border md:hidden" />
-          <div className="flex items-center justify-between px-3 py-2 md:hidden">
+          {/* Theme toggle lives in the profile menu below the `tab:` cutover
+              because the header row itself hides it there — see above. */}
+          <div className="my-1 border-t border-border tab:hidden" />
+          <div className="flex items-center justify-between px-3 py-2 tab:hidden">
             <span className="text-xs font-medium text-muted-foreground">Theme</span>
             <ThemeToggle />
           </div>
@@ -146,7 +155,7 @@ function ProfileMenu({
             type="button"
             role="menuitem"
             onClick={onLogout}
-            className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium text-danger transition-colors hover:bg-danger-soft focus-visible:bg-danger-soft focus-visible:outline-none"
+            className="touch-target-coarse flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium text-danger transition-colors hover:bg-danger-soft focus-visible:bg-danger-soft focus-visible:outline-none"
           >
             <LogOut className="h-4 w-4" aria-hidden />
             Log out

@@ -1,0 +1,232 @@
+import { Prisma } from '@hardware-pos/database';
+
+import {
+  AvailabilityMap,
+  ProviderContext,
+  ProviderInventoryMode,
+  ProviderSyncOutcome,
+  ReceiveStockLine,
+  ReceiveStockLineOutcome,
+  StockAdjustment,
+  StockCountLine,
+  StockCountOutcome,
+  StockLine,
+  StockMovementMetadata,
+  VariantAvailabilityMap,
+} from '../provider.types';
+
+/**
+ * Where stock lives and who is authoritative for it.
+ *
+ * ## Scope
+ *
+ * Every method here exists because the current code already does it. Nothing is
+ * modelled speculatively:
+ *
+ * | Method | Existing behaviour it abstracts |
+ * |---|---|
+ * | `getAvailability` | `sales.service.computeCart` reads `product.quantityOnHand` and rejects a line that exceeds it |
+ * | `reduceStock` | `sales.repository.decrementStock` — the conditional `updateMany` inside the sale transaction |
+ * | `restoreStock` | `returns.repository` — the eager `increment` for GOOD / RETURN_TO_STOCK items |
+ * | `adjustStock` | the bulk product import writes on-hand quantities today; Slice 6 routes that through here |
+ * | `synchronize` | `POST /v1/sync/products/refresh` and `POST /v1/products/sync/mock` pull products from QuickBooks |
+ *
+ * Deliberately **absent**: `reserveStock`. There is no reservation anywhere in the
+ * repository — no held-stock column, no reservation table, no expiry. Adding it
+ * would be a speculative interface for a feature that does not exist.
+ *
+ * ## Transaction contract — the highest-risk detail of the whole refactor
+ *
+ * Every mutating method takes the caller's `Prisma.TransactionClient` as its first
+ * parameter and **must** perform all its writes through it.
+ *
+ * An implementation must never call `prisma.$transaction(...)` or reach for the
+ * root `PrismaService`. Today's `decrementStock` guards against overselling with a
+ * conditional `updateMany({ where: { quantityOnHand: { gte: qty } } })` and a
+ * row-count check: a zero-row update throws and the **entire sale** rolls back. A
+ * provider that opened its own connection would commit the stock movement
+ * independently of the sale, so overselling becomes possible again and the
+ * transactional outbox stops being an outbox.
+ *
+ * The caller owns transaction boundaries. A provider failure must therefore
+ * propagate, so it participates in the caller's rollback.
+ *
+ * ## Tenant safety
+ *
+ * `ctx.tenantId` always comes from the authenticated server-side context; no
+ * implementation may read a tenant id from a request. Every product write is
+ * additionally scoped by `tenantId` in its `where` clause, so a product id
+ * belonging to another tenant matches zero rows rather than being mutated.
+ */
+export interface InventoryProvider {
+  /** Which `InventoryMode` this implementation serves. Used by tests and logs. */
+  readonly mode: ProviderInventoryMode;
+
+  /** Human-readable provider name, safe for error messages and logs. */
+  readonly name: string;
+
+  /**
+   * On-hand availability for the given products.
+   *
+   * Read-only, so it takes no transaction client — callers ask before opening one.
+   * Products the provider cannot find are omitted from the map rather than
+   * reported as zero, so a caller can tell "unknown product" from "out of stock".
+   */
+  getAvailability(ctx: ProviderContext, productIds: string[]): Promise<AvailabilityMap>;
+
+  /**
+   * D120 — on-hand availability for specific variants. **Optional.**
+   *
+   * Optional rather than required because only a provider whose stock is
+   * branch-and-variant scoped can answer it. QuickBooks holds a cache of an
+   * upstream quantity with no variant dimension, and `NoInventoryProvider` has no
+   * quantities at all; forcing either to implement this would mean inventing an
+   * answer. A caller that finds the method absent keeps the product-level check,
+   * which is the correct behaviour for both.
+   *
+   * Read-only, so no transaction client — the same contract as
+   * {@link getAvailability}. It remains a courtesy check: `reduceStock`'s
+   * conditional write is still the authority under concurrency.
+   */
+  getVariantAvailability?(
+    ctx: ProviderContext,
+    variantIds: string[],
+  ): Promise<VariantAvailabilityMap>;
+
+  /**
+   * Reduce stock for a completed sale, inside the caller's transaction.
+   *
+   * Must be safe under concurrency: two simultaneous sales of the last unit must
+   * not both succeed.
+   *
+   * ## `metadata` (1a.21)
+   *
+   * Supply it to have the provider append a `StockMovement` for each line it
+   * actually moved. **Omitting it means "I keep my own ledger"** — a real state,
+   * not a forgotten argument: `RoundDepletionService` writes its own
+   * `ORDER_ROUND` rows in the caller and must not get a duplicate from here.
+   *
+   * Optional for exactly that reason. Making it required would change the call
+   * shape of the restaurant path, whose behaviour is deliberately untouched.
+   *
+   * Only `LocalInventoryProvider` writes movements. QuickBooks stock is a cache
+   * of an upstream system whose ledger is not ours to write, and
+   * `NoInventoryProvider` has no stock at all — so neither records anything,
+   * and no service has to ask which mode it is in (D28).
+   */
+  reduceStock(
+    tx: Prisma.TransactionClient,
+    ctx: ProviderContext,
+    lines: StockLine[],
+    metadata?: StockMovementMetadata,
+  ): Promise<void>;
+
+  /**
+   * Restore stock for an approved return, inside the caller's transaction.
+   *
+   * The caller decides *which* lines restock (condition and disposition are
+   * return-domain rules, not inventory rules) and passes only those.
+   */
+  restoreStock(
+    tx: Prisma.TransactionClient,
+    ctx: ProviderContext,
+    lines: StockLine[],
+    metadata?: StockMovementMetadata,
+  ): Promise<void>;
+
+  /**
+   * Apply explicit signed stock corrections, inside the caller's transaction.
+   *
+   * Unlike `reduceStock` this does **not** guard against going negative: a
+   * stocktake correction is an assertion of reality by an operator, and refusing
+   * it would leave the books wrong. Authorisation is the caller's job.
+   */
+  adjustStock(
+    tx: Prisma.TransactionClient,
+    ctx: ProviderContext,
+    adjustments: StockAdjustment[],
+  ): Promise<void>;
+
+  /**
+   * Apply the stock effect of a vendor `InventoryReceipt`, inside the caller's
+   * transaction (D44).
+   *
+   * The caller has already inserted the immutable `InventoryReceipt` header and
+   * every `InventoryReceiptLine`. This method is responsible for the *side
+   * effects* of those lines:
+   *
+   *  1. upserting the branch's `BranchInventory` cell for each line —
+   *     `quantityOnHand += quantityReceived`, `averageCost` recomputed from the
+   *     pre-receipt balance and the received unitCost (weighted average),
+   *  2. appending a `StockMovement` per line with `reason: RECEIPT`,
+   *     `refType: 'INVENTORY_RECEIPT_LINE'`, `refId: line.receiptLineId`,
+   *     `unitCost: line.unitCost`,
+   *  3. for `LOCAL` inventory (single-branch tenants only, per the class
+   *     comment), keeping `Product.quantityOnHand` in sync as the legacy
+   *     rollup + QuickBooks cache mirror (D10).
+   *
+   * Returned outcomes are per line, in input order, and carry the post-receipt
+   * balance + weighted-average snapshot for that (branch, product, variant?)
+   * cell — the caller uses them to refresh the mirror on
+   * `ProductVariant.averageCost` (or `Product.averageCost` for a legacy
+   * variant-less line) and to compose the receipt response.
+   *
+   * Providers that cannot receive stock (QuickBooks — stock is owned upstream;
+   * NONE — stock tracking is off) **must throw**
+   * `ProviderOperationUnavailableError`. A silent no-op would look like a
+   * successful receive that never moved stock, so the receipt would live in the
+   * database with no ledger effect — precisely the "receipt with no stock
+   * change" state D44 forbids.
+   */
+  receiveStock(
+    tx: Prisma.TransactionClient,
+    ctx: ProviderContext,
+    lines: ReceiveStockLine[],
+    metadata: { receiptId: string; createdByUserId: string },
+  ): Promise<ReceiveStockLineOutcome[]>;
+
+  /**
+   * D132 (`8.7`) — apply a stock COUNT, inside the caller's transaction.
+   *
+   * A count is not an adjustment and not a movement: it is an assertion by an
+   * operator about what is physically on a shelf. So it **sets** the quantity
+   * rather than incrementing it, and it is never refused for going down. The
+   * oversell guard in `reduceStock` is untouched and no count passes through
+   * it — two things that both "change the stock number" are kept apart
+   * because only one of them is a race.
+   *
+   * Distinct from `adjustStock`, which takes a signed delta, writes only
+   * `Product.quantityOnHand`, records no movement, and exists for the bulk
+   * product import. Widening that to serve counts would change what the
+   * import does for every existing tenant.
+   *
+   * Providers that cannot own a count — QuickBooks, where stock is a cache of
+   * an upstream ledger that is not ours to write, and NONE, which has no
+   * stock — **must throw** `ProviderOperationUnavailableError`. A silent
+   * no-op would look like a successful count that moved nothing, leaving a
+   * `StockTake` document with no ledger effect: the state D44 refused for
+   * receipts, for the same reason.
+   *
+   * Returns one outcome per input line, in order, so the caller can write its
+   * `StockTakeLine` rows from what actually happened rather than from what it
+   * asked for.
+   */
+  applyStockCount(
+    tx: Prisma.TransactionClient,
+    ctx: ProviderContext,
+    lines: StockCountLine[],
+    metadata: { stockTakeId: string; countedByUserId: string },
+  ): Promise<StockCountOutcome[]>;
+
+  /**
+   * Ask the provider to reconcile with its upstream system.
+   *
+   * Not transactional: synchronisation is a long-running background concern, and
+   * holding a database transaction open across an external API call is exactly the
+   * mistake this signature refuses to make possible.
+   */
+  synchronize(ctx: ProviderContext): Promise<ProviderSyncOutcome>;
+}
+
+/** DI token. An interface has no runtime identity, so injection needs a symbol. */
+export const INVENTORY_PROVIDER_FACTORY = Symbol('INVENTORY_PROVIDER_FACTORY');

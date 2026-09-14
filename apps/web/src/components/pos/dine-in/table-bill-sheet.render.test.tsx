@@ -1,0 +1,381 @@
+/**
+ * D71 — the waiter's bill sheet.
+ *
+ * ## The claim that matters
+ *
+ * A split is TWO server calls that cannot be made atomic from the client:
+ * close the session (which raises the Sale) and then split that Sale. The
+ * dangerous failure is the second one — the table is already closed, and a
+ * naive `try { close(); split() } catch { showError() }` would report
+ * failure for an operation that half-succeeded, leaving the waiter to press
+ * it again against a session that no longer exists.
+ *
+ * So the middle test asserts the half-failure explicitly: closed, reported
+ * as closed, with a message naming what the cashier has to finish. It is
+ * paired with the happy path, because a component that always reported
+ * "closed with a warning" would satisfy the failure case alone.
+ *
+ * Totals are asserted to come from the SERVER's preview rather than from
+ * re-adding the lines: 3 × 1000 is 3000, but the total shown is 3300 with
+ * service charge, and only the server knows that.
+ *
+ * D178 — the primary action is "Proceed to pay" and calls `sendToCashier`,
+ * which raises the Sale exactly as `close` did and holds the table. Every
+ * claim below is unchanged; only the verb's name and the wording of the
+ * unsent-items question moved with it (recorded in D178).
+ */
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import * as React from 'react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+import { ConfirmProvider } from '@/components/ui/confirm';
+import type { SessionBillPreview } from '@/lib/restaurant/types';
+
+const billPreview = vi.fn<() => Promise<SessionBillPreview>>();
+const sendToCashier = vi.fn();
+const splitByItems = vi.fn();
+
+vi.mock('@/lib/restaurant/api', () => ({
+  tableSessions: {
+    billPreview: () => billPreview(),
+    sendToCashier: (...args: unknown[]) => sendToCashier(...args),
+  },
+  billing: { splitByItems: (...args: unknown[]) => splitByItems(...args) },
+}));
+
+vi.mock('@/lib/restaurant/labels', async () => ({
+  formatMoney: (v: string | number) => `LKR ${Number(v).toFixed(2)}`,
+  // D177 — the REAL helper, not a stub: this spec asserts "1st send" and
+  // "2nd send" below, and a stub spelling them here would make those
+  // assertions about the mock rather than about the word the bill prints.
+  sendLabel: (await vi.importActual<typeof import('@/lib/restaurant/labels')>('@/lib/restaurant/labels'))
+    .sendLabel,
+}));
+
+const { TableBillSheet } = await import('./table-bill-sheet');
+
+const PREVIEW: SessionBillPreview = {
+  sessionId: 'ts_1',
+  items: [
+    {
+      orderItemId: 'oi_1',
+      name: 'Beef Steak',
+      variantName: 'Medium',
+      unitPrice: '1000.00',
+      quantity: '2.000',
+      lineTotal: '2000.00',
+      promotionDiscount: '0.00',
+      promotionName: null,
+      roundNumber: 1,
+      specialInstructions: 'no onions',
+    },
+    {
+      orderItemId: 'oi_2',
+      name: 'Garlic Bread',
+      variantName: null,
+      unitPrice: '1000.00',
+      quantity: '1.000',
+      lineTotal: '1000.00',
+      promotionDiscount: '0.00',
+      promotionName: null,
+      roundNumber: 2,
+      specialInstructions: null,
+    },
+  ],
+  subtotal: '3000.00',
+  promotionDiscount: '0.00',
+  promotionName: null,
+  serviceChargeAmount: '300.00',
+  packagingCharge: '0.00',
+  taxAmount: '0.00',
+  total: '3300.00',
+};
+
+const session = { token: 't', user: { id: 'u1', tenantId: 'tnt' } } as never;
+
+afterEach(() => {
+  cleanup();
+  vi.clearAllMocks();
+});
+
+const sheet = (
+  props: Omit<Partial<React.ComponentProps<typeof TableBillSheet>>, 'onClosed'> = {},
+) => {
+  const onClosed = vi.fn();
+  render(
+    // D145 — the unsent-items question is the app's own dialog now, so the
+    // sheet only works inside the provider that draws it.
+    <ConfirmProvider>
+      <TableBillSheet
+        session={session}
+        sessionId="ts_1"
+        tableLabel="T7"
+        hasUnsentDraft={false}
+        canSplit
+        onClose={vi.fn()}
+        {...props}
+        onClosed={onClosed}
+      />
+    </ConfirmProvider>,
+  );
+  return onClosed;
+};
+
+const UNSENT_QUESTION = 'Send the bill anyway?';
+
+/*
+ * Both the sheet and the confirm are `role="dialog"`, and the assigner has a
+ * "Cancel" of its own, so every button below is looked up INSIDE the confirm
+ * card. Scoping by its heading also proves the card on screen is this
+ * question and not some other dialog that happens to offer a Cancel.
+ */
+const unsentDialog = () => {
+  const card = screen.getByRole('heading', { name: UNSENT_QUESTION }).closest('[role="dialog"]');
+  if (!card) throw new Error('the unsent-items question is not inside a dialog');
+  return within(card as HTMLElement);
+};
+
+describe('reviewing the bill', () => {
+  it('shows every round, and the SERVER’s totals rather than a re-add', async () => {
+    billPreview.mockResolvedValue(PREVIEW);
+    sheet();
+
+    expect(await screen.findByText(/Beef Steak/)).toBeTruthy();
+    expect(screen.getByText('1st send')).toBeTruthy();
+    // Previous rounds are the point: a waiter answering "what have we had"
+    // must see round 2 as well as round 1.
+    expect(screen.getByText('2nd send')).toBeTruthy();
+    expect(screen.getByText(/Garlic Bread/)).toBeTruthy();
+    // Variant, because it is what the guest is being charged for.
+    expect(screen.getByText('Medium')).toBeTruthy();
+    // D72 — and the note, on the line the guest will point at.
+    expect(screen.getByText('no onions')).toBeTruthy();
+
+    // The lines add to 3000; the bill is 3300. Only the server knows about
+    // the service charge, so this asserts the number came from it.
+    expect(screen.getByText('LKR 3300.00')).toBeTruthy();
+    expect(screen.getByText('LKR 300.00')).toBeTruthy();
+  });
+
+  it('labels a promotion row as one, rather than leaving a bare offer name', async () => {
+    billPreview.mockResolvedValue({
+      ...PREVIEW,
+      promotionDiscount: '250.00',
+      promotionName: 'Lunch 10%',
+    });
+    sheet();
+
+    await screen.findByText(/Beef Steak/);
+    /*
+     * The row sits in the same column as "Service charge" and "Tax". A bare
+     * "Lunch 10%" there reads as a mystery deduction — and the receipt and the
+     * A4 bill have printed "Promotion: {name}" through the shared formatter
+     * since D123, so the till saying it any other way would be drift.
+     */
+    expect(screen.getByText('Promotion: Lunch 10%')).toBeTruthy();
+    expect(screen.queryByText('Lunch 10%')).toBeNull();
+    // The deduction reads as one, with the minus outside the currency.
+    expect(screen.getByText('- LKR 250.00')).toBeTruthy();
+  });
+
+  it('shows no promotion row when nothing was discounted', async () => {
+    billPreview.mockResolvedValue(PREVIEW);
+    sheet();
+
+    await screen.findByText(/Beef Steak/);
+    // NEGATIVE: the fixture's promotionDiscount is "0.00". A row rendered on
+    // every bill would be worse than none — it would claim a discount that
+    // was never given.
+    expect(screen.queryByText(/^Promotion/)).toBeNull();
+  });
+
+  it('hides the split action from a role that cannot split', async () => {
+    billPreview.mockResolvedValue(PREVIEW);
+    sheet({ canSplit: false });
+
+    await screen.findByText(/Beef Steak/);
+    expect(screen.queryByRole('button', { name: /Split between guests/ })).toBeNull();
+    /*
+     * POSITIVE CONTROL — closing is still offered, so the absence above is
+     * about the permission and not about a footer that failed to render.
+     * Matched on the full action name: the Sheet's own dismiss control is
+     * also called "Close", and a loose regex would pass on that instead.
+     */
+    expect(screen.getByRole('button', { name: /Proceed to pay/ })).toBeTruthy();
+  });
+});
+
+describe('closing', () => {
+  it('closes into one bill', async () => {
+    billPreview.mockResolvedValue(PREVIEW);
+    sendToCashier.mockResolvedValue({ saleId: 'sale_1' });
+    const onClosed = sheet();
+
+    fireEvent.click(await screen.findByRole('button', { name: /Proceed to pay/ }));
+
+    await waitFor(() => expect(onClosed).toHaveBeenCalledTimes(1));
+    expect(onClosed).toHaveBeenCalledWith({ saleId: 'sale_1', splitCount: 0 });
+    expect(splitByItems).not.toHaveBeenCalled();
+  });
+
+  it('closes THEN splits, and passes the new sale to the split', async () => {
+    billPreview.mockResolvedValue(PREVIEW);
+    sendToCashier.mockResolvedValue({ saleId: 'sale_1' });
+    splitByItems.mockResolvedValue({});
+    const onClosed = sheet();
+
+    fireEvent.click(await screen.findByRole('button', { name: /Split between guests/ }));
+    // Assign everything to the first guest — the assigner refuses to submit
+    // while any unit is unassigned.
+    fireEvent.click(await screen.findByRole('button', { name: /Assign rest to/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Send and split/ }));
+
+    await waitFor(() => expect(onClosed).toHaveBeenCalledTimes(1));
+    expect(sendToCashier).toHaveBeenCalledTimes(1);
+    // The split targets the sale the close just produced — not the session.
+    expect(splitByItems.mock.calls[0]![1]).toBe('sale_1');
+    expect(onClosed).toHaveBeenCalledWith({ saleId: 'sale_1', splitCount: 1 });
+  });
+
+  // D178 — was "reports the table CLOSED": the bill is at the till and the
+  // table is HELD, so the message says that instead. The claim is the same —
+  // a half-success is reported as the success it is, naming who finishes it.
+  it('reports the bill AT THE TILL when the split fails afterwards', async () => {
+    billPreview.mockResolvedValue(PREVIEW);
+    sendToCashier.mockResolvedValue({ saleId: 'sale_1' });
+    splitByItems.mockRejectedValue(new Error('shares do not add up'));
+    const onClosed = sheet();
+
+    fireEvent.click(await screen.findByRole('button', { name: /Split between guests/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /Assign rest to/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Send and split/ }));
+
+    await waitFor(() => expect(onClosed).toHaveBeenCalledTimes(1));
+    const result = onClosed.mock.calls[0]![0] as {
+      saleId: string;
+      splitCount: number;
+      warning?: string;
+    };
+    // The bill EXISTS — reporting a plain failure here would invite the
+    // waiter to close a session that is already gone.
+    expect(result.saleId).toBe('sale_1');
+    expect(result.splitCount).toBe(0);
+    // …and the message says who finishes the job.
+    expect(result.warning).toMatch(/at the till/i);
+    expect(result.warning).toMatch(/cashier/i);
+    expect(result.warning).toContain('shares do not add up');
+  });
+
+  it('does not close when the split cannot even be started', async () => {
+    billPreview.mockResolvedValue(PREVIEW);
+    const onClosed = sheet();
+
+    fireEvent.click(await screen.findByRole('button', { name: /Split between guests/ }));
+    // Nothing assigned yet: the primary action is disabled, so no close can
+    // have been attempted. This is the ordering guarantee in the other
+    // direction — the session is never closed "just in case".
+    expect(
+      screen.getByRole('button', { name: /Send and split/ }).hasAttribute('disabled'),
+    ).toBe(true);
+    expect(sendToCashier).not.toHaveBeenCalled();
+    expect(onClosed).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * D145 — the unsent-items guard, now an awaited in-app dialog.
+ *
+ * This guard is the last thing standing between "items the kitchen never
+ * cooked" and a Sale that omits them, and closing is not reversible from
+ * here. So each of the two call sites is asserted in BOTH directions:
+ * confirming closes, dismissing leaves the session open. A one-directional
+ * test would still pass if the `await` were dropped — an unawaited promise is
+ * truthy, so the guard would wave every close through.
+ */
+describe('the unsent-items question (D145)', () => {
+  it('does not ask when nothing is unsent, and closes straight away', async () => {
+    billPreview.mockResolvedValue(PREVIEW);
+    sendToCashier.mockResolvedValue({ saleId: 'sale_1' });
+    const onClosed = sheet({ hasUnsentDraft: false });
+
+    fireEvent.click(await screen.findByRole('button', { name: /Proceed to pay/ }));
+
+    await waitFor(() => expect(onClosed).toHaveBeenCalledTimes(1));
+    // POSITIVE CONTROL for the two tests below: the question is conditional,
+    // so their "the dialog appeared" is about the unsent draft and not about
+    // a dialog this sheet always shows.
+    expect(screen.queryByRole('heading', { name: UNSENT_QUESTION })).toBeNull();
+  });
+
+  it('asks before closing one bill, and closes when the waiter confirms', async () => {
+    billPreview.mockResolvedValue(PREVIEW);
+    sendToCashier.mockResolvedValue({ saleId: 'sale_1' });
+    const onClosed = sheet({ hasUnsentDraft: true });
+
+    fireEvent.click(await screen.findByRole('button', { name: /Proceed to pay/ }));
+
+    // Nothing has moved yet: the close waits on the answer.
+    await screen.findByRole('heading', { name: UNSENT_QUESTION });
+    expect(sendToCashier).not.toHaveBeenCalled();
+    // The consequence is still spelled out, in the words the native dialog used.
+    expect(screen.getByText(/never sent to the kitchen/)).toBeTruthy();
+
+    fireEvent.click(unsentDialog().getByRole('button', { name: 'Send bill' }));
+
+    await waitFor(() => expect(onClosed).toHaveBeenCalledTimes(1));
+    expect(onClosed).toHaveBeenCalledWith({ saleId: 'sale_1', splitCount: 0 });
+    expect(sendToCashier).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves the session OPEN when the waiter cancels', async () => {
+    billPreview.mockResolvedValue(PREVIEW);
+    sendToCashier.mockResolvedValue({ saleId: 'sale_1' });
+    const onClosed = sheet({ hasUnsentDraft: true });
+
+    fireEvent.click(await screen.findByRole('button', { name: /Proceed to pay/ }));
+
+    await screen.findByRole('heading', { name: UNSENT_QUESTION });
+    fireEvent.click(unsentDialog().getByRole('button', { name: 'Cancel' }));
+
+    // The question is gone and the bill is still on screen — cancelling is a
+    // stop, not a crash — and no Sale was raised.
+    await waitFor(() =>
+      expect(screen.queryByRole('heading', { name: UNSENT_QUESTION })).toBeNull(),
+    );
+    expect(screen.getByText(/Beef Steak/)).toBeTruthy();
+    expect(sendToCashier).not.toHaveBeenCalled();
+    expect(onClosed).not.toHaveBeenCalled();
+  });
+
+  it('guards the SPLIT close too — cancelling raises no Sale to split', async () => {
+    billPreview.mockResolvedValue(PREVIEW);
+    sendToCashier.mockResolvedValue({ saleId: 'sale_1' });
+    splitByItems.mockResolvedValue({});
+    const onClosed = sheet({ hasUnsentDraft: true });
+
+    fireEvent.click(await screen.findByRole('button', { name: /Split between guests/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /Assign rest to/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Send and split/ }));
+
+    await screen.findByRole('heading', { name: UNSENT_QUESTION });
+    fireEvent.click(unsentDialog().getByRole('button', { name: 'Cancel' }));
+
+    await waitFor(() =>
+      expect(screen.queryByRole('heading', { name: UNSENT_QUESTION })).toBeNull(),
+    );
+    expect(sendToCashier).not.toHaveBeenCalled();
+    expect(splitByItems).not.toHaveBeenCalled();
+    expect(onClosed).not.toHaveBeenCalled();
+
+    // …and confirming the same action still goes through, so the assertions
+    // above are about the answer and not about a split that never worked.
+    fireEvent.click(screen.getByRole('button', { name: /Send and split/ }));
+    await screen.findByRole('heading', { name: UNSENT_QUESTION });
+    fireEvent.click(unsentDialog().getByRole('button', { name: 'Send bill' }));
+
+    await waitFor(() => expect(onClosed).toHaveBeenCalledTimes(1));
+    expect(sendToCashier).toHaveBeenCalledTimes(1);
+    expect(splitByItems).toHaveBeenCalledTimes(1);
+    expect(onClosed).toHaveBeenCalledWith({ saleId: 'sale_1', splitCount: 1 });
+  });
+});

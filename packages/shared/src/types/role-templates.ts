@@ -1,0 +1,462 @@
+/**
+ * Role templates — the roles a tenant is created with (Phase 1.5, D36/D37).
+ *
+ * ## What a template is
+ *
+ * A name, a stable key, and a set of permissions. Cloned into each tenant at
+ * provisioning, after which the tenant owns its copy and may rename it. Nothing
+ * reads a template at authorization time: the database rows are the authority,
+ * and these are only what those rows are seeded from.
+ *
+ * ## Why the key exists separately from the name
+ *
+ * `Role` is keyed `@@unique([tenantId, name])` — on a display name an admin can
+ * change. A built-in role identified by its display name stops being findable the
+ * moment someone renames "Manager" to "Supervisor", and the code that looks it up
+ * either creates a duplicate or silently grants nothing. `key` is the identifier;
+ * `name` is presentation.
+ *
+ * ## Operational roles are data, not enum members
+ *
+ * `UserRole` stays at the six built-in platform roles (the sixth, SALESPERSON,
+ * arrived from `main` on 2026-08-31). The Waiter, the food-service Cashier and
+ * the Receptionist are *rows*, because adding them to a persisted enum would
+ * commit the whole platform to a vocabulary before the features exist, and
+ * enum values cannot be removed without a destructive migration.
+ *
+ * Being enum-backed does not make a role universal, though. Salesperson is
+ * built in — a tenant cannot delete it — yet only the HARDWARE template offers
+ * it (D108). "Built in" says who owns the definition; the per-template lists at
+ * the bottom of this file say who gets a row. (That is also why trimming the template catalogue on 2026-08-17
+ * deleted template OBJECTS below but no enum value: the enum is persisted
+ * data with production users on it; a template is only a seeding blueprint.)
+ */
+import { ALL_USER_ROLES, Permission, ROLE_PERMISSIONS, UserRole } from './authorization.js';
+
+export interface RoleTemplate {
+  /** Stable identifier. Never shown, never edited, unique per tenant. */
+  key: string;
+  /** Default display name. The tenant may change it. */
+  name: string;
+  description: string;
+  /**
+   * Built-in roles cannot be deleted by a tenant, and their `key` is referenced by
+   * the `UserRole` compatibility path during the transition.
+   */
+  isBuiltIn: boolean;
+  permissions: readonly Permission[];
+}
+
+/**
+ * Templates for the built-in platform roles that workspaces still SEED.
+ *
+ * Owner and Cashier survived the trim (PO decision, 2026-08-17): the ADMIN,
+ * MANAGER and ACCOUNTANT templates were removed outright with the rest of
+ * the unstaffed catalogue — a blueprint no template list references is not
+ * dormant, it is an invitation to reintroduce the sprawl. The `UserRole`
+ * ENUM keeps every value: it is a persisted database enum, existing users
+ * sit on those values and resolve through `ROLE_PERMISSIONS` on the legacy
+ * fallback, and existing tenants keep their already-seeded rows. Removing a
+ * template stops NEW seeding; it rewrites no one's authority.
+ *
+ * Salesperson is the third (D108, PO decision 2026-09-08): owner-equivalent,
+ * and offered by the HARDWARE template alone. It lives in this list because
+ * it is enum-backed and undeletable like the other two — NOT because every
+ * workspace seeds it. This list is the catalogue of built-ins; which of them
+ * a workspace receives is decided by the per-template lists below, which is
+ * why GENERAL selects its two explicitly rather than reading this list whole.
+ *
+ * Each template derives its permissions from `ROLE_PERMISSIONS` rather than
+ * restating them, so the two cannot disagree; the parity spec still asserts
+ * the equality.
+ */
+export const BUILT_IN_ROLE_TEMPLATES: readonly RoleTemplate[] = [
+  {
+    key: UserRole.Owner,
+    name: 'Owner',
+    description: 'Full access to every feature the tenant has enabled.',
+    isBuiltIn: true,
+    permissions: ROLE_PERMISSIONS.OWNER,
+  },
+  {
+    key: UserRole.Cashier,
+    name: 'Cashier',
+    description: 'Takes sales and payments at the till.',
+    isBuiltIn: true,
+    permissions: ROLE_PERMISSIONS.CASHIER,
+  },
+  {
+    /*
+     * D108 — the hardware shop's second owner-level post: the person on the
+     * counter who runs the shop as the owner would, with the owner's authority
+     * and the owner's screens. `ROLE_PERMISSIONS.SALESPERSON` is the OWNER set
+     * by reference (see authorization.ts), so "the same as the owner" is a
+     * structural fact here rather than a copy that could drift.
+     *
+     * Offered by `HARDWARE_ROLE_TEMPLATES` only. A restaurant, cafe, bakery,
+     * hotel or general workspace has no such post, and a template that
+     * appears in a picker is a template someone will assign.
+     */
+    key: UserRole.Salesperson,
+    name: 'Salesperson',
+    description: 'Owner-equivalent: full access to every feature the tenant has enabled.',
+    isBuiltIn: true,
+    permissions: ROLE_PERMISSIONS.SALESPERSON,
+  },
+];
+
+/**
+ * Food-service operational roles: the Waiter and the (restaurant) Cashier.
+ *
+ * The wider catalogue this section used to carry — Restaurant Manager,
+ * Kitchen Manager, Bar Staff — was removed with the other unstaffed
+ * templates (2026-08-17). Their permissions remain in the catalogue and any
+ * rows already seeded from them remain in their tenants; only the blueprints
+ * are gone. Kitchen Staff came BACK on 2026-08-20 (D68) — not as a
+ * restoration of the old catalogue, but because withdrawing kitchen printing
+ * created a job that did not exist before: somebody has to work the board.
+ */
+export const RESTAURANT_ROLE_TEMPLATES: readonly RoleTemplate[] = [
+  {
+    key: 'WAITER',
+    name: 'Waiter',
+    description: 'Opens tables, takes orders, sends them to the kitchen.',
+    isBuiltIn: false,
+    permissions: [
+      // Navigation is derived from the tenant's enabled modules, so a role that
+      // cannot read the platform profile renders an EMPTY rail — not a reduced
+      // one. Every other floor-facing template already carries this.
+      Permission.PLATFORM_PROFILE_READ,
+      // The POS and Tables rail entries are gated on SALE_CREATE, and closing a
+      // table is what creates the Sale — a waiter holding TABLE_CLOSE without
+      // it could reach neither screen they spend the shift on. Harmless
+      // otherwise: the retail POS route is behind the RETAIL_POS module, which
+      // a food-service tenant does not have.
+      Permission.SALE_CREATE,
+      Permission.PRODUCT_READ,
+      Permission.CUSTOMER_READ,
+      /*
+       * D146 — the waiter takes takeaway orders (D87), and a takeaway order
+       * asks who it is for. Without this the counter popup offered the name
+       * and phone field, posted it, and came back "You don't have permission
+       * to create a customer" — the order could only go through as a walk-in,
+       * so the one person holding the phone could not record whose food it was.
+       *
+       * `CUSTOMER_MANAGE` is wider than "create": it is the ONLY customer-write
+       * key (there is no CUSTOMER_CREATE) and the permissions guard is all-of,
+       * so it also carries editing an existing customer and the bulk importer.
+       * Granted knowingly rather than splitting the key: the restaurant cashier
+       * standing at the same counter already holds exactly this, so it adds no
+       * authority to the workspace that the floor did not already have. A
+       * narrower CUSTOMER_CREATE would need the route to accept either key,
+       * which the all-of guard cannot express today.
+       */
+      Permission.CUSTOMER_MANAGE,
+      Permission.TABLE_VIEW,
+      Permission.TABLE_OPEN,
+      Permission.TABLE_CLOSE,
+      Permission.ORDER_CREATE,
+      Permission.ORDER_EDIT_DRAFT,
+      Permission.ORDER_SEND_TO_KITCHEN,
+      /*
+       * D87 — a seated guest asking for something to take home is still the
+       * waiter's order to take. Server-enforced: `takeaway.create` requires
+       * TAKEAWAY_CREATE, so without this the option would be visible and
+       * refused.
+       */
+      Permission.TAKEAWAY_VIEW,
+      Permission.TAKEAWAY_CREATE,
+      Permission.BILL_VIEW,
+      /*
+       * D71 — the waiter splits the bill, because the waiter is the one the
+       * guests are talking to when they say "we're paying separately". Doing
+       * it at the till means the cashier reconstructing who ate what from a
+       * conversation they were not part of.
+       *
+       * BILL_SPLIT allocates shares; it does not take money. PAYMENT_COLLECT
+       * stays absent, so the waiter can divide a bill four ways and still
+       * cannot settle any of the four.
+       */
+      Permission.BILL_SPLIT,
+      // D47: waiters take and manage bookings at the host stand.
+      Permission.RESERVATION_VIEW,
+      Permission.RESERVATION_CREATE,
+      Permission.RESERVATION_MANAGE,
+      // D49: joining tables is a shift decision.
+      Permission.OPEN_TABLE_MANAGE,
+      /*
+       * D101 — the kitchen tells the floor "no more kottu", and the person
+       * hearing it must be able to pull the item off the menu before the
+       * next order rings it. PRODUCT_MANAGE stays absent: 86 is a switch on
+       * one fact, not catalogue authorship.
+       */
+      Permission.PRODUCT_AVAILABILITY_SET,
+      /*
+       * D156 — the waiter CAN see the floor, and opens on their own tables.
+       *
+       * This supersedes D70's withholding of the key. D70's objection was the
+       * MIXING ("a floor list that mixes them is how a table gets served twice
+       * or not at all"), and the answer to mixing is a default, not blindness:
+       * every surface opens on My tables and says whose a table is, with All
+       * one tap away. Withholding the read made the routine case of table
+       * service impossible — covering a colleague on a break, a shift change
+       * mid-service, a guest flagging down whoever walks past — because the
+       * other party's order could not even be READ to answer a question about
+       * it.
+       *
+       * It grants no new WRITE: sending a round has never checked ownership
+       * (only ORDER_SEND_TO_KITCHEN), so the floor could always serve a table
+       * it could reach; this lets the waiter reach it honestly instead of
+       * walking to a supervisor's screen.
+       */
+      Permission.TABLE_SESSION_VIEW_ALL,
+      // Deliberately absent: ORDER_VOID_SENT and TABLE_TRANSFER/MERGE. Voiding an
+      // order the kitchen has already started, and moving a table's bill, are the
+      // two places where a waiter's mistake becomes someone else's loss — they
+      // belong to whoever is accountable for the shift.
+      //
+      // Also deliberately absent: KOT_VIEW. It is the permission the Kitchen
+      // rail entry is gated on, and a waiter has no business on the kitchen
+      // display — they send orders to it, they do not work it. Sending is
+      // ORDER_SEND_TO_KITCHEN, which they do hold. Likewise SALE_READ and
+      // REPORT_READ are absent, so Sales and Reports never appear for them,
+      // and PRODUCT_MANAGE / CATEGORY_MANAGE are absent so the catalogue and
+      // promotions are read-only.
+    ],
+  },
+  {
+    /*
+     * D68 — the kitchen board's own user. Kitchen tickets stopped printing:
+     * the board IS the delivery, so somebody has to be looking at it and
+     * saying when food is done. That job had no role — Phase 6 gave
+     * KOT_VIEW to nobody a workspace actually seeds, which is why the board
+     * only ever opened for an owner.
+     */
+    key: 'KITCHEN_STAFF',
+    name: 'Kitchen staff',
+    description: 'Works the kitchen board: sees incoming tickets and marks them done.',
+    isBuiltIn: false,
+    permissions: [
+      // Without this the navigation rail renders EMPTY rather than reduced —
+      // same reasoning as the waiter template.
+      Permission.PLATFORM_PROFILE_READ,
+      // The two that ARE the job.
+      Permission.KOT_VIEW,
+      Permission.KITCHEN_STATUS_UPDATE,
+      // Deliberately absent: everything on the floor and everything with
+      // money in it. No TABLE_*, no ORDER_*, no BILL_*, no SALE_*,
+      // no PAYMENT_COLLECT, no reporting, no configuration. Kitchen staff
+      // read what was ordered and report what is cooked; they neither take
+      // an order nor settle one, and a role that could do both would put
+      // the pass in a position to write off a table's bill.
+    ],
+  },
+  {
+    key: 'RESTAURANT_CASHIER',
+    // Displayed as plain "Cashier": inside a food-service workspace the
+    // qualifier is noise (PO request, 2026-08-17). The KEY keeps its
+    // qualified form — it is the stable identifier, and the built-in retail
+    // CASHIER key must stay distinct from it. No name collision is possible:
+    // the food-service template list no longer includes the built-in Cashier.
+    name: 'Cashier',
+    description: 'Settles bills and collects payment.',
+    isBuiltIn: false,
+    permissions: [
+      /*
+       * D88 — every role inside a food-service workspace needs to READ the
+       * profile, because the profile is how the client learns it is a
+       * restaurant at all. Without it the navigation renders "Navigation
+       * unavailable" and /pos falls back to the retail checkout (D31).
+       *
+       * This was missing and nobody noticed: the session store used to
+       * re-derive permissions from the enum role on every page load, and the
+       * retail CASHIER enum carries PLATFORM_PROFILE_READ, so the till was
+       * borrowing it from a bug. Fixing the store exposed the gap.
+       */
+      Permission.PLATFORM_PROFILE_READ,
+      /*
+       * D94 (PO, 2026-08-25) — the till watches the board too.
+       *
+       * KOT_VIEW and nothing more: the board's Complete control is gated on
+       * KITCHEN_STATUS_UPDATE, which the till does NOT hold, so this is a
+       * read-only view of what the kitchen is doing — which is what a cashier
+       * fielding "is table six's food ready?" needs. Marking a ticket done
+       * stays with the people who cooked it (D68).
+       */
+      Permission.KOT_VIEW,
+      Permission.SALE_READ,
+      Permission.PRODUCT_READ,
+      Permission.CUSTOMER_READ,
+      Permission.CUSTOMER_MANAGE,
+      Permission.TABLE_VIEW,
+      Permission.TAKEAWAY_VIEW,
+      // D87 — the counter is where a takeaway order is taken; the till could
+      // see the queue but not add to it.
+      Permission.TAKEAWAY_CREATE,
+      Permission.BILL_VIEW,
+      Permission.BILL_SPLIT,
+      Permission.PAYMENT_COLLECT,
+      // D70 — the till settles whichever table asks for the bill, so the
+      // cashier sees every open session. The waiter deliberately does not.
+      Permission.TABLE_SESSION_VIEW_ALL,
+      // D47: the cashier often doubles as the host answering the phone.
+      Permission.RESERVATION_VIEW,
+      Permission.RESERVATION_CREATE,
+      Permission.RESERVATION_MANAGE,
+      // D49: joining tables is a shift decision.
+      Permission.OPEN_TABLE_MANAGE,
+      // D101 — the till is where "that's finished" lands first; same
+      // reasoning as the waiter grant, PRODUCT_MANAGE equally absent.
+      Permission.PRODUCT_AVAILABILITY_SET,
+    ],
+  },
+];
+
+/**
+ * Hotel operational roles.
+ *
+ * A hotel workspace is food service under another name today (Q7), so the
+ * receptionist is the front desk of THAT product: the person who takes
+ * bookings, seats guests, looks after guest records and settles bills at the
+ * desk. Room-night permissions arrive with the STAY fulfilment provider and
+ * will be added to this template, not to a new one.
+ */
+export const HOTEL_ROLE_TEMPLATES: readonly RoleTemplate[] = [
+  {
+    key: 'RECEPTIONIST',
+    name: 'Receptionist',
+    description: 'Front desk: bookings, guest records, check-in and bills.',
+    isBuiltIn: false,
+    permissions: [
+      // Navigation derives from the platform profile — without this the rail
+      // renders empty, same reasoning as the waiter template.
+      Permission.PLATFORM_PROFILE_READ,
+      Permission.PRODUCT_READ,
+      Permission.SALE_READ,
+      // Guest records are the front desk's data.
+      Permission.CUSTOMER_READ,
+      Permission.CUSTOMER_MANAGE,
+      // Check-in, today, is seating a session on the floor plan.
+      Permission.TABLE_VIEW,
+      Permission.TABLE_OPEN,
+      // The booking diary is the core of the job.
+      Permission.RESERVATION_VIEW,
+      Permission.RESERVATION_CREATE,
+      Permission.RESERVATION_MANAGE,
+      // Bills settle at the desk on the way out.
+      Permission.BILL_VIEW,
+      Permission.PAYMENT_COLLECT,
+      // D70 — the desk is the whole floor's view by definition.
+      Permission.TABLE_SESSION_VIEW_ALL,
+      // Deliberately absent: everything kitchen-facing (KOT_VIEW), order
+      // authoring, voids, transfers, reports and configuration — the desk
+      // neither works the floor nor runs the shift.
+    ],
+  },
+];
+
+/** Every template, for iteration in seeds and tests. */
+export const ALL_ROLE_TEMPLATES: readonly RoleTemplate[] = [
+  ...BUILT_IN_ROLE_TEMPLATES,
+  ...RESTAURANT_ROLE_TEMPLATES,
+  ...HOTEL_ROLE_TEMPLATES,
+];
+
+/** Lookup helpers for composing the per-template lists below. Throw rather
+ *  than return undefined: a misspelled key must fail the build's tests, not
+ *  seed a tenant with a missing role. */
+function template(key: string): RoleTemplate {
+  const found = ALL_ROLE_TEMPLATES.find((t) => t.key === key);
+  if (!found) throw new Error(`No role template with key "${key}"`);
+  return found;
+}
+
+/*
+ * Which roles each workspace template offers (PO decision, 2026-08-17):
+ * fewer, job-shaped options instead of the whole catalogue. The trimmed
+ * templates still EXIST above — an existing tenant's rows are untouched, and
+ * `seedTenantRoles` never deletes a role — but a NEW workspace is seeded with
+ * only the roles its business actually staffs, and the console's role picker
+ * (which reads the workspace's own rows, D55.1) shrinks to match. The Owner
+ * is every list's first entry because a workspace is created around one.
+ */
+
+/**
+ * Hardware / retail: Owner, Salesperson, Cashier.
+ *
+ * D108 (PO decision, 2026-09-08): the Salesperson is a hardware-shop job and
+ * is offered NOWHERE else — see the template's own comment above. Listed
+ * between the owner it is equivalent to and the till it is not.
+ */
+export const HARDWARE_ROLE_TEMPLATES: readonly RoleTemplate[] = [
+  template(UserRole.Owner),
+  template(UserRole.Salesperson),
+  template(UserRole.Cashier),
+];
+
+/**
+ * General: Owner and Cashier — the two roles every workspace has.
+ *
+ * This used to be `BUILT_IN_ROLE_TEMPLATES` itself, which stopped meaning the
+ * same thing when Salesperson joined the built-ins for the hardware template
+ * only (D108). Selecting by key keeps GENERAL's staffing a decision written
+ * here, not a side effect of what the catalogue happens to contain.
+ */
+export const GENERAL_ROLE_TEMPLATES: readonly RoleTemplate[] = [
+  template(UserRole.Owner),
+  template(UserRole.Cashier),
+];
+
+/**
+ * Food service (restaurant / cafe / bakery): Owner, Waiter, Cashier, Kitchen
+ * staff. The fourth is D68: the kitchen board replaced the kitchen printer,
+ * and a board needs somebody rostered to it.
+ */
+export const FOOD_SERVICE_ROLE_TEMPLATES: readonly RoleTemplate[] = [
+  template(UserRole.Owner),
+  template('WAITER'),
+  template('RESTAURANT_CASHIER'),
+  template('KITCHEN_STAFF'),
+];
+
+/** Hotel: Owner, Waiter, Receptionist. */
+export const HOTEL_WORKSPACE_ROLE_TEMPLATES: readonly RoleTemplate[] = [
+  template(UserRole.Owner),
+  template('WAITER'),
+  template('RECEPTIONIST'),
+];
+
+// D56: `roleTemplatesForBusinessType` moved to `domains/registry.ts`. The
+// business-type → roles question is answered by the domain descriptor now,
+// not by an if-chain here that each new vertical had to remember to extend
+// (this one silently handed an unknown type the built-in roles only).
+// Consumers importing it from the package root are unaffected.
+
+/**
+ * D55.1 — the enum value that sits underneath a workspace role row.
+ *
+ * `User.role` is a persisted enum of six platform roles; the operational roles
+ * (Waiter, Kitchen staff, Receptionist, …) are rows. A user assigned one of
+ * those rows still has to store something in the enum column, and although
+ * `PermissionResolver` ignores it whenever `roleId` resolves, a handful of
+ * checks still read the enum directly — the owner-level cross-branch rules
+ * (`isAdminLevelRole`) and the QuickBooks role gates. So the value chosen here
+ * is a privilege decision, not bookkeeping.
+ *
+ * A built-in key is its own enum value; anything else — a custom role, a row
+ * with no key — is CASHIER, the least-privileged built-in, so that a custom
+ * role's enum fails CLOSED: a waiter must not gain cross-branch reach because
+ * the column had to hold something, and must not inherit manager permissions
+ * if their row is later deleted (the `LEGACY_FALLBACK` state).
+ *
+ * D108 moved this here from the API's platform-admin module because three
+ * callers now derive the column — the console, the tenant-facing role
+ * assignment and `provision-tenant.ts` — and a second copy of the mapping
+ * that decides whether a SALESPERSON row yields an owner-level enum would
+ * drift silently.
+ */
+export function baseUserRoleFor(roleKey: string | null): UserRole {
+  return roleKey !== null && (ALL_USER_ROLES as readonly string[]).includes(roleKey)
+    ? (roleKey as UserRole)
+    : UserRole.Cashier;
+}

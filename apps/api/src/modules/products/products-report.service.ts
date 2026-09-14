@@ -6,6 +6,9 @@ import {
   dayInTimeZone,
   formatDateTimeInTimeZone,
   safeTimeZone,
+  pricedByVariants,
+  variantPriceLabel,
+  variantSkuLabel,
 } from '@hardware-pos/shared';
 import { Product } from '@hardware-pos/database';
 import * as ExcelJS from 'exceljs';
@@ -30,7 +33,21 @@ interface ReportRow {
   type: string;
   sku: string | null;
   category: string;
+  /**
+   * The parent price. Meaningless for a variant product (D44 says it is not
+   * read), which is why `priceCell` exists beside it — this stays for the
+   * summary arithmetic and for legacy rows, where it is authoritative.
+   */
   unitPrice: number;
+  /**
+   * What the Price column actually shows.
+   *
+   * A NUMBER for a legacy product, so the spreadsheet keeps a numeric column
+   * that can be summed and sorted — every existing export is unchanged. A
+   * STRING for a variant product, because "1,200.00 - 4,300.00" is the honest
+   * answer and no single number is. Exporting the parent 0.00 was the defect.
+   */
+  priceCell: number | string;
   costPrice: number | null;
   quantityOnHand: number;
   reorderLevel: number | null;
@@ -125,7 +142,16 @@ export class ProductsReportService {
     });
     const categoryName = new Map(categories.map((c) => [c.id, c.name]));
 
-    const rows = products.map((p): ReportRow => this.toRow(p, categoryName));
+    /*
+     * D44 — the same variant aggregate the products list uses, so the export and
+     * the screen cannot disagree. One extra groupBy for the whole report.
+     */
+    const variantSummary = await this.productsRepository.variantPriceSummary(
+      tenantId,
+      products.filter((p) => p.hasVariants).map((p) => p.id),
+    );
+
+    const rows = products.map((p): ReportRow => this.toRow(p, categoryName, variantSummary));
 
     const summary = rows.reduce<ReportSummary>(
       (acc, r) => {
@@ -173,15 +199,39 @@ export class ProductsReportService {
     };
   }
 
-  private toRow(p: Product, categoryName: Map<string, string>): ReportRow {
+  private toRow(
+    p: Product,
+    categoryName: Map<string, string>,
+    variantSummary: Map<string, { count: number; min: number | null; max: number | null }>,
+  ): ReportRow {
     const qty = Number(p.quantityOnHand);
     const cost = p.costPrice != null ? Number(p.costPrice) : null;
+
+    /*
+     * D44 (PO decision, 2026-09-04) — the export uses the SAME rule as the admin
+     * screens, not a copy of it: `variantPriceLabel` and `variantSkuLabel` live
+     * in `@hardware-pos/shared` precisely so this file cannot drift from the
+     * products list. Before this, every variant product exported as `0.00` with
+     * a blank SKU while the screen beside it showed the real range.
+     */
+    const shape = {
+      hasVariants: p.hasVariants,
+      unitPrice: Number(p.unitPrice),
+      sku: p.sku,
+      variantCount: variantSummary.get(p.id)?.count ?? 0,
+      variantPriceMin: variantSummary.get(p.id)?.min ?? null,
+      variantPriceMax: variantSummary.get(p.id)?.max ?? null,
+    };
+
     return {
       name: p.name,
       type: p.type,
-      sku: p.sku,
+      sku: variantSkuLabel(shape),
       category: (p.categoryId && categoryName.get(p.categoryId)) || 'Uncategorized',
       unitPrice: Number(p.unitPrice),
+      priceCell: pricedByVariants(shape)
+        ? variantPriceLabel(shape, fmtMoney)
+        : Number(p.unitPrice),
       costPrice: cost,
       quantityOnHand: qty,
       reorderLevel: p.reorderLevel != null ? Number(p.reorderLevel) : null,
@@ -234,7 +284,7 @@ export class ProductsReportService {
         TYPE_LABEL[r.type] ?? r.type,
         r.sku ?? '',
         r.category,
-        r.unitPrice,
+        r.priceCell,
         r.costPrice ?? '',
         r.type === 'Inventory' ? r.quantityOnHand : '',
         r.reorderLevel ?? '',
@@ -275,16 +325,31 @@ export class ProductsReportService {
       doc.on('end', () => resolve(Buffer.concat(chunks)));
       doc.on('error', reject);
 
+      /*
+       * Widths are POINTS, and they are measured, not guessed. A4 landscape less
+       * 36pt margins leaves 770; these total 738.
+       *
+       * **Price carries a RANGE**, not one number: a variant product prints
+       * `900.00 – 4,000.00` (`variantPriceLabel`). At Helvetica 8pt that is
+       * 64.5pt against the 64pt the old 70pt column left after padding — over by
+       * half a point, so it wrapped onto a second line and, with the row height
+       * fixed at 14, bled into the row beneath. Only the rows with ranges broke,
+       * which is why it read as a rendering glitch rather than a width problem.
+       *
+       * 110 holds `12,000.00 – 145,000.00` (84.5pt) with room to spare. The
+       * points come from the numeric columns, every one of which was far wider
+       * than its content: Cost needs 40, On hand 20, Reorder 18, Stock value 47.
+       */
       const cols: { label: string; width: number; align?: 'right' }[] = [
-        { label: 'Product', width: 190 },
-        { label: 'Type', width: 70 },
+        { label: 'Product', width: 180 },
+        { label: 'Type', width: 55 },
         { label: 'SKU', width: 70 },
         { label: 'Category', width: 95 },
-        { label: 'Price', width: 70, align: 'right' },
-        { label: 'Cost', width: 70, align: 'right' },
-        { label: 'On hand', width: 55, align: 'right' },
-        { label: 'Reorder', width: 50, align: 'right' },
-        { label: 'Stock value', width: 80, align: 'right' },
+        { label: 'Price', width: 110, align: 'right' },
+        { label: 'Cost', width: 60, align: 'right' },
+        { label: 'On hand', width: 48, align: 'right' },
+        { label: 'Reorder', width: 45, align: 'right' },
+        { label: 'Stock value', width: 75, align: 'right' },
       ];
       const startX = doc.page.margins.left;
       const bottomY = doc.page.height - doc.page.margins.bottom;
@@ -331,6 +396,30 @@ export class ProductsReportService {
 
       drawHeaderRow();
 
+      /**
+       * Truncate to what the column can actually draw, measured.
+       *
+       * `lineBreak: false` and `ellipsis: true` are both passed below and were
+       * evidently not enough on pdfkit 0.17.2 — an over-wide Price cell wrapped
+       * anyway. Since every row is drawn at a pinned `y` with a fixed 14pt
+       * height, one wrapped cell overlaps the row beneath and the table stops
+       * lining up.
+       *
+       * So the string is cut to fit BEFORE pdfkit sees it, which does not depend
+       * on how an option is interpreted. With the widths above nothing should
+       * reach this — it is the guard that keeps a freak value (a price range in
+       * the millions, a very long product name) from breaking the whole table
+       * instead of just its own cell.
+       */
+      const fit = (text: string, width: number): string => {
+        if (doc.widthOfString(text) <= width) return text;
+        let cut = text;
+        while (cut.length > 1 && doc.widthOfString(`${cut}\u2026`) > width) {
+          cut = cut.slice(0, -1);
+        }
+        return `${cut}\u2026`;
+      };
+
       const rowHeight = 14;
       for (const r of data.rows) {
         if (doc.y + rowHeight > bottomY) {
@@ -344,7 +433,7 @@ export class ProductsReportService {
           TYPE_LABEL[r.type] ?? r.type,
           r.sku ?? '—',
           r.category,
-          fmtMoney(r.unitPrice),
+          typeof r.priceCell === 'number' ? fmtMoney(r.priceCell) : r.priceCell,
           r.costPrice != null ? fmtMoney(r.costPrice) : '—',
           inventory ? String(r.quantityOnHand) : '—',
           r.reorderLevel != null ? String(r.reorderLevel) : '—',
@@ -352,7 +441,7 @@ export class ProductsReportService {
         ];
         let x = startX;
         cells.forEach((text, i) => {
-          doc.text(text, x, y, {
+          doc.text(fit(text, cols[i].width - 6), x, y, {
             width: cols[i].width - 6,
             align: cols[i].align ?? 'left',
             lineBreak: false,

@@ -1,0 +1,213 @@
+'use client';
+
+import { AlertTriangle, Package, Search, X } from 'lucide-react';
+import * as React from 'react';
+
+import { Button } from '@/components/ui/button';
+import { Dialog } from '@/components/ui/dialog';
+import { Input } from '@/components/ui/input';
+import { type Session } from '@/lib/auth';
+import {
+  pricedByVariants,
+  variantPriceLabel,
+  variantSkuLabel,
+} from '@hardware-pos/shared';
+import { fetchProducts, type ManagedProduct } from '@/lib/products-api';
+import { formatMoney } from '@/lib/restaurant/labels';
+import { normalizeSearchTerm } from '@/lib/search-term';
+
+interface Props {
+  session: Session;
+  onSelect: (product: ManagedProduct) => void;
+  onBack: () => void;
+  /**
+   * Dialog copy. Defaults to the menu-admin wording this component shipped
+   * with, so `step-restaurant-additions.tsx` renders exactly as before; the
+   * promotion editor passes its own, because "surface on this menu ... menu
+   * name and menu price are set on the next step" is nonsense on a retail
+   * promotion screen, where nothing is a menu and no next step sets a price.
+   */
+  title?: string;
+  description?: string;
+}
+
+/**
+ * Search + pick an existing inventory Product.
+ *
+ * Moved out of the menu admin tree when D66 deleted it — the picker is a
+ * generic product search used by the promotion editor and the wizard's
+ * recipe card, not a menu concept.
+ *
+ * Uses the existing tenant-scoped `GET /products?search=…` (Paginated<Product>)
+ * so tenant isolation is enforced by the server — nothing about this dialog
+ * can leak another tenant's SKUs.
+ *
+ * Debounce: 250 ms. Empty query hydrates the top 20 active items so an
+ * operator can browse without typing. Results show the fields an operator
+ * needs to identify a bottle at a glance: name, SKU, stock, base price.
+ *
+ * Failure modes surface near the input: a network error shows a red banner
+ * that does not clear the last result set — the operator can retry without
+ * losing context.
+ */
+export function ProductSelectorDialog({
+  session,
+  onSelect,
+  onBack,
+  title = 'Link an existing product',
+  description = 'Pick an inventory product to surface on this menu. The product stays the inventory authority — menu name and menu price are set on the next step.',
+}: Props) {
+  const [q, setQ] = React.useState('');
+  /*
+   * What is actually SENT. `q.trim()` left internal runs intact, and every
+   * search here is matched with a literal `contains` on the server — so
+   * "Fried   Rice" off a tablet keyboard found nothing for an item that
+   * plainly exists. The shared normaliser is what the products screen and the
+   * POS menu browser already send; the input keeps showing what was typed.
+   *
+   * It is also the effect key, so re-spacing a term issues no second request.
+   */
+  const term = normalizeSearchTerm(q);
+  const [rows, setRows] = React.useState<ManagedProduct[]>([]);
+  const [loading, setLoading] = React.useState(true);
+  const [error, setError] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    const t = setTimeout(async () => {
+      try {
+        const page = await fetchProducts(session, {
+          search: term || undefined,
+          isActive: 'true',
+          pageSize: 20,
+          page: 1,
+        });
+        if (!cancelled) {
+          setRows(page.items);
+          setLoading(false);
+        }
+      } catch (err) {
+        if (cancelled) return;
+        setError(err instanceof Error ? err.message : 'Product search failed');
+        setLoading(false);
+      }
+    }, 250);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+  }, [term, session]);
+
+  /*
+   * The search bar is the dialog's TOOLBAR, not a sticky child of its body.
+   *
+   * Sticky was the first attempt and it kept leaking: a sticky element only
+   * hides what passes behind its own painted box, so the body's padding and
+   * the gap to the first row each became a strip where rows were seen sliding
+   * through, and closing them one at a time was whack-a-mole. As a `shrink-0`
+   * sibling of the scroller the problem cannot occur — the list clips at the
+   * body's own edge and there is nothing above it to see through.
+   */
+  const searchBar = (
+    <div className="relative">
+      <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+      <Input
+        value={q}
+        onChange={(e) => setQ(e.target.value)}
+        placeholder="Search by product name or SKU…"
+        // The placeholder is not an accessible name — it disappears the moment
+        // anyone types, leaving the field unlabelled.
+        aria-label="Search products"
+        autoFocus
+        className={q === '' ? 'pl-9 pr-24' : 'pl-9 pr-28'}
+      />
+      {/* One right-hand cluster, so the busy note and the clear control cannot
+          land on top of each other at any width. */}
+      <div className="absolute right-1.5 top-1/2 flex -translate-y-1/2 items-center gap-1">
+        {loading ? <span className="text-xs text-muted-foreground">Searching…</span> : null}
+        {q !== '' ? (
+          // Same affordance the products screen and the POS menu browser give:
+          // selecting the text and deleting it is awkward on a tablet, and
+          // clearing is how you get back to the full list.
+          <button
+            type="button"
+            onClick={() => setQ('')}
+            aria-label="Clear search"
+            className="flex h-9 w-9 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <X className="h-4 w-4" aria-hidden="true" />
+          </button>
+        ) : null}
+      </div>
+    </div>
+  );
+
+  return (
+    <Dialog
+      open
+      onClose={onBack}
+      title={title}
+      description={description}
+      toolbar={searchBar}
+      footer={
+        <Button variant="ghost" onClick={onBack}>
+          Back
+        </Button>
+      }
+      className="max-w-2xl"
+    >
+      <div className="space-y-3">
+        {error ? (
+          <p className="flex items-center gap-2 rounded-md border border-danger/40 bg-danger-soft p-2 text-sm text-danger">
+            <AlertTriangle className="h-4 w-4" />
+            {error}
+          </p>
+        ) : null}
+
+        <ul className="space-y-2" role="listbox" aria-label="Product search results">
+          {!loading && rows.length === 0 ? (
+            <li className="rounded-md border border-dashed border-border p-6 text-center text-sm text-muted-foreground">
+              {q
+                ? `No products match "${q}". Try a different name or SKU.`
+                : 'No active products yet — create one under Inventory first.'}
+            </li>
+          ) : (
+            rows.map((p) => (
+              <li key={p.id} role="option" aria-selected={false}>
+                <button
+                  type="button"
+                  onClick={() => onSelect(p)}
+                  className="flex w-full items-center gap-3 rounded-lg border border-border bg-card p-3 text-left transition-colors hover:border-primary hover:bg-brand-100 focus-visible:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring active:scale-[0.99] motion-reduce:transition-none motion-reduce:active:scale-100"
+                >
+                  <div className="rounded-md bg-primary/12 p-2 text-primary">
+                    <Package className="h-5 w-5" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm font-semibold">{p.name}</p>
+                    <p className="mt-0.5 text-xs text-muted-foreground">
+                      SKU {variantSkuLabel(p)}
+                      {p.type === 'Inventory'
+                        ? ` · Stock ${p.quantityOnHand}`
+                        : ` · ${p.type}`}
+                    </p>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-sm font-semibold text-primary">
+                      {variantPriceLabel(p, formatMoney)}
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      {/* "Base price" is a single figure; a span is not one. */}
+                      {pricedByVariants(p) ? 'Variant prices' : 'Base price'}
+                    </p>
+                  </div>
+                </button>
+              </li>
+            ))
+          )}
+        </ul>
+      </div>
+    </Dialog>
+  );
+}

@@ -1,3 +1,5 @@
+import type { AttributeField } from '@hardware-pos/shared';
+
 /** POS-level settings surfaced to the front-end. */
 export interface AppSettings {
   currency: string;
@@ -23,9 +25,83 @@ export interface AppSettings {
   documents: DocumentSettings;
   /** Email / WhatsApp share configuration. */
   sharing: SharingSettings;
+
+  /**
+   * D125 Part 3 (`5.4`) and Phase 5 step `5.8` — barcode prefixes and label
+   * geometry. Both live in the settings blob rather than columns, so neither
+   * needs a migration and the shape can evolve per format pack.
+   */
+  catalogue: CatalogueSettings;
 }
 
 /** Quotation defaults. Owner/Admin tune these; the quotation service reads them. */
+/**
+ * D125 Part 3 — the barcode prefix map, and Phase 5 `5.8` — label geometry.
+ *
+ * ## The sequencing constraint, which is binding
+ *
+ * The prefix must be configured BEFORE any barcode is allocated, or the tenant
+ * reprints every label it has produced. `barcodePrefix` is therefore `null` by
+ * default and allocation REFUSES while it is null — an unconfigured tenant gets
+ * a refusal that says what to configure, not a default that quietly commits it
+ * to a prefix nobody chose.
+ */
+export interface CatalogueSettings {
+  /**
+   * The tenant's in-store EAN-13 prefix — 2 to 6 digits, starting `02` or
+   * `20`-`29` (the GS1 range reserved for a shop's own codes). `null` until
+   * configured, which is a refusal, not a default.
+   */
+  barcodePrefix: string | null;
+  /**
+   * Per-category overrides, keyed by `ProductCategory.id`. Optional and
+   * usually empty: a shop needs one prefix. It exists because a shop that
+   * franchises or splits its ranges has no other place to say so.
+   */
+  barcodePrefixByCategoryId: Record<string, string>;
+  /** `5.8` — label geometry, per tenant and (via the settings row) per branch. */
+  label: LabelSettings;
+  /**
+   * D161 — the tenant's own **business details**: the extra per-product
+   * fields the wizard collects into `Product.attributes`.
+   *
+   * `undefined` means “this tenant has not defined any”, and the domain's
+   * declared `catalogue.attributeSchema` answers instead — which is what every
+   * tenant does today and why nothing changes until somebody opens the tab.
+   * An EMPTY ARRAY is a different answer: “we track none”, which hides the
+   * wizard step. The two must not be collapsed.
+   *
+   * Stored here rather than in tables because `AttributeField` is already the
+   * shape, `key` is already the identity, and D64's whole point is that a
+   * vertical's catalogue fields need no migration. `5.8` set the precedent
+   * with label geometry.
+   */
+  businessDetails?: AttributeField[];
+}
+
+/**
+ * Physical label geometry. Millimetres throughout — a label is a physical
+ * object and every sheet a shop buys is specified in mm.
+ */
+export interface LabelSettings {
+  widthMm: number;
+  heightMm: number;
+  /** Labels across one sheet; 1 for a roll printer. */
+  columns: number;
+  rows: number;
+  marginTopMm: number;
+  marginLeftMm: number;
+  gapXMm: number;
+  gapYMm: number;
+  /** What the label carries besides the symbol. */
+  showProductName: boolean;
+  showVariantOptions: boolean;
+  showPrice: boolean;
+  showSku: boolean;
+  /** The symbology to render. */
+  symbology: 'EAN13' | 'CODE128';
+}
+
 export interface QuotationSettings {
   /** Days a new quotation stays valid by default. */
   defaultValidityDays: number;
@@ -96,6 +172,34 @@ export interface DocumentSettings {
   defaultBillFormat: 'A4' | 'THERMAL' | 'BOTH';
   /** Render authorized/customer signature areas in the footer. */
   signatureFields: boolean;
+
+  /*
+   * D99 — the thermal bill's paper geometry, which is the PRINTER's to state
+   * and not this codebase's to guess. D73–D80 guessed it seven times against
+   * one driver and one browser; these four numbers are where an operator puts
+   * the answer instead, read off the test strip on Settings → Documents →
+   * Preview.
+   */
+
+  /** The driver's stock width, and therefore the printed page width, in mm. */
+  billPaperWidthMm: number;
+  /**
+   * How far the text is held off the LEFT edge, in mm.
+   *
+   * Non-zero, and that is the whole of D99: at 0 the layout bets on the
+   * browser landing the page box exactly on the paper's printable origin.
+   * Chrome did; Edge refits the page against the driver's stock and splits the
+   * overflow across both sides, so the left edge lost its ink.
+   */
+  billLeftInsetMm: number;
+  /** How far the text is held off the RIGHT edge, where the head stops, in mm. */
+  billRightInsetMm: number;
+  /**
+   * One page, sized to the content (D77). Only true for a driver configured
+   * with a continuous roll: on a fixed page length the request is refused and
+   * the receipt is scaled down instead, which is why it is switchable.
+   */
+  billFitToContent: boolean;
 }
 
 /**

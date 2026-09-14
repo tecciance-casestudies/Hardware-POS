@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import * as React from 'react';
-import { Printer, ReceiptText, RefreshCw, Search } from 'lucide-react';
+import { Printer, ReceiptText, RefreshCw, Search, X } from 'lucide-react';
 
 import { PageHeader } from '@/components/page-header';
 import { SyncBadge } from '@/components/quickbooks/sync-badge';
@@ -124,9 +124,11 @@ export default function SalesPage() {
   const [reloadKey, setReloadKey] = React.useState(0);
   const [exporting, setExporting] = React.useState<ReportFormat | null>(null);
 
-  // Debounce the search box so we don't refetch on every keystroke.
+  // Debounce the search box so we don't refetch on every keystroke. Collapse
+  // internal whitespace runs too: the API matches with a literal `contains`,
+  // so "x  x" would otherwise miss "x x".
   React.useEffect(() => {
-    const t = window.setTimeout(() => setDebouncedSearch(search.trim()), 300);
+    const t = window.setTimeout(() => setDebouncedSearch(search.replace(/\s+/g, ' ').trim()), 300);
     return () => window.clearTimeout(t);
   }, [search]);
 
@@ -259,8 +261,18 @@ export default function SalesPage() {
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Search sale number or customer…"
-            className="pl-10"
+            className="pl-10 pr-9"
           />
+          {search ? (
+            <button
+              type="button"
+              aria-label="Clear search"
+              onClick={() => setSearch('')}
+              className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-muted-foreground hover:text-foreground"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          ) : null}
         </div>
         <DateRangeFilter value={dateRange} onChange={setDateRange} />
         <Select
@@ -401,19 +413,26 @@ export default function SalesPage() {
                     </td>
                     <td className="px-4 py-3">
                       <div className="flex items-center justify-end gap-1">
-                        <Tooltip label="Reprint receipt">
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-8 w-8"
-                            aria-label="Reprint receipt"
-                            disabled={busyId === s.id}
-                            onClick={() => handleReprint(s.id)}
-                          >
-                            <Printer className="h-4 w-4" />
-                          </Button>
-                        </Tooltip>
-                        {s.syncStatus === 'FAILED' || s.syncStatus === 'PENDING' ? (
+                        {/* A held basket has taken no money, so there is no
+                            receipt to reprint; the server refuses it and this
+                            handler swallows the refusal — gated the way the
+                            sale page gates its own button (5.10, D136a). */}
+                        {s.status !== 'DRAFT' ? (
+                          <Tooltip label="Reprint receipt">
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-8 w-8"
+                              aria-label="Reprint receipt"
+                              disabled={busyId === s.id}
+                              onClick={() => handleReprint(s.id)}
+                            >
+                              <Printer className="h-4 w-4" />
+                            </Button>
+                          </Tooltip>
+                        ) : null}
+                        {s.quickbooksDocumentType &&
+                        (s.syncStatus === 'FAILED' || s.syncStatus === 'PENDING') ? (
                           <Tooltip label="Retry QuickBooks sync">
                             <Button
                               variant="ghost"

@@ -2,7 +2,48 @@ import { Prisma } from '@hardware-pos/database';
 
 import { PrismaService } from '../prisma/prisma.service';
 
-export type DocumentType = 'SALE' | 'RETURN' | 'QUOTATION';
+export type DocumentType =
+  | 'SALE'
+  | 'RETURN'
+  | 'QUOTATION'
+  // Phase 5 additions — table sessions and restaurant orders each get
+  // their own per-tenant sequence so waiters can talk about "TS-47" out
+  // loud, and order numbers don't collide with sale numbers.
+  | 'TABLE_SESSION'
+  | 'RESTAURANT_ORDER'
+  // D176 — kitchen tickets get their own counter. Until now a KOT drew from
+  // RESTAURANT_ORDER, so orders and tickets interleaved on one stream: 13
+  // orders and 17 tickets reached RO-000029 and KOT-000030, neither series
+  // contiguous, and adjacent digits across the two meant nothing. Its own
+  // sequence lets the pass read "KOT-31, 32, 33" as three consecutive tickets.
+  | 'KITCHEN_TICKET'
+  // D44 — Purchase Receipts (Receive Stock / GRN). Kept as its own tenant
+  // sequence so the "RCV-000042" identifiers do not collide with sales,
+  // returns or quotations, and so gaps caused by aborted transactions are
+  // impossible on the same guarantees as every other document type.
+  | 'RECEIPT'
+  // D47 — table reservations ("Reservation RSV-000047" over the phone).
+  | 'RESERVATION'
+  // D49 — auto-assigned codes for open tables ("OPEN-3" on the floor).
+  | 'OPEN_TABLE'
+  // D125 (Phase 5, 5.3) — per-tenant SKU numbering. Reuses this mechanism
+  // rather than inventing a second one: it is already the repository's proven
+  // answer to concurrent allocation. Gaps are accepted — a rolled-back product
+  // creation burns a number, and a SKU is an identifier, not an audit trail.
+  | 'SKU'
+  // D125 Part 3 (Phase 5, 5.5) — per-tenant in-store EAN-13 numbering. Its own
+  // sequence, not shared with SKU: the two are different identifiers with
+  // different widths, and a shared counter would waste barcode range every time
+  // a SKU was allocated.
+  | 'BARCODE'
+  // D128 (Phase 7, 7.1a) — exchange numbering, `X-000042`, matching `R-` and
+  // `S-`. Its own sequence so an exchange number never collides with the sale
+  // or return it links.
+  | 'EXCHANGE'
+  // D132 (Phase 8, `8.7`) — stock counts, `SC-000042`. Its own sequence for
+  // the same reason as every other: a count number is quoted out loud on the
+  // floor ("the variance on SC-12") and must not collide with a receipt.
+  | 'STOCK_TAKE';
 
 /** A Prisma client or an interactive-transaction client — both can run raw SQL. */
 type PrismaLike = PrismaService | Prisma.TransactionClient;

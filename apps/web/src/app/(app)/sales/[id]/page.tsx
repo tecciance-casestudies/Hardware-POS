@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import * as React from 'react';
-import { ArrowLeft, FileDown, Printer, RefreshCw, Undo2 } from 'lucide-react';
+import { ArrowLeft, FileDown, Printer, RefreshCw, Repeat, Undo2 } from 'lucide-react';
 
 import { paymentMethodLabel, saleReadsAsPaid, saleStatusLabel } from '@hardware-pos/shared';
 
@@ -14,9 +14,11 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { useAuth } from '@/lib/auth';
 import { Permission } from '@/lib/permissions';
+import { useEffectiveProfile } from '@/lib/platform-profile';
 import { reprintCustomerReceipt } from '@/lib/receipt-print';
 import { fetchSaleReturns, type ReturnDetail } from '@/lib/returns';
 import { fetchSale, retrySaleSync, type PaymentStatusCode, type SaleDetail } from '@/lib/sales';
+import { resolveDocumentSettingsPresentation } from '@/lib/settings/document-presentation';
 import { formatMoney } from '@/lib/utils';
 
 // Wording comes from PAYMENT_STATUS_LABELS so the detail page and the list can
@@ -51,6 +53,11 @@ export default function SaleDetailPage() {
   const { session, hasPermission } = useAuth();
   const params = useParams<{ id: string }>();
   const id = params.id;
+  // D96 — which printed document this workspace's settings are about.
+  const { profile } = useEffectiveProfile();
+  const view = resolveDocumentSettingsPresentation({
+    capabilities: profile?.capabilities ?? null,
+  });
 
   const [sale, setSale] = React.useState<SaleDetail | null>(null);
   const [returns, setReturns] = React.useState<ReturnDetail[]>([]);
@@ -92,6 +99,13 @@ export default function SaleDetailPage() {
     setBusy(true);
     try {
       await reprintCustomerReceipt(session, sale.id);
+    } catch (err) {
+      // Without this the server's refusal escaped as an unhandled rejection
+      // and Next.js drew its runtime error overlay — so a perfectly clear
+      // sentence from the API (“this sale is still on hold…”) reached nobody,
+      // and a rule looked like a crash. Every other handler here already
+      // reports through `setError`.
+      setError(err instanceof Error ? err.message : 'Could not print the receipt');
     } finally {
       setBusy(false);
     }
@@ -140,11 +154,33 @@ export default function SaleDetailPage() {
   const payVariant = saleReadsAsPaid(sale.creditSettledAt, sale.markedPaidAt)
     ? 'success'
     : PAYMENT_STATUS_VARIANT[sale.paymentStatus];
-  const canRetry = sale.syncStatus === 'FAILED' || sale.syncStatus === 'PENDING';
+  // A tenant with no accounting provider has nothing to retry: its sales carry no
+  // external document type and are NOT_SYNCED rather than PENDING. The document-type
+  // check states that intent explicitly instead of relying on the status alone.
+  const hasExternalAccounting = sale.quickbooksDocumentType !== null;
+  const canRetry =
+    hasExternalAccounting && (sale.syncStatus === 'FAILED' || sale.syncStatus === 'PENDING');
   const canReturn =
     sale.status === 'COMPLETED' &&
     sale.returnStatus !== 'FULLY_RETURNED' &&
     hasPermission(Permission.RETURN_CREATE);
+  /*
+   * A receipt exists for any sale that took money, however it ended — a
+   * fully-returned or voided sale still reprints, because the transaction
+   * happened and the paper trail is the point. A voided one comes back
+   * stamped VOID so it cannot pass as proof of a live sale.
+   *
+   * `DRAFT` is the one exclusion: a held basket has taken no payment, so
+   * there is nothing to document. The button used to render for it — and
+   * for every other status — while the server refused, which is how an
+   * ordinary rule surfaced as a page crash. Gated here the way `canReturn`
+   * directly above has always been.
+   */
+  const canReprint = sale.status !== 'DRAFT';
+  // D128 (`7.5`) — an exchange really does both halves, so it needs both
+  // permissions. Someone who may take returns but not make sales must not be
+  // able to issue replacement goods through this door.
+  const canExchange = canReturn && hasPermission(Permission.SALE_CREATE);
 
   return (
     <div className="space-y-6">
@@ -171,12 +207,35 @@ export default function SaleDetailPage() {
               </Button>
             </Link>
           ) : null}
-          <Button variant="outline" onClick={handleA4Bill} disabled={busy} leftIcon={<FileDown className="h-4 w-4" />}>
-            Print A4 bill
-          </Button>
-          <Button variant="ghost" onClick={handleReprint} disabled={busy} leftIcon={<Printer className="h-4 w-4" />}>
-            Thermal receipt
-          </Button>
+          {canExchange ? (
+            <Link href={`/exchanges/new?saleId=${sale.id}`}>
+              <Button variant="outline">
+                <Repeat className="h-4 w-4" />
+                Exchange
+              </Button>
+            </Link>
+          ) : null}
+          {/*
+            * D96 — the A4 bill is the document whose letterhead, signature
+            * block and stamp live on the Branding and Layout tabs. A
+            * food-service workspace no longer has those controls, so offering
+            * the document here would leave an operator with a signature block
+            * they cannot populate or switch off. The thermal receipt stays:
+            * that IS their document.
+            *
+            * Usability only. `/print/sales/[saleId]` is ungated and a typed URL
+            * still renders it; the server is unchanged.
+            */}
+          {view.showA4SaleDocument ? (
+            <Button variant="outline" onClick={handleA4Bill} disabled={busy} leftIcon={<FileDown className="h-4 w-4" />}>
+              Print A4 bill
+            </Button>
+          ) : null}
+          {canReprint ? (
+            <Button variant="ghost" onClick={handleReprint} disabled={busy} leftIcon={<Printer className="h-4 w-4" />}>
+              Thermal receipt
+            </Button>
+          ) : null}
           {canRetry ? (
             <Button variant="outline" onClick={handleRetry} disabled={busy}>
               <RefreshCw className="h-4 w-4" />
@@ -272,29 +331,32 @@ export default function SaleDetailPage() {
             </CardContent>
           </Card>
 
-          <Card>
-            <CardHeader>
-              <CardTitle>QuickBooks</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-2 text-sm">
-              <Row
-                label="Document"
-                value={
-                  sale.quickbooksDocumentType === 'SALES_RECEIPT'
-                    ? 'Sales Receipt'
-                    : sale.quickbooksDocumentType === 'INVOICE'
-                      ? 'Invoice'
-                      : '—'
-                }
-              />
-              <Row label="Document ID" value={sale.quickbooksDocumentId ?? 'Not synced'} />
-              <div className="flex items-center justify-between">
-                <span className="text-muted-foreground">Status</span>
-                <SyncBadge status={sale.syncStatus} />
-              </div>
-              {sale.syncError ? <p className="text-xs text-danger">{sale.syncError}</p> : null}
-            </CardContent>
-          </Card>
+          {/*
+            External-accounting panel. `quickbooksDocumentType` is set when the sale
+            is created for any tenant with an accounting provider, so a QuickBooks
+            tenant always has one and this card is unchanged for them. A tenant with
+            AccountingProviderKind.NONE has null, and must not be shown a
+            "QuickBooks — Not synced" panel about a system it does not use.
+          */}
+          {sale.quickbooksDocumentType ? (
+            <Card>
+              <CardHeader>
+                <CardTitle>QuickBooks</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-2 text-sm">
+                <Row
+                  label="Document"
+                  value={sale.quickbooksDocumentType === 'SALES_RECEIPT' ? 'Sales Receipt' : 'Invoice'}
+                />
+                <Row label="Document ID" value={sale.quickbooksDocumentId ?? 'Not synced'} />
+                <div className="flex items-center justify-between">
+                  <span className="text-muted-foreground">Status</span>
+                  <SyncBadge status={sale.syncStatus} />
+                </div>
+                {sale.syncError ? <p className="text-xs text-danger">{sale.syncError}</p> : null}
+              </CardContent>
+            </Card>
+          ) : null}
         </div>
       </div>
 

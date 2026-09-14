@@ -1,7 +1,9 @@
 import { BadRequestException, Body, Controller, Get, Param, Post, Res } from '@nestjs/common';
+import { ModuleKey } from '@hardware-pos/database';
 import type { Response } from 'express';
 
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
+import { RequireModule } from '../../common/decorators/require-module.decorator';
 import { RequirePermissions } from '../../common/decorators/permissions.decorator';
 import { TenantId } from '../../common/decorators/tenant-id.decorator';
 import { AuthenticatedUser } from '../auth/auth.types';
@@ -28,6 +30,7 @@ export class DocumentsController {
 
   /** A4 final bill / invoice HTML for a completed sale (print or Save-as-PDF). */
   @Get('sales/:saleId')
+  @RequireModule(ModuleKey.RETAIL_POS)
   @RequirePermissions(Permission.SALE_READ)
   async saleBill(
     @TenantId() tenantId: string,
@@ -47,6 +50,7 @@ export class DocumentsController {
 
   /** A4 return / refund note HTML for a completed return. */
   @Get('returns/:returnId')
+  @RequireModule(ModuleKey.RETURNS)
   @RequirePermissions(Permission.RETURN_READ)
   async returnNote(
     @TenantId() tenantId: string,
@@ -64,6 +68,32 @@ export class DocumentsController {
     return { html, format: 'A4' };
   }
 
+  /**
+   * D128 (`7.3`) — the exchange note, from real data.
+   *
+   * Gated on EXCHANGES like the transaction itself. `RETURN_READ` to view, the
+   * same permission the return note uses: an exchange note reveals nothing the
+   * return behind it does not.
+   */
+  @Get('exchanges/:exchangeId')
+  @RequireModule(ModuleKey.EXCHANGES)
+  @RequirePermissions(Permission.RETURN_READ)
+  async exchangeNote(
+    @TenantId() tenantId: string,
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('exchangeId') exchangeId: string,
+  ): Promise<{ html: string; format: 'A4' }> {
+    const html = await this.documents.exchangeHtml(tenantId, exchangeId);
+    await this.audit.record(tenantId, {
+      userId: user.id,
+      action: 'exchange.document_printed',
+      entityType: 'Exchange',
+      entityId: exchangeId,
+      metadata: { format: 'A4' },
+    });
+    return { html, format: 'A4' };
+  }
+
   // ── Template preview (sample data) — Settings → Documents ──────
 
   /**
@@ -71,13 +101,14 @@ export class DocumentsController {
    * body lets the Settings UI preview UNSAVED document settings live.
    */
   @Post('preview/:type')
+  @RequireModule(ModuleKey.SETTINGS)
   @RequirePermissions(Permission.SETTINGS_MANAGE)
-  preview(
+  async preview(
     @TenantId() tenantId: string,
     @Param('type') type: string,
     @Body() dto: PreviewDocumentDto,
-  ): { html: string; format: 'A4' } {
-    const html = this.documents.previewHtml(
+  ): Promise<{ html: string; format: 'A4' }> {
+    const html = await this.documents.previewHtml(
       tenantId,
       assertPreviewType(type),
       dto.documents,
@@ -88,6 +119,7 @@ export class DocumentsController {
 
   /** Downloadable sample PDF (falls back to print-ready HTML if Puppeteer is off). */
   @Get('sample-pdf/:type')
+  @RequireModule(ModuleKey.SETTINGS)
   @RequirePermissions(Permission.SETTINGS_MANAGE)
   async samplePdf(
     @TenantId() tenantId: string,
@@ -104,6 +136,6 @@ export class DocumentsController {
     }
     // No server-side PDF engine — serve print-ready HTML instead.
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.end(this.documents.previewHtml(tenantId, previewType));
+    res.end(await this.documents.previewHtml(tenantId, previewType));
   }
 }

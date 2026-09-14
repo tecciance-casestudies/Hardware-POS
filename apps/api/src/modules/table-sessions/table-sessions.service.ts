@@ -1,0 +1,1398 @@
+import { Injectable } from '@nestjs/common';
+import {
+  Prisma,
+  RestaurantOrderChannel,
+  RestaurantOrderStatus,
+  KitchenTicketStatus,
+  OrderRoundStatus,
+  RestaurantOrderItemStatus,
+  RestaurantTableKind,
+  RestaurantTableStatus,
+  TableSessionStatus,
+  FulfilmentKind,
+  OrderChannel,
+} from '@hardware-pos/database';
+
+import { Permission } from '../auth/permissions';
+import { PrismaService } from '../../prisma/prisma.service';
+import { nextDocumentNumber, padSequence } from '../../common/document-sequence';
+import { LIVE_SESSION_STATUSES } from '../../common/live-sessions';
+import { DiningService, type OpenTableReleaseSummary } from '../dining/dining.service';
+import type { PricedDocument } from '../promotions/promotion-pricing';
+import { RestaurantPromotionPricingService } from '../promotions/restaurant-promotion-pricing.service';
+import { computeRestaurantTotals } from '../restaurant/restaurant-totals';
+import {
+  assertProjectionMatchesSubtotal,
+  type ProjectedPromotion,
+} from '../restaurant/settlement-projection';
+import { TableServiceFulfilmentProvider } from '../providers/fulfilment/table-service-fulfilment.provider';
+import { RoundDepletionService } from '../providers/inventory/round-depletion.service';
+import { SettingsService } from '../settings/settings.service';
+import { KitchenService } from '../kitchen/kitchen.service';
+import { PrintingService } from '../printing/printing.service';
+import { resolveRoundItemInputs, writeRoundItems } from './round-item-resolution';
+import {
+  CloseSessionDto,
+  OpenSessionDto,
+  SubmitRoundDto,
+  VoidItemDto,
+} from './dto/table-sessions.dto';
+import {
+  BranchNotFoundError,
+  GuestCountRequiredError,
+  OpenTableSeatsExhaustedError,
+  OrderNotFoundError,
+  RegisterNotFoundError,
+  RoundAlreadySubmittedError,
+  SessionAlreadyClosedError,
+  SessionNotFoundError,
+  SessionNotOpenError,
+  WaiterNotAssignableError,
+  TabNameRequiredError,
+  TableAlreadyOpenError,
+  TableNotFoundError,
+  TableReservedForOpenTableError,
+} from './table-sessions.errors';
+
+export interface TableSessionView {
+  id: string;
+  branchId: string;
+  tableId: string;
+  sessionNumber: string;
+  status: TableSessionStatus;
+  waiterUserId: string | null;
+  guestCount: number | null;
+  /**
+   * D104 — this tab's own name, when an arrangement carries several parties.
+   * Null on every physical table's session and on a lone tab, where the table's
+   * name is already unambiguous.
+   */
+  tabName: string | null;
+  openedAt: string;
+  closedAt: string | null;
+  finalSaleId: string | null;
+  version: number;
+}
+
+export interface OrderView {
+  id: string;
+  sessionId: string;
+  branchId: string;
+  orderNumber: string;
+  channel: RestaurantOrderChannel;
+  status: RestaurantOrderStatus;
+  version: number;
+}
+
+export interface RoundView {
+  id: string;
+  orderId: string;
+  roundNumber: number;
+  status: OrderRoundStatus;
+  submittedAt: string | null;
+  itemIds: string[];
+}
+
+/**
+ * Frontend Phase D needed a cheap "which sessions are open on this branch"
+ * read for the floor plan → session join. Returned as a flat list of
+ * TableSessionView + activeOrderId (the most recent non-cancelled order on
+ * the session, if any).
+ */
+/**
+ * D159/D159a — somebody this branch can be given a table, and how many they
+ * already hold. The count is what makes a long list decidable: a supervisor
+ * moving a party wants the colleague who is here and has room, and "here" is
+ * knowable only as "already serving something".
+ */
+export interface AssignableWaiter {
+  id: string;
+  name: string;
+  openTableCount: number;
+}
+
+export interface OpenSessionSummary extends TableSessionView {
+  activeOrderId: string | null;
+  /**
+   * D112 — ids of this session's COMPLETED (bumped) kitchen tickets. This is
+   * how "food ready" reaches the floor plan WITHOUT `KOT_VIEW`: the waiter
+   * has no business on the kitchen display (their template documents that),
+   * but "your table's food is up" is exactly their business, and this route
+   * is already scoped to the sessions they may see (D70). Ids, not a count,
+   * so the client can ring once per NEW bump and stay silent on re-polls —
+   * and a recalled-then-rebumped ticket rings again, because its id leaves
+   * and re-enters the list.
+   */
+  readyTicketIds: string[];
+  /**
+   * D156 — WHOSE table this is, in words the floor uses.
+   *
+   * The floor and the POS picker both open on "my tables" and offer "all", so
+   * every session that is not yours has to be attributable — and the one thing
+   * a waiter can read is a name, not a cuid. It travels on this summary rather
+   * than being looked up client-side because the users endpoint is
+   * `USER_MANAGE`-gated and a waiter holds nothing of the sort.
+   *
+   * Null when the session records no waiter (seeded or pre-D69 rows), never a
+   * placeholder: "nobody opened this" and "somebody we cannot name" read the
+   * same on screen and only one of them is true.
+   */
+  waiterName: string | null;
+}
+
+/**
+ * Full detail for one session (Frontend Phase D). Included on a dedicated
+ * `/detail` route rather than mutating the existing `getSession` shape so
+ * existing consumers (spec/integration harness) stay stable.
+ */
+/**
+ * D71 — the running bill for a session that has NOT closed.
+ *
+ * The waiter is the one standing at the table when the guests ask "what do
+ * we owe", so they need the same numbers the cashier will see, before the
+ * close creates them. Priced by `computeRestaurantTotals` — the SAME
+ * function the close uses (D52/D59) — so the paper the guests are shown and
+ * the Sale written a minute later cannot disagree.
+ *
+ * `orderItemId` is the RestaurantOrderItem id, which is exactly what
+ * `BillingService.splitByItems` assigns against. That is why a split
+ * composed at the table survives the close unchanged.
+ */
+export interface SessionBillPreview {
+  sessionId: string;
+  items: {
+    orderItemId: string;
+    name: string;
+    variantName: string | null;
+    /** Unit price INCLUDING snapshotted modifier deltas, as the bill shows it. */
+    unitPrice: string;
+    quantity: string;
+    /** NET of any promotion on this line, so the lines sum to the total. */
+    lineTotal: string;
+    /** What a promotion took off this line. "0.00" when none did. */
+    promotionDiscount: string;
+    promotionName: string | null;
+    roundNumber: number | null;
+    /** D72 — "no onions". Shown at the table and printed on the bill. */
+    specialInstructions: string | null;
+  }[];
+  subtotal: string;
+  /**
+   * Every promotion on this bill, line-level and cart-level, as one figure —
+   * which is what the footer shows and what `Sale.totalDiscount` will hold.
+   */
+  promotionDiscount: string;
+  /** Named only when exactly one promotion applied; see `singlePromotionName`. */
+  promotionName: string | null;
+  serviceChargeAmount: string;
+  packagingCharge: string;
+  taxAmount: string;
+  total: string;
+}
+
+export interface SessionDetailView {
+  session: TableSessionView;
+  orders: {
+    order: OrderView;
+    rounds: {
+      round: RoundView;
+      items: {
+        id: string;
+        menuItemId: string;
+        menuItemName: string;
+        /** D71 — "Medium" vs "Large" is what a guest is being charged for. */
+        variantName: string | null;
+        unitPrice: string;
+        modifierTotal: string;
+        quantity: string;
+        specialInstructions: string | null;
+        status: RestaurantOrderItemStatus;
+        modifiers: { optionName: string; groupName: string; priceDelta: string }[];
+      }[];
+    }[];
+  }[];
+}
+
+@Injectable()
+export class TableSessionsService {
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly kitchen: KitchenService,
+    private readonly dining: DiningService,
+    private readonly settings: SettingsService,
+      // D61 — the concrete provider, not the factory: this service IS the
+    // table-service lifecycle; resolving by tenant would re-read the profile
+    // per close to learn what this file already is.
+    private readonly fulfilment: TableServiceFulfilmentProvider,
+    // D65 — submit-time stock depletion (Q4): the round transaction is where
+    // "the kitchen got the ticket" and "the shelf count moved" must coincide.
+    private readonly roundDepletion: RoundDepletionService,
+    // Promotions on the bill: the same applier retail charges through.
+    private readonly promotionPricing: RestaurantPromotionPricingService,
+    // D181 — auto-printing: queue the bill on close, nudge the dispatcher
+    // after each commit. Never in the transaction's critical path.
+    private readonly printing: PrintingService,
+  ) {}
+
+  // ─────────────────────────────────────────────────────────────
+  // Sessions
+  // ─────────────────────────────────────────────────────────────
+
+  async openSession(
+    tenantId: string,
+    branchId: string,
+    dto: OpenSessionDto,
+  ): Promise<TableSessionView> {
+    return this.prisma.$transaction(async (tx) => {
+      const branch = await tx.branch.findFirst({
+        where: { id: branchId, tenantId, isActive: true },
+        select: { id: true },
+      });
+      if (!branch) throw new BranchNotFoundError();
+
+      /*
+       * D104 — the row lock. Everything below reads the table's live sessions
+       * and then writes one more, so two waiters seating the same table at the
+       * same moment must serialise. Under the pre-D104 one-tab rule the read
+       * was advisory (the loser simply got a second session); with seats being
+       * counted, an unserialised read overfills the arrangement instead. Same
+       * shape as `DiningService.createOpenTable` and the reservation service.
+       */
+      await tx.$queryRaw`SELECT id FROM "RestaurantTable" WHERE id = ${dto.tableId} FOR UPDATE`;
+      const table = await tx.restaurantTable.findFirst({
+        where: { id: dto.tableId, tenantId, branchId, isActive: true },
+        select: { id: true, status: true, kind: true, capacity: true },
+      });
+      if (!table) throw new TableNotFoundError();
+      // D49: a physical table absorbed into an open table must not be seatable
+      // on its own — otherwise reserving the members is decorative.
+      if (table.status === RestaurantTableStatus.RESERVED) {
+        throw new TableReservedForOpenTableError();
+      }
+
+      /*
+       * D104 — how many tabs this table may carry, and how many chairs are
+       * left.
+       *
+       * A tab waiting for its bill still occupies its chairs, so BILLING counts
+       * as live here exactly as OPEN does. `LIVE_SESSION_STATUSES` is the one
+       * list; adding a session status later forces a deliberate answer rather
+       * than defaulting it to "not sitting here".
+       */
+      const liveTabs = await tx.tableSession.findMany({
+        where: { tableId: table.id, status: { in: [...LIVE_SESSION_STATUSES] } },
+        select: { id: true, guestCount: true },
+      });
+
+      if (table.kind !== RestaurantTableKind.OPEN) {
+        // Unchanged for a physical table: one party, one tab. D104 relaxes this
+        // for arrangements ONLY — a four-top with a party at it is not a thing
+        // two unrelated parties can both be sold.
+        if (liveTabs.length > 0) throw new TableAlreadyOpenError();
+      } else {
+        /*
+         * D104 — several parties may share one arrangement, but they must be
+         * tellable apart. Required only from the SECOND tab: naming a tab that
+         * has no sibling is typing for nothing, and the arrangement's own name
+         * already reads unambiguously while it stands alone.
+         */
+        if (liveTabs.length > 0 && !dto.tabName?.trim()) {
+          throw new TabNameRequiredError();
+        }
+        /*
+         * Seats are enforced only when the operator recorded them. D49 made an
+         * arrangement's capacity optional on purpose — "seating as arranged" is
+         * a real answer — and inventing a limit for those would refuse parties
+         * on a number nobody stated.
+         */
+        if (table.capacity != null) {
+          if (dto.guestCount == null) throw new GuestCountRequiredError();
+          const taken = liveTabs.reduce((n, t) => n + (t.guestCount ?? 0), 0);
+          const seatsFree = table.capacity - taken;
+          if (dto.guestCount > seatsFree) throw new OpenTableSeatsExhaustedError(seatsFree);
+        }
+      }
+
+      const sequence = await nextDocumentNumber(tx, tenantId, 'TABLE_SESSION');
+      const sessionNumber = `TS-${padSequence(sequence)}`;
+
+      const session = await tx.tableSession.create({
+        data: {
+          tenantId,
+          branchId,
+          tableId: table.id,
+          sessionNumber,
+          waiterUserId: dto.waiterUserId ?? null,
+          guestCount: dto.guestCount ?? null,
+          tabName: dto.tabName?.trim() || null,
+          status: TableSessionStatus.OPEN,
+        },
+      });
+      /*
+       * D104 — only the FIRST tab moves the table. The unconditional write this
+       * replaces would drag an arrangement that has been serving for an hour
+       * back from OCCUPIED to SEATED the moment a second party sat down, which
+       * reads on the floor as the kitchen having received nothing.
+       */
+      if (table.status === RestaurantTableStatus.AVAILABLE) {
+        await tx.restaurantTable.update({
+          where: { id: table.id },
+          data: { status: RestaurantTableStatus.SEATED },
+        });
+      }
+      return this.sessionToView(session);
+    });
+  }
+
+  /**
+   * D159 — the people this branch can put on a table.
+   *
+   * "Who can serve" is a permission question, so it is answered from the ROLE
+   * ROWS rather than from a name convention or the enum column: any active user
+   * whose role carries `ORDER_SEND_TO_KITCHEN` can be handed a table, which is
+   * the same key the round submit is gated on. A list built any other way
+   * would eventually offer somebody the server then refuses.
+   *
+   * Scoped to the branch by the user's default branch OR an explicit
+   * `BranchAccess` grant — the two ways a user works a branch anywhere else in
+   * this codebase.
+   */
+  async listAssignableWaiters(
+    tenantId: string,
+    branchId: string,
+  ): Promise<AssignableWaiter[]> {
+    const servingRoles = await this.prisma.role.findMany({
+      where: {
+        tenantId,
+        isActive: true,
+        permissions: { some: { key: Permission.ORDER_SEND_TO_KITCHEN } },
+      },
+      select: { id: true },
+    });
+    if (servingRoles.length === 0) return [];
+    const staff = await this.prisma.user.findMany({
+      where: {
+        tenantId,
+        isActive: true,
+        roleId: { in: servingRoles.map((r) => r.id) },
+        OR: [{ branchId }, { branchAccess: { some: { branchId } } }],
+      },
+      select: { id: true, name: true },
+      orderBy: { name: 'asc' },
+    });
+    if (staff.length === 0) return [];
+
+    /*
+     * D159a — how many tables each of them is already carrying.
+     *
+     * A list of names is enough to pick from until a branch has fifteen
+     * waiters, at which point the supervisor's real question is not "who
+     * exists" but "who is on the floor and how loaded are they". This is the
+     * only honest answer this schema can give: there is no clock-in or shift
+     * roster, so "serving now" means "holding an open session on this branch",
+     * which is what the floor plan shows anyway.
+     *
+     * One grouped count for the whole list — never one query per person.
+     */
+    const load = await this.prisma.tableSession.groupBy({
+      by: ['waiterUserId'],
+      where: {
+        tenantId,
+        branchId,
+        status: TableSessionStatus.OPEN,
+        waiterUserId: { in: staff.map((u) => u.id) },
+      },
+      _count: { _all: true },
+    });
+    const openByWaiter = new Map(
+      load.map((row) => [row.waiterUserId ?? '', row._count._all] as const),
+    );
+    return staff.map((u) => ({
+      ...u,
+      openTableCount: openByWaiter.get(u.id) ?? 0,
+    }));
+  }
+
+  /**
+   * D159 — put a different waiter on an open session.
+   *
+   * Only the SESSION moves. Every round keeps the `submittedByUserId` it was
+   * sent with, so the history still says who fired which course, and the bill
+   * is untouched: this is a change of responsibility from here on, not a
+   * rewriting of what happened. The floor plan, the POS picker and the Orders
+   * queue all read the session's waiter (D156/D157), so the table and its
+   * order move to the new waiter's "mine" and leave the old one's in the same
+   * beat.
+   *
+   * Refuses a closed session (there is nobody to serve) and a target who
+   * cannot serve a table, rather than writing a state the round submit would
+   * then refuse.
+   */
+  async reassignWaiter(
+    tenantId: string,
+    branchId: string,
+    sessionId: string,
+    waiterUserId: string,
+  ): Promise<{ session: TableSessionView; previousWaiterUserId: string | null }> {
+    const session = await this.prisma.tableSession.findFirst({
+      where: { id: sessionId, tenantId, branchId },
+    });
+    if (!session) throw new SessionNotFoundError();
+    if (session.status !== TableSessionStatus.OPEN) throw new SessionNotOpenError();
+
+    const assignable = await this.listAssignableWaiters(tenantId, branchId);
+    if (!assignable.some((w) => w.id === waiterUserId)) {
+      throw new WaiterNotAssignableError();
+    }
+
+    const updated = await this.prisma.tableSession.update({
+      where: { id: session.id },
+      data: { waiterUserId },
+    });
+    return {
+      session: this.sessionToView(updated),
+      previousWaiterUserId: session.waiterUserId,
+    };
+  }
+
+  async getSession(
+    tenantId: string,
+    sessionId: string,
+    onlyWaiterUserId: string | null = null,
+  ): Promise<TableSessionView> {
+    const row = await this.prisma.tableSession.findFirst({
+      where: { id: sessionId, tenantId },
+    });
+    if (!row) throw new SessionNotFoundError();
+    assertOwnedBy(row.waiterUserId, onlyWaiterUserId);
+    return this.sessionToView(row);
+  }
+
+  /**
+   * Frontend Phase D: cheap "which sessions are open on this branch" read
+   * for the floor plan → session join. Deliberately does NOT walk orders
+   * or items — the summary is small and cacheable; the order-entry screen
+   * calls `getSessionDetail` for the full tree.
+   */
+  /**
+   * D71 — the running bill, for the waiter standing at the table.
+   *
+   * Reads the same rows the close will read (non-voided items across every
+   * order on the session) and prices them with the same calculator, so this
+   * is a preview of the real number rather than a second opinion about it.
+   * Nothing is written; the session stays open.
+   */
+  async previewBill(
+    tenantId: string,
+    sessionId: string,
+    onlyWaiterUserId: string | null = null,
+  ): Promise<SessionBillPreview> {
+    const session = await this.prisma.tableSession.findFirst({
+      where: { id: sessionId, tenantId },
+      include: {
+        orders: {
+          include: {
+            items: {
+              where: { status: { not: RestaurantOrderItemStatus.VOIDED } },
+              orderBy: { createdAt: 'asc' },
+              include: { round: { select: { roundNumber: true } } },
+            },
+          },
+        },
+      },
+    });
+    if (!session) throw new SessionNotFoundError();
+    assertOwnedBy(session.waiterUserId, onlyWaiterUserId);
+
+    const items = session.orders.flatMap((order) => order.items);
+    let subtotal = new Prisma.Decimal(0);
+    for (const item of items) {
+      subtotal = subtotal.plus(item.unitPrice.plus(item.modifierTotal).mul(item.quantity));
+    }
+
+    const config = await this.prisma.restaurantBranchConfig.findUnique({
+      where: { branchId: session.branchId },
+      select: {
+        serviceChargePercent: true,
+        serviceChargeChannels: true,
+        serviceChargeTaxable: true,
+        packagingChargeAmount: true,
+        taxRatePercent: true,
+      },
+    });
+    /*
+     * Promotions, over the WHOLE session rather than any one round.
+     *
+     * A bundle spans rounds and a BOGO counts across them, so the only honest
+     * evaluation set is every non-voided item on the table — which is exactly
+     * the set the close will price. That is what makes this a preview of the
+     * real number rather than a second opinion about it.
+     */
+    const promotion = await this.promotionPricing.priceOrderItems(
+      tenantId,
+      session.branchId,
+      RestaurantOrderChannel.DINE_IN,
+      items,
+    );
+    const promotionByItemId = new Map(promotion.lines.map((l) => [l.id, l]));
+
+    const appSettings = this.settings.getSettings(tenantId);
+    const totals = computeRestaurantTotals(
+      subtotal,
+      RestaurantOrderChannel.DINE_IN,
+      {
+        serviceChargePercent: config?.serviceChargePercent ?? new Prisma.Decimal(0),
+        serviceChargeChannels: config?.serviceChargeChannels ?? [RestaurantOrderChannel.DINE_IN],
+        serviceChargeTaxable: config?.serviceChargeTaxable ?? true,
+        packagingChargeAmount: config?.packagingChargeAmount ?? new Prisma.Decimal(0),
+        taxRatePercent:
+          config?.taxRatePercent != null
+            ? config.taxRatePercent.toNumber()
+            : appSettings.taxRatePercent,
+      },
+      { lineDiscount: promotion.totalLineDiscount, orderDiscount: promotion.orderDiscountAmount },
+    );
+
+    return {
+      sessionId: session.id,
+      items: items.map((item) => {
+        const won = promotionByItemId.get(item.id);
+        const gross = item.unitPrice.plus(item.modifierTotal).mul(item.quantity);
+        const discount = won?.promotionDiscountAmount ?? new Prisma.Decimal(0);
+        return {
+          orderItemId: item.id,
+          name: item.menuItemName,
+          variantName: item.variantNameSnapshot,
+          // Modifiers are folded into the unit price, exactly as BillView does
+          // it — the two surfaces show a guest the same number for a line.
+          unitPrice: item.unitPrice.plus(item.modifierTotal).toFixed(2),
+          quantity: item.quantity.toFixed(3),
+          // Net of the promotion, so the lines a waiter reads out add up to
+          // the total at the bottom of the same card.
+          lineTotal: gross.minus(discount).toFixed(2),
+          promotionDiscount: discount.toFixed(2),
+          promotionName: won?.promotionNameSnapshot ?? null,
+          roundNumber: item.round?.roundNumber ?? null,
+          specialInstructions: item.specialInstructions,
+        };
+      }),
+      subtotal: totals.subtotal.toFixed(2),
+      promotionDiscount: totals.promotionLineDiscount
+        .plus(totals.promotionOrderDiscount)
+        .toFixed(2),
+      promotionName: this.singlePromotionName(promotion),
+      serviceChargeAmount: totals.serviceChargeAmount.toFixed(2),
+      packagingCharge: totals.packagingCharge.toFixed(2),
+      taxAmount: totals.taxAmount.toFixed(2),
+      total: totals.total.toFixed(2),
+    };
+  }
+
+  /**
+   * The promotion to name on the bill footer, or null when more than one
+   * applied — several stackable promotions have no single honest label, and
+   * the per-line names carry the detail in that case.
+   */
+  private singlePromotionName(promotion: PricedDocument): string | null {
+    const names = new Set(
+      [
+        ...promotion.lines.map((l) => l.promotionNameSnapshot),
+        promotion.orderPromotionNameSnapshot,
+      ].filter((n): n is string => n !== null),
+    );
+    return names.size === 1 ? [...names][0]! : null;
+  }
+
+  /**
+   * D70 — open sessions on the branch.
+   *
+   * `onlyWaiterUserId` is the caller's own id when they lack
+   * TABLE_SESSION_VIEW_ALL, and null when they hold it. The narrowing is a
+   * WHERE clause, not a filter over the result: a waiter must not be able to
+   * read another waiter's session number, guest count or order id out of a
+   * response the client then hides.
+   */
+  async listOpenSessions(
+    tenantId: string,
+    branchId: string,
+    onlyWaiterUserId: string | null = null,
+  ): Promise<OpenSessionSummary[]> {
+    const rows = await this.prisma.tableSession.findMany({
+      where: {
+        tenantId,
+        branchId,
+        // D178 — a table waiting for its bill is still a table with guests at
+        // it. Filtering on OPEN alone made every session vanish from the floor
+        // the moment the waiter pressed "Proceed to pay".
+        status: { in: [...LIVE_SESSION_STATUSES] },
+        ...(onlyWaiterUserId ? { waiterUserId: onlyWaiterUserId } : {}),
+      },
+      include: {
+        orders: {
+          where: { status: { not: 'CANCELLED' } },
+          orderBy: { createdAt: 'desc' },
+          select: { id: true, createdAt: true },
+          take: 1,
+        },
+      },
+      orderBy: { openedAt: 'asc' },
+    });
+    // D112 — one query for every listed session's bumped tickets, walked back
+    // to its session id. Kept out of the include above: the ticket hangs off
+    // round → order, not off the one most-recent order that include selects.
+    const readyBySession = new Map<string, string[]>();
+    if (rows.length > 0) {
+      const tickets = await this.prisma.kitchenTicket.findMany({
+        where: {
+          tenantId,
+          status: KitchenTicketStatus.COMPLETED,
+          round: { order: { sessionId: { in: rows.map((r) => r.id) } } },
+        },
+        select: { id: true, round: { select: { order: { select: { sessionId: true } } } } },
+      });
+      for (const t of tickets) {
+        const sid = t.round.order.sessionId;
+        readyBySession.set(sid, [...(readyBySession.get(sid) ?? []), t.id]);
+      }
+    }
+    /*
+     * D156 — whose table each one is, by name.
+     *
+     * One query for the whole page rather than a join: `waiterUserId` is a
+     * loose reference with no FK (the schema's deliberate shape for user
+     * columns), so there is no relation to include. Tenant-scoped, and a name
+     * that cannot be resolved stays null rather than becoming "Unknown" — a
+     * seeded session with no waiter and a deleted user must not read alike.
+     */
+    const waiterIds = [...new Set(rows.map((r) => r.waiterUserId).filter((id): id is string => !!id))];
+    const waiterNames = new Map<string, string>();
+    if (waiterIds.length > 0) {
+      const staff = await this.prisma.user.findMany({
+        where: { tenantId, id: { in: waiterIds } },
+        select: { id: true, name: true },
+      });
+      for (const u of staff) waiterNames.set(u.id, u.name);
+    }
+    return rows.map((row) => ({
+      ...this.sessionToView(row),
+      activeOrderId: row.orders[0]?.id ?? null,
+      readyTicketIds: readyBySession.get(row.id) ?? [],
+      waiterName: row.waiterUserId ? waiterNames.get(row.waiterUserId) ?? null : null,
+    }));
+  }
+
+  /**
+   * Frontend Phase D: full session tree for the order-entry screen —
+   * every non-cancelled order, its rounds, and each round's items with
+   * modifier snapshots. Prices come through as strings (Decimal
+   * precision preserved). Voided items are included so the running bill
+   * can render them struck through.
+   */
+  async getSessionDetail(
+    tenantId: string,
+    sessionId: string,
+    onlyWaiterUserId: string | null = null,
+  ): Promise<SessionDetailView> {
+    const row = await this.prisma.tableSession.findFirst({
+      where: { id: sessionId, tenantId },
+      include: {
+        orders: {
+          orderBy: { createdAt: 'asc' },
+          include: {
+            rounds: {
+              orderBy: { roundNumber: 'asc' },
+              include: {
+                items: {
+                  orderBy: { createdAt: 'asc' },
+                  include: { modifiers: true },
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+    if (!row) throw new SessionNotFoundError();
+    assertOwnedBy(row.waiterUserId, onlyWaiterUserId);
+    return {
+      session: this.sessionToView(row),
+      orders: row.orders.map((order) => ({
+        order: this.orderToView(order),
+        rounds: order.rounds.map((round) => ({
+          round: {
+            id: round.id,
+            orderId: round.orderId,
+            roundNumber: round.roundNumber,
+            status: round.status,
+            submittedAt: round.submittedAt?.toISOString() ?? null,
+            itemIds: round.items.map((i) => i.id),
+          },
+          items: round.items.map((item) => ({
+            id: item.id,
+            menuItemId: item.menuItemId,
+            menuItemName: item.menuItemName,
+            variantName: item.variantNameSnapshot,
+            unitPrice: item.unitPrice.toFixed(2),
+            modifierTotal: item.modifierTotal.toFixed(2),
+            quantity: item.quantity.toFixed(3),
+            specialInstructions: item.specialInstructions,
+            status: item.status,
+            modifiers: item.modifiers.map((m) => ({
+              optionName: m.optionName,
+              groupName: m.groupName,
+              priceDelta: m.priceDelta.toFixed(2),
+            })),
+          })),
+        })),
+      })),
+    };
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Orders
+  // ─────────────────────────────────────────────────────────────
+
+  async createOrder(
+    tenantId: string,
+    sessionId: string,
+    channel: RestaurantOrderChannel = RestaurantOrderChannel.DINE_IN,
+    onlyWaiterUserId: string | null = null,
+  ): Promise<OrderView> {
+    return this.prisma.$transaction(async (tx) => {
+      const session = await tx.tableSession.findFirst({
+        where: { id: sessionId, tenantId },
+        select: { id: true, branchId: true, status: true, waiterUserId: true },
+      });
+      if (!session) throw new SessionNotFoundError();
+      assertOwnedBy(session.waiterUserId, onlyWaiterUserId);
+      if (session.status !== TableSessionStatus.OPEN) throw new SessionNotOpenError();
+
+      const seq = await nextDocumentNumber(tx, tenantId, 'RESTAURANT_ORDER');
+      const orderNumber = `RO-${padSequence(seq)}`;
+      const order = await tx.restaurantOrder.create({
+        data: {
+          tenantId,
+          branchId: session.branchId,
+          sessionId: session.id,
+          orderNumber,
+          channel,
+          status: RestaurantOrderStatus.DRAFT,
+        },
+      });
+      return this.orderToView(order);
+    });
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Rounds — idempotent per key (scenario 11)
+  // ─────────────────────────────────────────────────────────────
+
+  async submitRound(
+    tenantId: string,
+    orderId: string,
+    dto: SubmitRoundDto,
+    actorUserId: string,
+  ): Promise<RoundView> {
+    // Idempotency check outside the transaction: if a round with this key
+    // already exists for this tenant, return it verbatim. Scenario 11 requires
+    // a duplicate request to NOT create a duplicate round.
+    const existing = await this.prisma.orderRound.findUnique({
+      where: {
+        tenantId_idempotencyKey: { tenantId, idempotencyKey: dto.idempotencyKey },
+      },
+      include: { items: { select: { id: true } } },
+    });
+    if (existing) {
+      if (existing.orderId !== orderId) throw new RoundAlreadySubmittedError();
+      return this.roundToView(existing);
+    }
+
+    const view = await this.prisma.$transaction(async (tx) => {
+      const order = await tx.restaurantOrder.findFirst({
+        where: { id: orderId, tenantId },
+        select: { id: true, sessionId: true, status: true, session: { select: { status: true } } },
+      });
+      if (!order) throw new OrderNotFoundError();
+      if (order.session.status !== TableSessionStatus.OPEN) throw new SessionNotOpenError();
+
+      // D46 — resolution and validation live in the shared resolver
+      // (round-item-resolution.ts, 2026-08-18) so this path and takeaway
+      // intake cannot drift: both accept the same MENU_ITEM / PRODUCT
+      // sources, apply the same variant and modifier guards, and snapshot
+      // the same fields.
+      const resolvedItems = await resolveRoundItemInputs(tx, tenantId, dto.items);
+
+      const previousRoundCount = await tx.orderRound.count({ where: { orderId: order.id } });
+      const round = await tx.orderRound.create({
+        data: {
+          tenantId,
+          orderId: order.id,
+          roundNumber: previousRoundCount + 1,
+          status: OrderRoundStatus.SUBMITTED,
+          submittedAt: new Date(),
+          submittedByUserId: actorUserId,
+          idempotencyKey: dto.idempotencyKey,
+        },
+      });
+
+      // One writer for both intake paths; returns the D65 depletion inputs.
+      const { depletionItems } = await writeRoundItems(
+        tx,
+        { tenantId, orderId: order.id, roundId: round.id },
+        resolvedItems,
+      );
+
+      // Order status transitions from DRAFT to SUBMITTED on first round.
+      if (order.status === RestaurantOrderStatus.DRAFT) {
+        await tx.restaurantOrder.update({
+          where: { id: order.id },
+          data: { status: RestaurantOrderStatus.SUBMITTED, version: { increment: 1 } },
+        });
+        await tx.restaurantOrderStatusHistory.create({
+          data: {
+            tenantId,
+            orderId: order.id,
+            fromStatus: RestaurantOrderStatus.DRAFT,
+            toStatus: RestaurantOrderStatus.SUBMITTED,
+            changedByUserId: actorUserId,
+          },
+        });
+      }
+
+      // Table transitions to OCCUPIED once at least one round is sent.
+      const session = await tx.tableSession.findUniqueOrThrow({
+        where: { id: order.sessionId },
+        select: { tableId: true, branchId: true },
+      });
+      await tx.restaurantTable.updateMany({
+        where: { tenantId, id: session.tableId },
+        data: { status: RestaurantTableStatus.OCCUPIED },
+      });
+
+      // D65 — deplete stock for this round, same transaction (Q4: submit).
+      // A tracked line the shelf cannot support refuses the WHOLE round,
+      // exactly as a retail sale would refuse the cart.
+      await this.roundDepletion.depleteSubmittedItems(
+        tx,
+        tenantId,
+        session.branchId,
+        depletionItems,
+        actorUserId,
+      );
+
+      // Phase 6: generate the KOTs inside the same transaction so a round and
+      // its tickets are visible together. D68 — the tickets ARE the delivery:
+      // they land QUEUED on the kitchen board the moment this transaction
+      // commits, with nothing downstream to go wrong. D152 — one ticket per
+      // STATION the round routes to, and an item that routes to none goes to
+      // the branch's Main station, so no item of it reaches the board on none.
+      // D181 — the same call queues one PENDING print attempt per station
+      // printer; the paper is a copy of the board, and its failure stays on
+      // the attempt row.
+      await this.kitchen.generateTicketsForRound(tx, tenantId, session.branchId, round.id);
+
+      const roundFull = await tx.orderRound.findUniqueOrThrow({
+        where: { id: round.id },
+        include: { items: { select: { id: true } } },
+      });
+      return this.roundToView(roundFull);
+    });
+    /*
+     * D181 — the tickets and their attempts are committed. This nudges the
+     * dispatcher so they reach the station printer within a second of the
+     * waiter tapping Send, instead of on the worker's next tick. Never
+     * awaited: the round is already committed and a printer must not delay
+     * the response.
+     */
+    this.printing.kick();
+    return view;
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Void a sent item (scenario 15: cannot silently delete)
+  // ─────────────────────────────────────────────────────────────
+
+  async voidItem(
+    tenantId: string,
+    itemId: string,
+    dto: VoidItemDto,
+    actorUserId: string,
+  ): Promise<void> {
+    // D65 — one transaction: the status flip and the compensating stock
+    // movement must not be observable apart, and the status check inside it
+    // is what keeps a double-void from double-restoring.
+    await this.prisma.$transaction(async (tx) => {
+      const existing = await tx.restaurantOrderItem.findFirst({
+        where: { id: itemId, tenantId },
+        select: { id: true, status: true },
+      });
+      if (!existing) throw new OrderNotFoundError();
+      if (existing.status === RestaurantOrderItemStatus.VOIDED) {
+        // Idempotent no-op.
+        return;
+      }
+      await tx.restaurantOrderItem.update({
+        where: { id: existing.id },
+        data: {
+          status: RestaurantOrderItemStatus.VOIDED,
+          voidReason: dto.reason,
+          voidedByUserId: actorUserId,
+          voidedAt: new Date(),
+        },
+      });
+      // Mirrors the item's RECORDED ORDER_ROUND movements (not a re-expansion
+      // of the recipe, which may have changed since submit). No-ops for items
+      // that never depleted.
+      await this.roundDepletion.restoreVoidedItem(tx, tenantId, existing.id, actorUserId);
+    });
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Proceed to pay → Sale (D1 junction point, re-timed by D178)
+  // ─────────────────────────────────────────────────────────────
+
+  /**
+   * D178 — the waiter sends the table to the cashier.
+   *
+   * This is what "Close & send one bill" always did — raise the Sale from
+   * every non-voided item on the session — with ONE thing removed: the table
+   * is no longer freed here. It goes to BILLING, and stays in its chairs
+   * until the bill is PAID (see `settleBilledSession`, called from the
+   * payment path). D68's sentence, made literal: the waiter completes the
+   * order; the cashier prints the bill.
+   *
+   * Idempotent on a session already in BILLING: the existing Sale is
+   * returned rather than a second one raised. `finalSaleId @unique` stays
+   * the structural guard underneath that.
+   *
+   * Also the "served" record. Every round the kitchen has bumped (READY)
+   * moves to DELIVERED on the way past — the waiter pressing "Proceed to pay"
+   * has, by definition, put the food down — and DELIVERED sits outside the
+   * kitchen's `KITCHEN_OWNED` set, so a later recall of that ticket cannot
+   * drag a served round backwards. Rounds the kitchen still holds are left
+   * to the kitchen.
+   */
+  async sendToCashier(
+    tenantId: string,
+    sessionId: string,
+    dto: CloseSessionDto,
+    actorUserId: string,
+    onlyWaiterUserId: string | null = null,
+  ): Promise<{ session: TableSessionView; saleId: string }> {
+    const result = await this.prisma.$transaction(async (tx) => {
+      const session = await tx.tableSession.findFirst({
+        where: { id: sessionId, tenantId },
+        include: {
+          orders: {
+            include: {
+              items: {
+                where: { status: { not: RestaurantOrderItemStatus.VOIDED } },
+                // D58: the projection copies the frozen modifier snapshots too.
+                include: { modifiers: true },
+              },
+            },
+          },
+        },
+      });
+      if (!session) throw new SessionNotFoundError();
+      assertOwnedBy(session.waiterUserId, onlyWaiterUserId);
+      if (session.status === TableSessionStatus.CLOSED) throw new SessionAlreadyClosedError();
+      if (session.status === TableSessionStatus.BILLING && session.finalSaleId) {
+        return { session: this.sessionToView(session), saleId: session.finalSaleId };
+      }
+
+      const sale = await this.raiseSaleForSession(tx, tenantId, session, dto, actorUserId);
+      /*
+       * D181 — sending the bill to the cashier is what prints it on the
+       * branch's cashier printer, when one is configured. Queued INSIDE this
+       * transaction so a rolled-back send cannot leave a bill job for a sale
+       * that does not exist; the bytes go out after commit, so no printer can
+       * delay or fail the send (D53). With no cashier printer this is a no-op
+       * and the browser path stays the only one, exactly as D68 left it.
+       *
+       * Placed here rather than at the close's tail, where D181's branch put
+       * it: D178 moved the close's second half into `settleBilledSession`,
+       * called from the PAYMENT, and the bill is wanted when it is SENT, not
+       * when it is paid — the guest reads it to decide how to pay.
+       */
+      await this.printing.enqueueBillForSale(tx, {
+        tenantId,
+        branchId: session.branchId,
+        saleId: sale.id,
+        createdByUserId: actorUserId,
+      });
+
+      await tx.orderRound.updateMany({
+        where: {
+          tenantId,
+          order: { sessionId: session.id },
+          status: OrderRoundStatus.READY,
+        },
+        data: { status: OrderRoundStatus.DELIVERED },
+      });
+      await tx.restaurantOrderItem.updateMany({
+        where: {
+          tenantId,
+          order: { sessionId: session.id },
+          round: { status: OrderRoundStatus.DELIVERED },
+          status: { not: RestaurantOrderItemStatus.VOIDED },
+        },
+        data: { status: RestaurantOrderItemStatus.DELIVERED },
+      });
+
+      const updated = await tx.tableSession.update({
+        where: { id: session.id },
+        data: {
+          status: TableSessionStatus.BILLING,
+          finalSaleId: sale.id,
+          version: { increment: 1 },
+        },
+      });
+      /*
+       * The table shows "Bill requested" — but only once NO tab on it is still
+       * ordering. D104: an arrangement carries several parties, and one of
+       * them asking for its bill must not read on the floor as the whole
+       * table being done. A physical table has one tab, so this is simply
+       * "always" there.
+       */
+      const stillOrdering = await tx.tableSession.count({
+        where: { tableId: session.tableId, status: TableSessionStatus.OPEN },
+      });
+      if (stillOrdering === 0) {
+        await tx.restaurantTable.updateMany({
+          where: { tenantId, id: session.tableId },
+          data: { status: RestaurantTableStatus.BILLING },
+        });
+      }
+      /*
+       * A bill for nothing is paid already. A party that walked out before
+       * ordering leaves a zero-total Sale (as the close always did), and no
+       * payment can ever land on it — `collectPayment` refuses an amount of
+       * zero — so a table held "until paid" would be held forever. Settle it
+       * here, through the same path the paying cashier takes.
+       */
+      if (sale.total.isZero()) {
+        await this.settleBilledSession(tx, tenantId, sale.id, actorUserId);
+        const settled = await tx.tableSession.findUniqueOrThrow({ where: { id: session.id } });
+        return { session: this.sessionToView(settled), saleId: sale.id };
+      }
+      return { session: this.sessionToView(updated), saleId: sale.id };
+    });
+    // D181 — after commit: print now rather than on the worker's next tick.
+    this.printing.kick();
+    return result;
+  }
+
+  /**
+   * D178 — the bill is paid; the table is done.
+   *
+   * Called by `BillingService.collectPayment` INSIDE its transaction, once the
+   * payment that clears the balance has landed and the optimistic-concurrency
+   * check has passed, so "paid" and "table freed" cannot be observed apart
+   * and a losing writer rolls its release back with its payment.
+   *
+   * Inert unless the sale is a table session's AND that session is BILLING.
+   * That one check makes it a no-op for a partial payment (the caller only
+   * asks on PAID), for a sale raised before D178 (session already CLOSED,
+   * table long free), for a counter or takeaway sale (no session, or one
+   * that never went to BILLING), and for a split bill whose siblings are
+   * still outstanding (the sale is one document; it is PAID once).
+   */
+  async settleBilledSession(
+    tx: Prisma.TransactionClient,
+    tenantId: string,
+    saleId: string,
+    actorUserId: string,
+  ): Promise<{ sessionId: string; openTableRelease?: OpenTableReleaseSummary } | null> {
+    const session = await tx.tableSession.findFirst({
+      where: { tenantId, finalSaleId: saleId, status: TableSessionStatus.BILLING },
+      select: { id: true, orders: { select: { id: true, status: true } } },
+    });
+    if (!session) return null;
+
+    for (const order of session.orders) {
+      if (
+        order.status === RestaurantOrderStatus.COMPLETED ||
+        order.status === RestaurantOrderStatus.CANCELLED
+      ) {
+        continue;
+      }
+      await tx.restaurantOrder.update({
+        where: { id: order.id },
+        data: { status: RestaurantOrderStatus.COMPLETED, version: { increment: 1 } },
+      });
+      await tx.restaurantOrderStatusHistory.create({
+        data: {
+          tenantId,
+          orderId: order.id,
+          fromStatus: order.status,
+          toStatus: RestaurantOrderStatus.COMPLETED,
+          reason: 'Bill paid',
+          changedByUserId: actorUserId,
+        },
+      });
+    }
+    await tx.tableSession.update({
+      where: { id: session.id },
+      data: {
+        status: TableSessionStatus.CLOSED,
+        closedAt: new Date(),
+        version: { increment: 1 },
+      },
+    });
+    /*
+     * D61: resource release belongs to the fulfilment provider — unchanged,
+     * just called from here rather than from the close. Physical tables go
+     * AVAILABLE; an open table (D49) releases last-one-out (D104).
+     */
+    const release = await this.fulfilment.releaseResources(tx, tenantId, {
+      kind: 'TABLE_SESSION',
+      sessionId: session.id,
+    });
+    return release.openTableRelease !== undefined
+      ? { sessionId: session.id, openTableRelease: release.openTableRelease }
+      : { sessionId: session.id };
+  }
+
+  /**
+   * Pre-D178 name for `sendToCashier`, kept so the mounted `/close` route and
+   * any older caller keep working. Nothing behind it is different: since D178
+   * a "close" holds the table until the bill is paid.
+   */
+  async closeSession(
+    tenantId: string,
+    sessionId: string,
+    dto: CloseSessionDto,
+    actorUserId: string,
+    onlyWaiterUserId: string | null = null,
+  ): Promise<{ session: TableSessionView; saleId: string }> {
+    return this.sendToCashier(tenantId, sessionId, dto, actorUserId, onlyWaiterUserId);
+  }
+
+  /**
+   * The Sale-raising half of what used to be `closeSession`, verbatim: sum,
+   * price, project, write. Nothing about the money maths lives anywhere
+   * else, which is the point of it being one function.
+   */
+  private async raiseSaleForSession(
+    tx: Prisma.TransactionClient,
+    tenantId: string,
+    session: Prisma.TableSessionGetPayload<{
+      include: { orders: { include: { items: { include: { modifiers: true } } } } };
+    }>,
+    dto: CloseSessionDto,
+    actorUserId: string,
+  ): Promise<{ id: string; total: Prisma.Decimal }> {
+    // Sum all non-voided items. Money is Decimal(12,2); use Prisma.Decimal
+    // arithmetic to preserve precision.
+    let subtotal = new Prisma.Decimal(0);
+    for (const order of session.orders) {
+      for (const item of order.items) {
+        const lineTotal = item.unitPrice.plus(item.modifierTotal).mul(item.quantity);
+        subtotal = subtotal.plus(lineTotal);
+      }
+    }
+
+    // D52: every charge on the bill comes from one shared calculator, so
+    // dine-in and takeaway cannot drift. Tax is the tenant's configured rate
+    // — it was hardcoded to zero here while retail applied it correctly.
+    const config = await tx.restaurantBranchConfig.findUnique({
+      where: { branchId: session.branchId },
+      select: {
+        serviceChargePercent: true,
+        serviceChargeChannels: true,
+        serviceChargeTaxable: true,
+        packagingChargeAmount: true,
+        taxRatePercent: true,
+      },
+    });
+    /*
+     * Promotions, priced inside the transaction over the same rows the
+     * projection below will settle. The preview the waiter showed the table
+     * ran the identical call, so the guest is charged what they were quoted
+     * unless the order itself changed in between.
+     */
+    const promotion = await this.promotionPricing.priceOrderItems(
+      tenantId,
+      session.branchId,
+      RestaurantOrderChannel.DINE_IN,
+      session.orders.flatMap((order) => order.items),
+      tx,
+    );
+    const promotionByItemId: ReadonlyMap<string, ProjectedPromotion> = new Map(
+      promotion.lines.map((l) => [l.id, l]),
+    );
+
+    const appSettings = this.settings.getSettings(tenantId);
+    const totals = computeRestaurantTotals(
+      subtotal,
+      RestaurantOrderChannel.DINE_IN,
+      {
+        serviceChargePercent: config?.serviceChargePercent ?? new Prisma.Decimal(0),
+        serviceChargeChannels: config?.serviceChargeChannels ?? [RestaurantOrderChannel.DINE_IN],
+        serviceChargeTaxable: config?.serviceChargeTaxable ?? true,
+        packagingChargeAmount: config?.packagingChargeAmount ?? new Prisma.Decimal(0),
+        // D59/Q5: the branch override wins when set; NULL inherits the
+        // tenant-wide rate. 0 is a real rate, which is why the column is
+        // nullable rather than defaulted.
+        taxRatePercent:
+          config?.taxRatePercent != null
+            ? config.taxRatePercent.toNumber()
+            : appSettings.taxRatePercent,
+      },
+      { lineDiscount: promotion.totalLineDiscount, orderDiscount: promotion.orderDiscountAmount },
+    );
+
+    // D52: the till that took the money. An explicit registerId wins; the
+    // fallback is ordered by code so it is at least deterministic — the
+    // previous findFirstOrThrow had no orderBy and could return a different
+    // register between two closes on the same branch.
+    const register = dto.registerId
+      ? await tx.register.findFirst({
+          where: { id: dto.registerId, branchId: session.branchId, isActive: true },
+          select: { id: true },
+        })
+      : await tx.register.findFirst({
+          where: { branchId: session.branchId, isActive: true },
+          orderBy: { code: 'asc' },
+          select: { id: true },
+        });
+    if (!register) throw new RegisterNotFoundError();
+
+    // D52: the human who closed the bill. Was "first active user in the
+    // tenant" — not branch-scoped, so it booked untagged sales to whoever
+    // the query returned, in practice the owner.
+    const cashierId = session.waiterUserId ?? actorUserId;
+
+    const saleNumber = `S-${padSequence(await nextDocumentNumber(tx, tenantId, 'SALE'))}`;
+    /*
+     * D58: the settled document carries its lines, projected from the order
+     * items inside THIS transaction — a copy of the submit-time snapshots,
+     * with the sum invariant asserted before anything persists.
+     */
+    // D61: collection goes through the fulfilment provider — an independent
+    // query over the same rows the subtotal loop read, so the invariant
+    // below compares two computations rather than one restated.
+    const projected = await this.fulfilment.collectSettlementLines(
+      tx,
+      tenantId,
+      { kind: 'TABLE_SESSION', sessionId: session.id },
+      promotionByItemId,
+    );
+    assertProjectionMatchesSubtotal(projected, subtotal, totals.promotionLineDiscount);
+    const sale = await tx.sale.create({
+      data: {
+        tenantId,
+        branchId: session.branchId,
+        registerId: register.id,
+        cashierId,
+        saleNumber,
+        subtotal,
+        /*
+         * The line-level promotions, which is what `discountedSubtotal =
+         * subtotal - totalDiscount` has to mean for the returns calculation
+         * to reverse a refund correctly. A cart-level promotion is NOT here:
+         * it lives in its own columns and comes off after tax, exactly as on
+         * a retail sale.
+         */
+        totalDiscount: totals.promotionLineDiscount,
+        promotionOrderDiscountAmount: totals.promotionOrderDiscount,
+        promotionOrderId: promotion.orderPromotionId,
+        promotionOrderNameSnapshot: promotion.orderPromotionNameSnapshot,
+        taxAmount: totals.taxAmount,
+        serviceChargeAmount: totals.serviceChargeAmount,
+        packagingCharge: totals.packagingCharge,
+        total: totals.total,
+        paidAmount: new Prisma.Decimal(0),
+        balanceAmount: totals.total,
+        // D52 — COMPLETED before payment, deliberately; UNPAID is the
+        // financial state. D178 changes when the TABLE frees, not this.
+        paymentStatus: 'UNPAID',
+        status: 'COMPLETED',
+        completedAt: new Date(),
+        // D58 — what kind of sale this was, on the document itself.
+        fulfilmentKind: FulfilmentKind.TABLE_SERVICE,
+        channel: OrderChannel.DINE_IN,
+        sourceRefKind: 'TABLE_SESSION',
+        sourceRefId: session.id,
+        servedByUserId: session.waiterUserId,
+      },
+      select: { id: true, total: true },
+    });
+    for (const line of projected) {
+      const { modifiers, ...data } = line;
+      const saleItem = await tx.saleItem.create({ data: { saleId: sale.id, ...data } });
+      if (modifiers.length > 0) {
+        await tx.saleItemModifier.createMany({
+          data: modifiers.map((m) => ({ tenantId, saleItemId: saleItem.id, ...m })),
+        });
+      }
+    }
+    return sale;
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Converters
+  // ─────────────────────────────────────────────────────────────
+  private sessionToView(
+    row: Prisma.TableSessionGetPayload<Record<string, never>>,
+  ): TableSessionView {
+    return {
+      id: row.id,
+      branchId: row.branchId,
+      tableId: row.tableId,
+      sessionNumber: row.sessionNumber,
+      status: row.status,
+      waiterUserId: row.waiterUserId,
+      guestCount: row.guestCount,
+      tabName: row.tabName,
+      openedAt: row.openedAt.toISOString(),
+      closedAt: row.closedAt?.toISOString() ?? null,
+      finalSaleId: row.finalSaleId,
+      version: row.version,
+    };
+  }
+
+  private orderToView(row: Prisma.RestaurantOrderGetPayload<Record<string, never>>): OrderView {
+    return {
+      id: row.id,
+      sessionId: row.sessionId,
+      branchId: row.branchId,
+      orderNumber: row.orderNumber,
+      channel: row.channel,
+      status: row.status,
+      version: row.version,
+    };
+  }
+
+  private roundToView(
+    row: Prisma.OrderRoundGetPayload<{ include: { items: { select: { id: true } } } }>,
+  ): RoundView {
+    return {
+      id: row.id,
+      orderId: row.orderId,
+      roundNumber: row.roundNumber,
+      status: row.status,
+      submittedAt: row.submittedAt?.toISOString() ?? null,
+      itemIds: row.items.map((i) => i.id),
+    };
+  }
+}
+
+/**
+ * D70 — refuse a session that belongs to a different waiter.
+ *
+ * `onlyWaiterUserId` is null for a caller holding TABLE_SESSION_VIEW_ALL, in
+ * which case nothing is refused. Otherwise the session must be theirs — and
+ * an UNCLAIMED session (waiterUserId null, e.g. the synthetic walk-in table
+ * behind counter and takeaway orders) is refused too: it is nobody's, and
+ * "nobody's" must not read as "everybody's".
+ *
+ * Raised as not-found rather than forbidden, deliberately: a 403 on a
+ * specific id confirms the session exists and that somebody else has it,
+ * which is exactly the fact a waiter is not entitled to.
+ */
+function assertOwnedBy(sessionWaiterUserId: string | null, onlyWaiterUserId: string | null): void {
+  if (onlyWaiterUserId === null) return;
+  if (sessionWaiterUserId !== onlyWaiterUserId) throw new SessionNotFoundError();
+}

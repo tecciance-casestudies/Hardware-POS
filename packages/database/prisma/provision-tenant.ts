@@ -9,6 +9,7 @@
  *   pnpm --filter @hardware-pos/database exec tsx prisma/provision-tenant.ts \
  *     --name "Colombawa Plantation Pvt Ltd" \
  *     --slug colombawa \
+ *     --business-type RESTAURANT \
  *     --user "Colombawa1:colombawa1@example.com:OWNER:TheirPassword123:9876" \
  *     --user "Colombawa2:colombawa2@example.com:CASHIER::1234"
  *
@@ -18,11 +19,33 @@
  * digits) feeds the in-POS approval prompts: any user whose role carries the
  * approve permission (owner, admin, salesperson, manager) can answer a
  * "manager PIN" request with their own PIN.
+ *
+ * `--business-type` (Slice 8.9) writes an explicit platform profile, which is what
+ * decides the tenant's navigation, its inventory authority and whether QuickBooks
+ * exists for it at all. Omitting it writes **no profile row**, exactly as this
+ * script did before — such a tenant resolves to the legacy Tile Shop / QuickBooks
+ * configuration, which stays the default so provisioning a retail company keeps
+ * behaving as it always has. A restaurant must pass it: there is no way to infer
+ * "this company serves food" from a name.
+ *
+ * The business type also decides which ROLES the tenant is seeded with, and a
+ * `--user` may only name one of them: a hardware (or no-profile, D57) tenant
+ * offers OWNER, SALESPERSON and CASHIER; a food-service one OWNER, WAITER,
+ * RESTAURANT_CASHIER and KITCHEN_STAFF; a hotel OWNER, WAITER and RECEPTIONIST.
+ * Every user is linked to their role ROW on creation (D108), so nobody
+ * provisioned here starts on the legacy enum fallback. The enum column is
+ * derived from the row the same way the platform console does it.
  */
 import { randomBytes } from 'node:crypto';
 
-import { PrismaClient, UserRole } from '@prisma/client';
+import { BusinessType, PrismaClient, UserRole } from '@prisma/client';
 import * as bcrypt from 'bcryptjs';
+
+import { baseUserRoleFor, roleTemplatesForBusinessType } from '@hardware-pos/shared';
+
+import { BUSINESS_PROFILE_PRESETS } from '../src/business-profile-presets';
+import { linkUsersToRoles, seedTenantRoles, syncPermissionCatalogue } from '../src/seed-roles';
+import { seedClothingPack } from '../src/seed-packs/clothing';
 
 const prisma = new PrismaClient();
 const SALT_ROUNDS = 10;
@@ -32,6 +55,13 @@ const SHOP_TIME_ZONE = 'Asia/Colombo';
 interface UserSpec {
   name: string;
   email: string;
+  /** The role ROW's key — a template key of the tenant's business type. */
+  roleKey: string;
+  /**
+   * The enum column underneath, derived by the shared `baseUserRoleFor` — the
+   * same function the platform console and the tenant-facing role assignment
+   * use: a built-in key is its own enum value, anything else is CASHIER.
+   */
   role: UserRole;
   password: string;
   generated: boolean;
@@ -43,10 +73,19 @@ function fail(message: string): never {
   process.exit(1);
 }
 
-function parseArgs(argv: string[]): { name: string; slug: string; branch: string; users: UserSpec[] } {
+function parseArgs(argv: string[]): {
+  name: string;
+  slug: string;
+  branch: string;
+  businessType: BusinessType | null;
+  withSamples: boolean;
+  users: UserSpec[];
+} {
   let name = '';
   let slug = '';
   let branch = 'Main Branch';
+  let businessType: BusinessType | null = null;
+  let withSamples = false;
   const users: UserSpec[] = [];
 
   for (let i = 0; i < argv.length; i++) {
@@ -56,18 +95,24 @@ function parseArgs(argv: string[]): { name: string; slug: string; branch: string
       if (v === undefined) fail(`Missing value after ${arg}`);
       return v;
     };
-    if (arg === '--name') name = next();
+    if (arg === '--with-samples') withSamples = true;
+    else if (arg === '--name') name = next();
     else if (arg === '--slug') slug = next();
     else if (arg === '--branch') branch = next();
-    else if (arg === '--user') {
+    else if (arg === '--business-type') {
+      const raw = next().toUpperCase();
+      if (!(raw in BusinessType)) {
+        fail(`Unknown business type "${raw}" — use one of ${Object.keys(BusinessType).join(', ')}`);
+      }
+      businessType = raw as BusinessType;
+    } else if (arg === '--user') {
       const raw = next();
-      const [userName, email, role, password, pin] = raw.split(':');
-      if (!userName || !email || !role) {
+      const [userName, email, roleKey, password, pin] = raw.split(':');
+      if (!userName || !email || !roleKey) {
         fail(`--user must be "Name:email:ROLE[:password[:pin]]" (got "${raw}")`);
       }
-      if (!(role in UserRole)) {
-        fail(`Unknown role "${role}" — use one of ${Object.keys(UserRole).join(', ')}`);
-      }
+      // Validated against the business type's templates once every argument
+      // is parsed — `--business-type` may follow `--user` on the command line.
       if (!email.includes('@')) fail(`"${email}" does not look like an email address`);
       if (pin && !/^\d{4,6}$/.test(pin)) {
         fail(`PIN for ${userName} must be 4–6 digits (got "${pin}")`);
@@ -75,7 +120,8 @@ function parseArgs(argv: string[]): { name: string; slug: string; branch: string
       users.push({
         name: userName,
         email: email.toLowerCase(),
-        role: role as UserRole,
+        roleKey: roleKey.toUpperCase(),
+        role: baseUserRoleFor(roleKey.toUpperCase()),
         password: password || randomBytes(9).toString('base64url'),
         generated: !password,
         pin: pin || null,
@@ -96,11 +142,23 @@ function parseArgs(argv: string[]): { name: string; slug: string; branch: string
   // PINs would be ambiguous.
   const pins = users.map((u) => u.pin).filter(Boolean);
   if (new Set(pins).size !== pins.length) fail('User PINs must be distinct');
-  return { name, slug, branch, users };
+  // D108 — a role the template does not offer would leave the user with no
+  // row to link to, resolving from the enum instead: a SALESPERSON in a
+  // restaurant would be an owner-equivalent the template says cannot exist.
+  const offered = roleTemplatesForBusinessType(businessType ?? 'HARDWARE').map((t) => t.key);
+  for (const user of users) {
+    if (!offered.includes(user.roleKey)) {
+      fail(
+        `Role "${user.roleKey}" for ${user.name} is not one the ${businessType ?? 'HARDWARE'} ` +
+          `template offers — use one of ${offered.join(', ')}`,
+      );
+    }
+  }
+  return { name, slug, branch, businessType, withSamples, users };
 }
 
 async function main(): Promise<void> {
-  const { name, slug, branch, users } = parseArgs(process.argv.slice(2));
+  const { name, slug, branch, businessType, withSamples, users } = parseArgs(process.argv.slice(2));
 
   // Fresh accounts only — never adopt or modify an existing company.
   const existingTenant = await prisma.tenant.findFirst({
@@ -117,6 +175,9 @@ async function main(): Promise<void> {
     if (clash) fail(`The email ${user.email} is already in use by another account`);
   }
 
+  let roleCount = 0;
+  let linkedCount = 0;
+  let pack: { categories: number; products: number; variants: number } | null = null;
   const tenant = await prisma.$transaction(async (tx) => {
     const t = await tx.tenant.create({ data: { name, slug } });
     // Write the shop timezone rather than leaning on the code default, so a new
@@ -132,6 +193,38 @@ async function main(): Promise<void> {
     await tx.register.create({
       data: { tenantId: t.id, branchId: b.id, name: 'Register 1', code: 'R1' },
     });
+    if (businessType) {
+      // No `TenantModule` rows: with a profile and no explicit per-module opinion
+      // the API resolves the defaults for the business type. Writing them here
+      // would freeze today's defaults into every tenant provisioned today.
+      await tx.tenantBusinessProfile.create({
+        data: { tenantId: t.id, businessType, ...BUSINESS_PROFILE_PRESETS[businessType] },
+      });
+    }
+    // Phase 1.5 (D36): every tenant is created with its own role rows. A tenant
+    // with none must fail closed once authorization reads them, so this is part of
+    // creating a tenant rather than a follow-up step someone can forget.
+    await syncPermissionCatalogue(tx);
+    roleCount = (await seedTenantRoles(tx, t.id, businessType ?? 'HARDWARE')).length;
+
+    // D120 (2.6) — the clothing pack, inside this transaction so a failure leaves
+    // no half-seeded tenant.
+    //
+    // Categories always; sample PRODUCTS only when asked. The reasoning is the
+    // same one three lines above about TenantModule rows: descriptor data lives
+    // in code and a correction reaches everyone, but seeded rows live in the
+    // tenant's database and are frozen. A category is cheap to be wrong about —
+    // rename or delete it. A starter product carries a variant chain, barcodes
+    // and stock rows that a real shop then has to clear out.
+    if (businessType === 'RETAIL') {
+      pack = await seedClothingPack(tx, t.id, b.id, { withSamples });
+    }
+
+    const roleIdByKey = new Map(
+      (await tx.role.findMany({ where: { tenantId: t.id }, select: { id: true, key: true } })).map(
+        (r) => [r.key as string, r.id] as const,
+      ),
+    );
     for (const user of users) {
       await tx.user.create({
         data: {
@@ -140,23 +233,53 @@ async function main(): Promise<void> {
           name: user.name,
           email: user.email,
           role: user.role,
+          // Linked to the row directly — validated above to exist — rather than
+          // through `linkUsersToRoles`, which can only match a key to an enum
+          // value and so could never link a waiter or a receptionist.
+          roleId: roleIdByKey.get(user.roleKey) ?? null,
           passwordHash: await bcrypt.hash(user.password, SALT_ROUNDS),
           pinHash: user.pin ? await bcrypt.hash(user.pin, SALT_ROUNDS) : null,
         },
       });
+      linkedCount += roleIdByKey.has(user.roleKey) ? 1 : 0;
     }
+    // Belt and braces for the built-ins; also what the backfill runs.
+    linkedCount += await linkUsersToRoles(tx, t.id);
     return t;
-  });
+  },
+  // The catalogue sync alone is sixty-odd upserts; Prisma's default
+  // five-second interactive-transaction budget is for a local database.
+  { timeout: 60_000, maxWait: 10_000 });
 
   console.log('\n✔ Company provisioned — no sample data, ready for first login.\n');
   console.log(`  Tenant   ${tenant.name}  (id: ${tenant.id}, slug: ${tenant.slug})`);
-  console.log(`  Branch   ${branch} (MAIN) · Register 1 (R1)\n`);
+  console.log(`  Branch   ${branch} (MAIN) · Register 1 (R1)`);
+  if (businessType) {
+    const preset = BUSINESS_PROFILE_PRESETS[businessType];
+    console.log(
+      `  Profile  ${businessType} · ${preset.inventoryMode} inventory · ${preset.accountingProvider} accounting\n`,
+    );
+  } else {
+    // Stated, not silent: the operator should know they provisioned a QuickBooks
+    // retail tenant by omission rather than by choice.
+    console.log('  Profile  none — resolves to the legacy HARDWARE / QuickBooks configuration (D57)\n');
+  }
   console.log('  Logins (email / password / PIN):');
   for (const user of users) {
     const note = user.generated ? '  ← generated, record it now' : '';
     const pin = user.pin ? ` / PIN ${user.pin}` : '';
-    console.log(`    ${user.role.padEnd(10)} ${user.email} / ${user.password}${pin}${note}`);
+    console.log(`    ${user.roleKey.padEnd(18)} ${user.email} / ${user.password}${pin}${note}`);
   }
+  console.log(`  Roles    ${roleCount} seeded · ${linkedCount} of ${users.length} users linked to their role row`);
+  if (pack) {
+    console.log(
+      `  Catalog  ${pack.categories} categories, ${pack.products} products, ${pack.variants} variants`,
+    );
+    if (pack.products === 0) {
+      console.log('           (pass --with-samples for starter products)');
+    }
+  }
+  console.log('');
   console.log('\n  Sign in at the web app with the email + password above.');
   console.log('  PINs answer the in-POS approval prompts (discounts, returns).');
 }

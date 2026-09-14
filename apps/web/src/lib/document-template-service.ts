@@ -66,6 +66,12 @@ export const DEFAULT_DOCUMENT_PROFILE: DocumentProfile = {
   showPageNumbers: true,
   defaultBillFormat: 'A4',
   signatureFields: true,
+  // D99 — see `thermal-bill-geometry.ts`. These defaults are the Xprinter
+  // XP-365B's, and every one of them is overridable per workspace.
+  billPaperWidthMm: 78,
+  billLeftInsetMm: 3,
+  billRightInsetMm: 5,
+  billFitToContent: true,
 };
 
 function readCache(): DocumentProfile | null {
@@ -120,7 +126,10 @@ export function saleMetaFromSession(
   },
 ): SaleDocumentMeta {
   return {
-    businessName: profile.companyName || 'Hardware POS',
+    // D54: never substitute the vendor's own brand onto a tenant's document.
+    // An unset company name renders empty, which is visibly wrong to whoever
+    // is about to print it — unlike a plausible-looking foreign brand.
+    businessName: profile.companyName || '',
     branchName: sale?.branch?.name ?? session.branchName,
     registerName: sale?.register?.name ?? session.registerName,
     cashierName: sale?.cashier?.name ?? session.user.name,

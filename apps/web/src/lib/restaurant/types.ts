@@ -1,0 +1,933 @@
+/**
+ * Restaurant API view types, mirrored from the NestJS controllers.
+ *
+ * These types are the wire contract — Prisma enums duplicate here rather than
+ * import from `@hardware-pos/database` because that package pulls in the
+ * Prisma client, which must not reach the browser bundle. Every union is a
+ * copy of what the backend service returns today; drift is caught by the
+ * response-shape assertions in the component tests.
+ */
+
+export type RestaurantTableStatus =
+  | 'AVAILABLE'
+  | 'SEATED'
+  | 'OCCUPIED'
+  | 'BILLING'
+  | 'CLEANING'
+  | 'BLOCKED'
+  // D49: physically absorbed into an open table; refuses its own sessions.
+  | 'RESERVED';
+
+/** D49. PHYSICAL is the floor plan; OPEN is an ad-hoc joined arrangement. */
+export type RestaurantTableKind = 'PHYSICAL' | 'OPEN';
+
+export type TableSessionStatus = 'OPEN' | 'BILLING' | 'CLOSED' | 'CANCELLED';
+
+export type RestaurantOrderStatus =
+  | 'DRAFT'
+  | 'SUBMITTED'
+  | 'PARTIAL'
+  | 'COMPLETED'
+  | 'CANCELLED';
+
+export type OrderRoundStatus =
+  | 'DRAFT'
+  | 'SUBMITTED'
+  | 'IN_PROGRESS'
+  | 'READY'
+  | 'DELIVERED'
+  | 'CANCELLED';
+
+export type RestaurantOrderItemStatus =
+  | 'PENDING'
+  | 'SENT'
+  | 'IN_PROGRESS'
+  | 'READY'
+  | 'DELIVERED'
+  | 'VOIDED';
+
+export type RestaurantOrderChannel = 'DINE_IN' | 'TAKEAWAY' | 'ONLINE';
+
+// D68 — PRINTED/REPRINTED/FAILED are retired: no code path produces them,
+// but pre-D68 rows still carry them and the board must render those.
+// D113 — IN_PROGRESS is the board's Preparing state (start → done).
+export type KitchenTicketStatus =
+  | 'QUEUED'
+  | 'PRINTED'
+  | 'REPRINTED'
+  | 'FAILED'
+  | 'IN_PROGRESS'
+  | 'COMPLETED';
+
+export type KitchenPrintAttemptStatus = 'PENDING' | 'SUCCEEDED' | 'FAILED';
+
+export type KitchenPrinterKind =
+  | 'ESC_POS_NETWORK'
+  | 'ESC_POS_USB'
+  | 'A4_NETWORK'
+  | 'MOCK';
+
+export type TakeawayOrderStatus =
+  | 'PLACED'
+  | 'IN_KITCHEN'
+  | 'READY'
+  | 'HANDED_OVER'
+  | 'CANCELLED';
+
+export type DeliveryPlatformKind =
+  | 'MOCK'
+  | 'UBER_EATS'
+  | 'PICKME_FOOD'
+  | 'DOORDASH'
+  | 'OTHER';
+
+export type ExternalOrderStatus =
+  | 'PENDING'
+  | 'ACCEPTED'
+  | 'REJECTED'
+  | 'IN_KITCHEN'
+  | 'READY'
+  | 'DELIVERED'
+  | 'CANCELLED';
+
+export type PaymentMethod =
+  | 'CASH'
+  | 'CARD'
+  | 'BANK_TRANSFER'
+  | 'QR_PAYMENT'
+  | 'CHECK'
+  | 'STORE_CREDIT'
+  | 'OTHER';
+
+export type PaymentStatus = 'UNPAID' | 'PARTIAL' | 'PAID' | 'REFUNDED';
+
+// ── Restaurant config ──────────────────────────────────────────────────────
+/**
+ * D90 — the branch's opening hours. Times are minutes since LOCAL midnight;
+ * `closesAt` may exceed 1440 for a kitchen that shuts after midnight.
+ */
+export interface OpeningHoursDayView {
+  /** 0 = Sunday … 6 = Saturday, matching `Date.getDay()`. */
+  dayOfWeek: number;
+  isClosed: boolean;
+  opensAt: number;
+  closesAt: number;
+}
+
+export interface OpeningHoursOverrideView {
+  /** Local calendar date, `YYYY-MM-DD`. */
+  date: string;
+  isClosed: boolean;
+  opensAt: number;
+  closesAt: number;
+  note: string | null;
+}
+
+export interface OpeningHoursView {
+  branchId: string;
+  /** Only the weekdays the owner configured; the rest use `defaults`. */
+  weekly: OpeningHoursDayView[];
+  overrides: OpeningHoursOverrideView[];
+  /** What an unconfigured weekday resolves to, as stated by the server. */
+  defaults: { opensAt: number; closesAt: number };
+}
+
+export interface RestaurantBranchConfigView {
+  branchId: string;
+  serviceChargePercent: string;
+  /** D84 — which channels levy it. DINE_IN by default. */
+  serviceChargeChannels: string[];
+  /** D84 — whether the charge sits inside the taxable base. */
+  serviceChargeTaxable: boolean;
+  /** D84 — flat per-order packaging charge for takeaway/online. */
+  packagingChargeAmount: string;
+  takeawayEnabled: boolean;
+  dineInEnabled: boolean;
+  defaultTicketTargetMinutes: number | null;
+  /** D181 — auto-printing, per branch. */
+  autoPrintKot: boolean;
+  autoPrintBill: boolean;
+  billCopies: number;
+  defaultReceiptPrinterId: string | null;
+  defaultKitchenPrinterId: string | null;
+  version: number;
+  updatedAt: string;
+}
+
+// ── Kitchen stations ───────────────────────────────────────────────────────
+export interface KitchenStationView {
+  id: string;
+  branchId: string;
+  code: string;
+  name: string;
+  category: string;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+// ── Menu ───────────────────────────────────────────────────────────────────
+export interface MenuView {
+  id: string;
+  branchId: string;
+  name: string;
+  description: string | null;
+  isActive: boolean;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SectionView {
+  id: string;
+  menuId: string;
+  name: string;
+  description: string | null;
+  position: number;
+  isActive: boolean;
+}
+
+export type MenuItemType = 'FOOD' | 'BEVERAGE' | 'DESSERT';
+
+/** Restaurant Menu wizard dietary chip vocabulary. Kept as a string constant
+ * (not a TS enum) so tenants can extend at runtime — server stores strings. */
+export const MENU_DIETARY_TAGS = ['Veg', 'Non-Veg', 'Egg', 'Spicy', 'Gluten-Free'] as const;
+export type MenuDietaryTag = (typeof MENU_DIETARY_TAGS)[number];
+
+/**
+ * D46 — a POS Catalogue variant, projected onto the MenuItemView shape so
+ * the runtime picker + Customise dialog can consume both source paths
+ * through one type. `unitPrice` is the ABSOLUTE variant price (not a
+ * delta on top of `basePrice`); the Customise dialog must not stack the
+ * two — see the D46 anti-pattern guard in `customise-dialog.render.test.tsx`.
+ */
+export interface MenuItemVariantView {
+  id: string;
+  sku: string;
+  name: string;
+  unitPrice: number;
+  isDefault: boolean;
+  isActive: boolean;
+}
+
+export interface MenuItemView {
+  id: string;
+  sectionId: string;
+  name: string;
+  description: string | null;
+  basePrice: string;
+  productId: string | null;
+  isActive: boolean;
+  position: number;
+  modifierGroupIds: string[];
+  stationIds: string[];
+  channelPrices: { channel: string; price: string }[];
+  availability: { dayOfWeek: string; startTime: string; endTime: string }[];
+  createdAt: string;
+  updatedAt: string;
+  // Presentation fields (Restaurant Menu wizard). Null on legacy rows.
+  itemType: MenuItemType | null;
+  prepMinutes: number | null;
+  dietaryTags: string[];
+  imageUrl: string | null;
+  /**
+   * D46 — discriminator for the source authority of this view row.
+   *   `'PRODUCT'`   — shaped by the POS Catalogue adapter from a Product
+   *                   (D45); `id` is the Product id and `variants` may
+   *                   carry active ProductVariants.
+   *   `'MENU_ITEM'` — legacy admin-menu row; `id` is the MenuItem id.
+   * Omitted defaults to `'MENU_ITEM'` so consumers that do not care about
+   * the distinction (existing selectors, wizard, etc.) keep working
+   * unchanged. `productId` above is a linked-Product FK on the legacy path
+   * and cannot be used as a source discriminator — a MenuItem can also
+   * link to a Product for inventory purposes.
+   */
+  catalogueSource?: 'PRODUCT' | 'MENU_ITEM';
+  /**
+   * D46 — active variants when the row was shaped from a Product with
+   * variations. Undefined or empty on legacy MenuItems and on Products
+   * without variations. The runtime Customise dialog renders these as
+   * single-select radios above the modifier groups when non-empty.
+   */
+  variants?: MenuItemVariantView[];
+  /**
+   * D101 — the sellable read model's stock verdict, carried through the
+   * catalogue adapter: counts speak for tracked items (IN_STOCK/LOW/OUT),
+   * the 86 switch for untracked ones (UNTRACKED/SOLD_OUT). Undefined on
+   * legacy MenuItem rows and for tenants that track nothing.
+   */
+  stockState?: 'IN_STOCK' | 'LOW' | 'OUT' | 'UNTRACKED' | 'SOLD_OUT';
+}
+
+export interface ModifierOptionView {
+  id: string;
+  name: string;
+  priceDelta: string;
+  position: number;
+  isActive: boolean;
+}
+
+export interface ModifierGroupView {
+  id: string;
+  name: string;
+  selection: 'SINGLE' | 'MULTIPLE';
+  minSelections: number;
+  maxSelections: number;
+  isActive: boolean;
+  options: ModifierOptionView[];
+  /** Wizard marker — 'SIZE' for variations, null for a plain modifier group. */
+  role: string | null;
+}
+
+// ── Dining ─────────────────────────────────────────────────────────────────
+export interface DiningAreaView {
+  id: string;
+  branchId: string;
+  name: string;
+  description: string | null;
+  position: number;
+  isActive: boolean;
+  /**
+   * The user who created this area. Restaurant Pilot Change 1: only that user
+   * may edit or archive the row; the tables UI hides the "•••" menu on cards
+   * whose creator is not the current session. Null on legacy rows the
+   * additive migration could not attribute (see the migration comment).
+   */
+  createdByUserId: string | null;
+}
+
+// D47 — table reservations. Timeslots are half-open [startAt, endAt);
+// instants travel as ISO strings. Contact fields are booking-time snapshots,
+// so a reservation renders even when its Customer row is gone.
+export type ReservationStatus = 'BOOKED' | 'SEATED' | 'COMPLETED' | 'CANCELLED' | 'NO_SHOW';
+
+export interface ReservationView {
+  id: string;
+  branchId: string;
+  tableId: string;
+  reservationNumber: string;
+  customerId: string | null;
+  customerName: string;
+  customerPhone: string | null;
+  partySize: number;
+  startAt: string;
+  endAt: string;
+  status: ReservationStatus;
+  notes: string | null;
+  createdByUserId: string | null;
+  createdAt: string;
+}
+
+export interface RestaurantTableView {
+  id: string;
+  /** Null only for kind=OPEN — ad-hoc tables belong to no floor area (D49). */
+  areaId: string | null;
+  branchId: string;
+  kind: RestaurantTableKind;
+  code: string;
+  label: string | null;
+  /** Null only for kind=OPEN with no recorded seats (D49). */
+  capacity: number | null;
+  positionX: number | null;
+  positionY: number | null;
+  status: RestaurantTableStatus;
+  isActive: boolean;
+  /** See DiningAreaView.createdByUserId — same rule, same reason. */
+  createdByUserId: string | null;
+}
+
+/**
+ * D50 — what a close/dissolve did to an arrangement's physical tables.
+ * `stillReserved` is what the billing reminder asks the operator to check.
+ */
+export interface OpenTableReleaseSummary {
+  released: Array<{ id: string; code: string; label: string | null }>;
+  stillReserved: Array<{
+    id: string;
+    code: string;
+    label: string | null;
+    heldBy: Array<{ id: string; code: string; label: string | null }>;
+  }>;
+}
+
+/** D49 — an open table plus the physical tables it absorbed. */
+export interface OpenTableView extends RestaurantTableView {
+  members: Array<{
+    id: string;
+    code: string;
+    label: string | null;
+    areaId: string | null;
+    status: RestaurantTableStatus;
+  }>;
+  /**
+   * D104 — how full the arrangement is, counted by the SERVER.
+   *
+   * Never recomputed here: D70 scopes the open-session list to the waiter's own
+   * tabs, so a client adding up what it can see would miss a colleague's party
+   * and offer seats that are not there. `capacity` minus `seatsTaken` is what
+   * is free; a null capacity means the operator recorded none (D49), and then
+   * nothing is enforced and nothing is displayed.
+   */
+  liveTabs: number;
+  seatsTaken: number;
+}
+
+/** D104 — seats left on an arrangement, or null when none were ever recorded. */
+export function seatsFree(t: OpenTableView): number | null {
+  return t.capacity == null ? null : Math.max(0, t.capacity - t.seatsTaken);
+}
+
+// ── Table sessions & orders ─────────────────────────────────────────────────
+export interface TableSessionView {
+  id: string;
+  branchId: string;
+  tableId: string;
+  sessionNumber: string;
+  status: TableSessionStatus;
+  waiterUserId: string | null;
+  guestCount: number | null;
+  /**
+   * D104 — this tab's own name, when an arrangement carries several parties.
+   * Null on a physical table's session and on a lone tab, where the table's
+   * own name is already unambiguous.
+   */
+  tabName: string | null;
+  openedAt: string;
+  closedAt: string | null;
+  finalSaleId: string | null;
+  version: number;
+}
+
+/**
+ * One row of `GET /open-sessions` — the session plus the floor plan's
+ * extras. `readyTicketIds` (D112) are the session's bumped kitchen tickets:
+ * the waiter-safe "food ready" signal (no KOT_VIEW involved; the route is
+ * D70-scoped to the sessions the caller may see).
+ */
+/**
+ * D159/D159a — somebody this branch can be handed a table, and how many they
+ * already hold. The count is what makes a long list decidable: the supervisor
+ * wants the colleague who is here and has room, and with no clock-in in this
+ * schema "here" reads as "already serving something".
+ */
+export interface AssignableWaiter {
+  id: string;
+  name: string;
+  openTableCount: number;
+}
+
+export interface OpenSessionView extends TableSessionView {
+  activeOrderId: string | null;
+  readyTicketIds: string[];
+  /**
+   * D156 — whose table this is, in words. The floor and the POS picker open on
+   * "my tables" and offer "all", so a session that is not yours has to be
+   * attributable, and the users endpoint a name would come from is
+   * `USER_MANAGE`-gated. Null when the session records no waiter, or when the
+   * id no longer resolves — never a placeholder.
+   */
+  waiterName: string | null;
+}
+
+export interface OrderView {
+  id: string;
+  sessionId: string;
+  branchId: string;
+  orderNumber: string;
+  channel: RestaurantOrderChannel;
+  status: RestaurantOrderStatus;
+  version: number;
+}
+
+export interface RoundView {
+  id: string;
+  orderId: string;
+  roundNumber: number;
+  status: OrderRoundStatus;
+  submittedAt: string | null;
+  itemIds: string[];
+}
+
+/**
+ * Full item as returned by `GET /table-sessions/:id/detail`. Includes the
+ * snapshot fields the order-entry screen needs to render a running bill:
+ * name, unit price, modifier total, quantity, item status, and the frozen
+ * modifier labels.
+ */
+export interface SessionDetailItem {
+  id: string;
+  menuItemId: string;
+  menuItemName: string;
+  /** D71 — "Medium" vs "Large" is what a guest is being charged for. */
+  variantName: string | null;
+  unitPrice: string;
+  modifierTotal: string;
+  quantity: string;
+  specialInstructions: string | null;
+  status: RestaurantOrderItemStatus;
+  modifiers: { optionName: string; groupName: string; priceDelta: string }[];
+}
+
+export interface SessionDetail {
+  session: TableSessionView;
+  orders: {
+    order: OrderView;
+    rounds: {
+      round: RoundView;
+      items: SessionDetailItem[];
+    }[];
+  }[];
+}
+
+/** D71 — the running bill for a session that has not closed yet. */
+export interface SessionBillPreview {
+  sessionId: string;
+  items: {
+    orderItemId: string;
+    name: string;
+    variantName: string | null;
+    unitPrice: string;
+    quantity: string;
+    /** NET of any promotion on this line, so the lines sum to the total. */
+    lineTotal: string;
+    /** What a promotion took off this line. "0.00" when none did. */
+    promotionDiscount: string;
+    promotionName: string | null;
+    roundNumber: number | null;
+    /** D72 — "no onions". Shown at the table and printed on the bill. */
+    specialInstructions: string | null;
+  }[];
+  subtotal: string;
+  /** Line-level and cart-level promotions as one figure, for the footer. */
+  promotionDiscount: string;
+  /** Named only when exactly one promotion applied. */
+  promotionName: string | null;
+  serviceChargeAmount: string;
+  packagingCharge: string;
+  taxAmount: string;
+  total: string;
+}
+
+/** D83 — every item on the order behind a ticket, for the kitchen's Details view. */
+export interface KitchenOrderView {
+  ticketId: string;
+  ticketNumber: string;
+  orderNumber: string | null;
+  placeLabel: string | null;
+  waiterName: string | null;
+  placedAt: string;
+  items: {
+    id: string;
+    name: string;
+    variantName: string | null;
+    quantity: string;
+    modifierNames: string[];
+    specialInstructions: string | null;
+    roundNumber: number | null;
+    /*
+     * D152 — the station that cooks this dish, back on the item line. Nullable
+     * because the join can find nothing: a dish whose menu item carries no
+     * station link cooks at Main (D152), but that fallback is the TICKET's
+     * routing, not a link on the item, so the item itself still answers null.
+     */
+    stationName: string | null;
+  }[];
+}
+
+// ── Kitchen tickets ─────────────────────────────────────────────────────────
+export interface KitchenTicketView {
+  id: string;
+  ticketNumber: string;
+  branchId: string;
+  roundId: string;
+  /*
+   * D152 — a round is split per station again, so every ticket cut from now on
+   * names the one station that cooks it; an item whose menu item carries no
+   * station link routes to the branch's Main station rather than being dropped,
+   * which is what D147 removed the split to avoid.
+   *
+   * Both stay NULLABLE, and the screens tolerate null rather than assuming it
+   * away: the column was never made required (no migration, no backfill), so a
+   * ticket cut during the D147 window — one whole round, routed nowhere —
+   * carries neither. Those tickets are still on the board and in the history.
+   */
+  stationId: string | null;
+  stationName: string | null;
+  status: KitchenTicketStatus;
+  /** D68 — where the food is going. The board is the only delivery. */
+  orderNumber: string | null;
+  placeLabel: string | null;
+  roundNumber: number | null;
+  waiterName: string | null;
+  items: {
+    id: string;
+    menuItemName: string;
+    variantName: string | null;
+    quantity: string;
+    modifierNames: string[];
+    specialInstructions: string | null;
+  }[];
+  completedAt: string | null;
+  completedByName: string | null;
+  createdAt: string;
+}
+
+/**
+ * D142b — what each of the board's three lane chips says.
+ *
+ * The board fetches one lane at a time, so it can only count the lane it is
+ * looking at; these come from the server so the other two chips have a number
+ * too, counted over the same rows the lists return.
+ */
+export interface KitchenLaneCounts {
+  toMake: number;
+  preparing: number;
+  doneToday: number;
+}
+
+/**
+ * D142 — one page of the kitchen's history. The standard envelope every other
+ * list in the product returns, over the same ticket view the board renders:
+ * the history is the board's own rows read back later, not a second shape of
+ * the truth.
+ */
+export interface KitchenHistoryPage {
+  items: KitchenTicketView[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
+/** D181 — KITCHEN devices are station-routed; CASHIER devices print bills. */
+export type PrinterRole = 'KITCHEN' | 'CASHIER';
+
+export interface KitchenPrinterView {
+  id: string;
+  branchId: string;
+  code: string;
+  name: string;
+  kind: KitchenPrinterKind;
+  address: string;
+  isActive: boolean;
+  role: PrinterRole;
+  /** Characters per line: 48 = 80 mm paper, 32 = 58 mm. */
+  columns: number;
+  /** Stations this printer serves. Empty on a CASHIER printer. */
+  stationIds: string[];
+}
+
+// ── Printing (D181) ─────────────────────────────────────────────────────────
+export interface PrintAgentView {
+  id: string;
+  name: string;
+  isActive: boolean;
+  lastSeenAt: string | null;
+  version: string | null;
+  createdAt: string;
+  /** Checked in within the freshness window — the branch prints through it. */
+  online: boolean;
+}
+
+export interface PrintQueueStatus {
+  pendingKitchenAttempts: number;
+  failedKitchenTickets: number;
+  pendingBillJobs: number;
+  failedBillJobs: {
+    id: string;
+    saleId: string | null;
+    error: string | null;
+    attempts: number;
+    at: string;
+  }[];
+}
+
+export interface PrintJobStatusView {
+  id: string;
+  type: string;
+  status: 'PENDING' | 'PRINTED' | 'FAILED';
+  attempts: number;
+  error: string | null;
+  printedAt: string | null;
+  updatedAt: string;
+}
+
+export interface TestPrintResult {
+  ok: boolean;
+  error?: string;
+  /** Delivered, but the device did not answer as an ESC/POS printer. */
+  warning?: string;
+  /** Present when the branch is agent-served: poll `printing.job(jobId)`. */
+  queued?: boolean;
+  jobId?: string;
+}
+
+// ── Takeaway ────────────────────────────────────────────────────────────────
+export interface TakeawayView {
+  id: string;
+  orderId: string;
+  orderNumber: string;
+  status: TakeawayOrderStatus;
+  customerName: string | null;
+  customerPhone: string | null;
+  pickupAt: string | null;
+  handoverAt: string | null;
+  notes: string | null;
+  createdAt: string;
+  /**
+   * Populated once the underlying session has been closed on `HANDED_OVER`.
+   * Null before handover. The counter POS reads this to call
+   * `/bills/:saleId/payments` without a second round-trip. Pilot Change 3.
+   */
+  finalSaleId: string | null;
+}
+
+// ── Billing ────────────────────────────────────────────────────────────────
+/** D51 — one orderable line on the bill, and how much of it is spoken for. */
+export interface BillLineItem {
+  orderItemId: string;
+  name: string;
+  variantName: string | null;
+  /** Unit price including snapshotted modifier deltas. */
+  unitPrice: string;
+  quantity: string;
+  lineTotal: string;
+  assignedQuantity: string;
+  /** D72 — "no onions". Printed under the line it belongs to. */
+  specialInstructions: string | null;
+}
+
+export interface BillView {
+  saleId: string;
+  saleNumber: string;
+  subtotal: string;
+  /** D72 — discount taken off the bill; printed whenever it is non-zero. */
+  totalDiscount: string;
+  serviceChargeAmount: string;
+  packagingCharge: string;
+  /** D72 — the branch's tax. */
+  taxAmount: string;
+  total: string;
+  paidAmount: string;
+  balanceAmount: string;
+  paymentStatus: PaymentStatus;
+  /** D72 — receipt header. */
+  servedByName: string | null;
+  placeLabel: string | null;
+  closedAt: string;
+  /** D51 — the lines behind the totals. */
+  items: BillLineItem[];
+  splits: {
+    id: string;
+    label: string | null;
+    share: string;
+    paidAmount: string;
+    /** D51 — lines this split covers; empty for an amount-only split. */
+    items: { orderItemId: string; name: string; quantity: string; lineTotal: string }[];
+  }[];
+  payments: {
+    id: string;
+    amount: string;
+    method: PaymentMethod;
+    reference: string | null;
+  }[];
+}
+
+// ── Orders (unified read-model, Pilot Change 2 Slice D) ────────────────────
+export type UnifiedOrderStatus =
+  | 'DRAFT'
+  | 'PENDING'
+  | 'CONFIRMED'
+  | 'IN_PROGRESS'
+  | 'READY'
+  /** D178 — a dine-in bill at the till, not yet paid. */
+  | 'AWAITING_PAYMENT'
+  | 'HANDED_OVER'
+  | 'COMPLETED'
+  | 'CANCELLED';
+
+export type UnifiedChannel = 'DINE_IN' | 'TAKEAWAY' | 'THIRD_PARTY';
+
+export type UnifiedSource =
+  | 'POS'
+  | 'WALK_IN'
+  | 'PHONE_ORDER'
+  | 'UBER_EATS'
+  | 'PICKME_FOOD'
+  | 'DOORDASH'
+  | 'MOCK'
+  | 'OTHER';
+
+export interface UnifiedOrderView {
+  id: string;
+  channel: UnifiedChannel;
+  source: UnifiedSource;
+  orderNumber: string;
+  unifiedStatus: UnifiedOrderStatus;
+  paymentStatus: 'UNPAID' | 'PARTIAL' | 'PAID' | 'REFUNDED' | null;
+  customerName: string | null;
+  customerPhone: string | null;
+  contextLabel: string | null;
+  pickupAt: string | null;
+  createdAt: string;
+  total: string | null;
+  /** D83 — the settled Sale, for viewing and reprinting the bill in place. */
+  saleId: string | null;
+  /**
+   * D178 — the table session behind a dine-in row, null otherwise. What
+   * "Open in POS" and "Proceed to pay" address from the queue.
+   */
+  sessionId: string | null;
+  itemCount: number;
+  itemPreview: { name: string; qty: number }[];
+  /**
+   * D178a — each round and where the kitchen has it. The card lists these
+   * so a two-round table reads "1st send · Ready / 2nd send · Preparing"
+   * rather than a bare "Preparing". Empty for a third-party row.
+   */
+  rounds: { roundNumber: number; status: OrderRoundStatus; items: { name: string; qty: number }[] }[];
+  /**
+   * D157 — whose order this is: the table's waiter for dine-in, the person who
+   * keyed it for takeaway, null for a third-party row (nobody on the floor
+   * took it). What the queue's Mine/All filter is built on, and what names a
+   * row that is not yours.
+   */
+  staffUserId: string | null;
+  staffName: string | null;
+}
+
+/** One priced line on the order detail — submit-time snapshots, never live menu prices. */
+export interface UnifiedOrderDetailItem {
+  name: string;
+  variantName: string | null;
+  quantity: string;
+  unitPrice: string;
+  modifierTotal: string;
+  /** (unitPrice + modifierTotal) × quantity, computed server-side. */
+  lineTotal: string;
+  specialInstructions: string | null;
+  modifiers: { optionName: string; groupName: string; priceDelta: string }[];
+}
+
+/**
+ * The full record behind one queue row, fetched when the drawer opens —
+ * deliberately not part of the polled list payload. `deliveryAddress` is the
+ * `[Delivery]` notes workaround already parsed apart server-side; `timeline`
+ * differs in depth per channel (takeaway records only its handover instant).
+ */
+export interface UnifiedOrderDetail extends UnifiedOrderView {
+  deliveryAddress: string | null;
+  notes: string | null;
+  items: UnifiedOrderDetailItem[];
+  /** Settled-Sale breakdown; null while there is no Sale (open order, 3rd-party). */
+  financials: {
+    subtotal: string;
+    totalDiscount: string;
+    serviceChargeAmount: string;
+    packagingCharge: string;
+    taxAmount: string;
+    total: string;
+    paidAmount: string;
+    balanceAmount: string;
+  } | null;
+  payments: { method: PaymentMethod; amount: string; reference: string | null; at: string }[];
+  timeline: { at: string; status: UnifiedOrderStatus }[];
+  /**
+   * D116 — the takeaway profile behind this row (null for dine-in and
+   * 3rd-party). The queue's Cancel action drives the existing takeaway
+   * status machine, which is addressed by this id.
+   */
+  takeawayProfileId: string | null;
+}
+
+// ── Reports ─────────────────────────────────────────────────────────────────
+export interface SalesSummaryView {
+  branchId: string;
+  from: string;
+  to: string;
+  sessionsClosed: number;
+  ordersServed: number;
+  itemsSold: string;
+  netRevenue: string;
+  serviceChargeCollected: string;
+  paymentsCollected: string;
+  bySaleStatus: Record<string, number>;
+}
+
+export interface TopMenuItemView {
+  menuItemId: string;
+  menuItemName: string;
+  quantitySold: string;
+  revenue: string;
+}
+
+export interface WaiterPerformanceRow {
+  userId: string;
+  sessionsHandled: number;
+  roundsSubmitted: number;
+  totalRevenue: string;
+}
+
+export interface PaymentBreakdownRow {
+  method: string;
+  count: number;
+  amount: string;
+}
+
+export interface VoidReportRow {
+  itemId: string;
+  menuItemName: string;
+  quantity: string;
+  reason: string;
+  voidedAt: string;
+  voidedByUserId: string | null;
+}
+
+export interface ChannelBreakdownRow {
+  channel: RestaurantOrderChannel;
+  orders: number;
+}
+
+// ── Delivery hub ────────────────────────────────────────────────────────────
+export interface ExternalOrderView {
+  id: string;
+  externalOrderRef: string;
+  platformKind: DeliveryPlatformKind;
+  status: ExternalOrderStatus;
+  externalTotal: string | null;
+  restaurantOrderId: string | null;
+  receivedAt: string;
+}
+
+// ── Order-item input (used by round submit + takeaway create) ───────────────
+/** Modifier option reference on a submitted round item. */
+export interface OrderItemModifierInput {
+  modifierOptionId: string;
+}
+
+/**
+ * D46 — the round-submission wire shape is now a discriminated union so
+ * PRODUCT-sourced items (POS Catalogue) can be sent alongside the legacy
+ * MENU_ITEM path without either branch permitting the other's fields.
+ *
+ * Historical clients that omit `sourceKind` are still accepted by the
+ * backend (DTO defaults to `MENU_ITEM`) so the `'MENU_ITEM'` branch
+ * treats the discriminator as optional to keep every existing call site
+ * — takeaway.create in this workspace, order-entry.tsx in dine-in —
+ * compiling verbatim without a discriminator field.
+ */
+export type OrderItemInput =
+  | {
+      sourceKind?: 'MENU_ITEM';
+      menuItemId: string;
+      quantity: number;
+      specialInstructions?: string;
+      modifiers?: OrderItemModifierInput[];
+    }
+  | {
+      sourceKind: 'PRODUCT';
+      productId: string;
+      productVariantId?: string;
+      quantity: number;
+      specialInstructions?: string;
+      modifiers?: OrderItemModifierInput[];
+    };

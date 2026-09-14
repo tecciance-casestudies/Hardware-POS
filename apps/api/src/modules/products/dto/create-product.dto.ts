@@ -1,9 +1,14 @@
+import { QuantityType } from '@hardware-pos/database';
 import {
+  IsArray,
   IsBoolean,
   IsDateString,
+  IsEnum,
   IsIn,
+  IsInt,
   IsNotEmpty,
   IsNumber,
+  IsObject,
   IsOptional,
   IsString,
   MaxLength,
@@ -13,6 +18,15 @@ import {
 /** QuickBooks item types (mirrors the QBO Products & Services template). */
 export const PRODUCT_TYPES = ['Inventory', 'NonInventory', 'Service'] as const;
 export type ProductType = (typeof PRODUCT_TYPES)[number];
+
+/**
+ * D45 — Restaurant food-type segmentation. Reuses the D41 `MenuItemType`
+ * vocabulary so the wizard, the POS Catalogue endpoint and the historical
+ * Restaurant Menu wizard share ONE vocabulary and route through the same
+ * category chips.
+ */
+export const PRODUCT_FOOD_TYPES = ['FOOD', 'BEVERAGE', 'DESSERT'] as const;
+export type ProductFoodType = (typeof PRODUCT_FOOD_TYPES)[number];
 
 /**
  * Mirrors the QuickBooks Products & Services fields: name, category, item
@@ -47,6 +61,40 @@ export class CreateProductDto {
   @IsString()
   @IsOptional()
   subcategoryId?: string;
+
+  /**
+   * D133 (`8.9`) — the brand this product carries.
+   *
+   * Optional forever. Most hardware and grocery products have no brand
+   * worth recording, and requiring one would make every existing product
+   * un-editable until somebody invented a brand for it.
+   */
+  @IsString()
+  @IsOptional()
+  brandId?: string;
+
+  /**
+   * D134 (`6.1`) — sold by the piece, or by weight/measure.
+   *
+   * Omitted means `WHOLE`, which is what every product was before this
+   * existed. A client that has never heard of measured goods keeps working.
+   */
+  @IsEnum(QuantityType)
+  @IsOptional()
+  quantityType?: QuantityType;
+
+  /**
+   * D134b — what the quantity is measured in: `kg`, `g`, `L`.
+   *
+   * **Required when `quantityType` is `DECIMAL`** — enforced in
+   * `ProductsService` against the RESULTING state, not here, because the
+   * rule is conditional on another field and a DTO cannot see the stored row
+   * (D134c).
+   */
+  @IsString()
+  @IsOptional()
+  @MaxLength(16)
+  unitOfMeasure?: string;
 
   /** Sales price/rate. */
   @IsNumber()
@@ -83,4 +131,72 @@ export class CreateProductDto {
   @IsBoolean()
   @IsOptional()
   isActive?: boolean;
+
+  /**
+   * D122 (3.13) — whether this product attracts tax.
+   *
+   * Optional on the wire, and ABSENT MEANS TAXABLE. The service defaults it to
+   * true, matching the column default and for the same reason: there is no
+   * per-product exemption in any tenant's history, so every product already is
+   * taxable. A client that omits the field must not silently zero-rate a
+   * product.
+   */
+  @IsBoolean()
+  @IsOptional()
+  taxable?: boolean;
+
+  /**
+   * POS-side product photo, previously uploaded via `POST /products/image` for
+   * the Add Product wizard (D44). Kept out of the QuickBooks payload — this is
+   * a POS presentation asset, not a QBO field.
+   */
+  @IsString()
+  @IsOptional()
+  @MaxLength(2048)
+  imageUrl?: string;
+
+  /**
+   * D45 — Restaurant Product wizard fields. All optional so Retail flows keep
+   * working unchanged; the schema stores them as nullable / defaulted so Tile
+   * Shop rows without a backfill remain valid. See `Product` in schema.prisma
+   * for the storage decisions.
+   */
+
+  /** Kitchen prep time in minutes (KDS ETA hint). */
+  @IsInt()
+  @Min(0)
+  @IsOptional()
+  prepMinutes?: number;
+
+  /** Free-form dietary markers (`vegan`, `gluten-free`, `contains-nuts`). */
+  @IsArray()
+  @IsString({ each: true })
+  @IsOptional()
+  dietaryTags?: string[];
+
+  /** FOOD / BEVERAGE / DESSERT segmentation used by the POS Catalogue. */
+  @IsIn(PRODUCT_FOOD_TYPES)
+  @IsOptional()
+  foodType?: ProductFoodType;
+
+  /**
+   * D101 — the wizard's Track-stock answer, consulted ONLY when `foodType`
+   * is set: a food-typed item with `trackStock: true` is a packaged good the
+   * branch counts (STOCK_ITEM — bottled water); false or absent means a
+   * prepared item (COMPOSED_ITEM). Without a foodType the D65 rule stands
+   * and this field is ignored.
+   */
+  @IsBoolean()
+  @IsOptional()
+  trackStock?: boolean;
+
+  /**
+   * D64 — domain attributes, validated against the tenant descriptor's
+   * `catalogue.attributeSchema` by `ProductAttributesService` (the decorator
+   * only enforces the container shape; keys and value types are the domain
+   * schema's business, not class-validator's).
+   */
+  @IsObject()
+  @IsOptional()
+  attributes?: Record<string, unknown>;
 }

@@ -16,6 +16,13 @@ function auth(session: Session): { token: string; tenantId: string } {
 
 export type QboReturnDocType = 'REFUND_RECEIPT' | 'CREDIT_MEMO';
 
+/**
+ * The customer-facing return document, decided from LOCAL financial facts by the
+ * server (Slice 6B). Independent of {@link QboReturnDocType}, which is external
+ * accounting metadata and is `null` for a tenant with no accounting provider.
+ */
+export type CustomerReturnDocumentKind = 'REFUND_RECEIPT' | 'CREDIT_NOTE';
+
 // ── sale-scoped reads ────────────────────────────────────────────────────────
 
 export interface ReturnEligibility {
@@ -41,6 +48,14 @@ export interface ReturnableItem {
   purchasedQuantity: number;
   previouslyReturnedQuantity: number;
   availableReturnQuantity: number;
+  /**
+   * D134d (`6.6`) — the unit this line was SOLD in, so the returns screen can
+   * accept 0.5 kg back and label what it is asking for.
+   *
+   * The SNAPSHOT, not the product's current unit: a refund is measured in what
+   * the customer was charged in.
+   */
+  unitOfMeasure: string | null;
   productDiscount: number;
   lineTotal: number;
 }
@@ -95,7 +110,8 @@ export interface ReturnPreview {
   approvalReasons: string[];
   suggestedRefundMethod: PaymentMethodCode | null;
   allowedRefundMethods: PaymentMethodCode[];
-  quickbooksDocumentType: QboReturnDocType;
+  quickbooksDocumentType: QboReturnDocType | null;
+  documentKind: CustomerReturnDocumentKind;
 }
 
 export function previewReturn(
@@ -161,6 +177,9 @@ export interface ReturnListItem {
   status: ReturnStatusCode;
   refundStatus: RefundStatusCode;
   syncStatus: SyncStatusCode;
+  /** `null` when the tenant has no accounting provider — no sync column applies. */
+  quickbooksDocumentType: QboReturnDocType | null;
+  documentKind: CustomerReturnDocumentKind;
 }
 
 export interface ReturnsPage {

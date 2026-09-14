@@ -3,6 +3,7 @@
 import { useRouter } from 'next/navigation';
 import {
   FileText,
+  History,
   LayoutDashboard,
   Link2,
   Package,
@@ -19,21 +20,62 @@ import {
 import * as React from 'react';
 
 import { useAuth } from '@/lib/auth';
+import { ALL_NAV_ITEMS, holdsAnyOf } from '@/lib/nav';
 import { Permission } from '@/lib/permissions';
 import { cn } from '@/lib/utils';
 
-interface Command {
+export interface Command {
   id: string;
   label: string;
   hint: string;
   href: string;
   icon: LucideIcon;
   keywords: string;
-  permission?: Permission;
+  /** D93 — an array means any-of, matching the nav gate. */
+  permission?: Permission | readonly Permission[];
 }
 
+/**
+ * D93 — the POS command's gate, taken FROM the navigation specs rather than
+ * retyped beside them.
+ *
+ * The palette hand-copies every destination's href and permission from the nav
+ * lists; that duplication predates this change, but a second hand-copy of a
+ * PERMISSION SET is the shape D56 already caught once — seven inline copies of
+ * a businessType predicate that each drifted. `/pos` appears in both domains
+ * (retail gated on SALE_CREATE, food service on the three capabilities the
+ * screen offers), and the command should show when EITHER is reachable, so the
+ * gate is their union.
+ *
+ * Fails CLOSED if the specs ever fail to load: an empty union refuses, which
+ * hides one command rather than offering every role a door to nothing. A test
+ * asserts it is non-empty so that never happens silently.
+ *
+ * Exported so that test asserts against THIS value rather than re-deriving it.
+ * The first draft of the test copied the derivation, and a mutation to the copy
+ * below went undetected — a mirror is not a tripwire (D30).
+ */
+export const POS_COMMAND_GATE: readonly Permission[] = [
+  ...new Set(
+    ALL_NAV_ITEMS.filter((item) => item.href === '/pos').flatMap((item) =>
+      item.permission === undefined
+        ? []
+        : Array.isArray(item.permission)
+          ? [...(item.permission as readonly Permission[])]
+          : [item.permission as Permission],
+    ),
+  ),
+];
+
 const COMMANDS: Command[] = [
-  { id: 'new-sale', label: 'Start new sale', hint: 'POS', href: '/pos', icon: ShoppingCart, keywords: 'sell checkout cart pos register', permission: Permission.SALE_CREATE },
+  /*
+   * D93 — the same any-of gate as the POS rail entry, for the same reason: a
+   * restaurant till holds TAKEAWAY_CREATE and not SALE_CREATE, and Ctrl+K was
+   * hiding the only other way in. The retail wording is untouched (D16); it
+   * reads oddly in a food-service workspace, which is noted in D93 rather
+   * than fixed by editing a string the Tile Shop depends on.
+   */
+  { id: 'new-sale', label: 'Start new sale', hint: 'POS', href: '/pos', icon: ShoppingCart, keywords: 'sell checkout cart pos register order takeaway delivery', permission: POS_COMMAND_GATE },
   { id: 'find-sale', label: 'Find a sale', hint: 'Sales', href: '/sales', icon: ReceiptText, keywords: 'invoice receipt transaction history', permission: Permission.SALE_READ },
   { id: 'new-quote', label: 'Create quotation', hint: 'Quotations', href: '/quotations/new', icon: FileText, keywords: 'quote estimate proposal', permission: Permission.QUOTATION_CREATE },
   { id: 'find-quote', label: 'Find a quotation', hint: 'Quotations', href: '/quotations', icon: FileText, keywords: 'quote estimate pipeline', permission: Permission.QUOTATION_READ },
@@ -43,12 +85,33 @@ const COMMANDS: Command[] = [
   { id: 'find-customer', label: 'Find a customer', hint: 'Customers', href: '/customers', icon: Users, keywords: 'client contact buyer', permission: Permission.CUSTOMER_READ },
   { id: 'add-customer', label: 'Add a customer', hint: 'Customers', href: '/customers/new', icon: UserPlus, keywords: 'create client new customer', permission: Permission.CUSTOMER_MANAGE },
   { id: 'quickbooks', label: 'Open QuickBooks & sync log', hint: 'Integrations', href: '/quickbooks', icon: Link2, keywords: 'accounting sync integration qbo', permission: Permission.QUICKBOOKS_READ },
-  { id: 'dashboard', label: 'Go to dashboard', hint: 'Overview', href: '/dashboard', icon: LayoutDashboard, keywords: 'home overview metrics' },
+  /*
+   * D142 — the palette mirrors the rail, and the rail no longer offers the
+   * service dashboard to a role that may not see the floor. Same any-of set as
+   * the nav entry: leaving this ungated would have handed kitchen staff the one
+   * door Ctrl+K still opened onto the whole restaurant.
+   */
+  { id: 'dashboard', label: 'Go to dashboard', hint: 'Overview', href: '/dashboard', icon: LayoutDashboard, keywords: 'home overview metrics', permission: [Permission.TABLE_VIEW, Permission.SALE_READ, Permission.REPORT_READ] },
+  { id: 'kitchen-history', label: 'Open ticket history', hint: 'Kitchen', href: '/kitchen/history', icon: History, keywords: 'kitchen ticket done bumped past history kot queued preparing to make', permission: Permission.KOT_VIEW },
   { id: 'settings', label: 'Open settings', hint: 'System', href: '/settings', icon: Settings, keywords: 'preferences configuration', permission: Permission.SETTINGS_MANAGE },
 ];
 
-/** Global command search. Opens on Cmd/Ctrl+K or via its trigger; permission-
- *  aware; keyboard-driven listbox with focus restore. */
+/**
+ * The commands this permission set may see.
+ *
+ * Exported and pure so a test covers the WIRING, not just the gate: asserting
+ * `POS_COMMAND_GATE` alone left "the command stopped using it" undetected, and
+ * a mutation that hardcoded the old single permission back onto the entry
+ * passed every assertion. The unit worth testing is command-plus-gate.
+ */
+export function availableCommands(
+  hasPermission: (permission: Permission) => boolean,
+): readonly Command[] {
+  return COMMANDS.filter((c) => holdsAnyOf(c.permission, { hasPermission }));
+}
+
+/** Global command search. Opens on Cmd/Ctrl+K — its header trigger went with
+ *  D151; permission-aware; keyboard-driven listbox with focus restore. */
 export function CommandPalette() {
   const router = useRouter();
   const { hasPermission } = useAuth();
@@ -59,7 +122,7 @@ export function CommandPalette() {
   const restoreRef = React.useRef<HTMLElement | null>(null);
 
   const available = React.useMemo(
-    () => COMMANDS.filter((c) => !c.permission || hasPermission(c.permission)),
+    () => availableCommands(hasPermission),
     [hasPermission],
   );
 
@@ -78,12 +141,14 @@ export function CommandPalette() {
     restoreRef.current?.focus?.();
   }, []);
 
-  const show = React.useCallback(() => {
-    restoreRef.current = document.activeElement as HTMLElement;
-    setOpen(true);
-  }, []);
+  /*
+   * There is no `show()` any more: the header button that called it went with
+   * D151, and the shortcut below opens the dialog itself. Keeping an opener
+   * nothing calls would be the first thing to mislead the next reader.
+   */
 
-  // Global Cmd/Ctrl+K.
+  // Global Cmd/Ctrl+K — the only way in since D151.
+  
   React.useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
@@ -134,22 +199,22 @@ export function CommandPalette() {
     }
   };
 
+  /*
+   * D151 — no search bar in the header (PO).
+   *
+   * This used to render a "Search or jump to… ⌘K" button beside the theme
+   * toggle. It is gone, and the component is now headless: it mounts the
+   * Ctrl/Cmd+K listener and the dialog, and draws nothing until someone asks
+   * for it.
+   *
+   * The SHORTCUT deliberately survives. The PO asked for the bar to go, not
+   * for the palette, and the two are separable — the keyboard route costs no
+   * header space, which is the thing that was being reclaimed. What it costs
+   * is discoverability: nothing on screen now advertises that Ctrl+K exists,
+   * so anyone who does not already know is not going to find out.
+   */
   return (
     <>
-      <button
-        type="button"
-        onClick={show}
-        aria-label="Open command search"
-        aria-keyshortcuts="Meta+K Control+K"
-        className="group flex h-9 items-center gap-2 rounded-xl border border-border bg-canvas px-2.5 text-sm text-muted-foreground transition-colors hover:border-brand-200 hover:text-foreground sm:w-56 md:w-64"
-      >
-        <Search className="h-4 w-4 shrink-0" aria-hidden />
-        <span className="hidden flex-1 text-left sm:inline">Search or jump to…</span>
-        <kbd className="hidden items-center gap-0.5 rounded-md border border-border bg-surface px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground sm:inline-flex">
-          ⌘K
-        </kbd>
-      </button>
-
       {open ? (
         <div className="fixed inset-0 z-[60] flex items-start justify-center p-4 pt-[12vh]">
           <button

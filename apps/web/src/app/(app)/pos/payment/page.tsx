@@ -22,19 +22,33 @@ import { Button } from '@/components/ui/button';
 import { Dialog } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { getCachedDocumentProfile } from '@/lib/document-template-service';
+import { useEffectiveProfile } from '@/lib/platform-profile';
+import { resolveDocumentSettingsPresentation } from '@/lib/settings/document-presentation';
 import { Select } from '@/components/ui/select';
+import { Sheet } from '@/components/ui/sheet';
 import { Switch } from '@/components/ui/switch';
 import { useAuth } from '@/lib/auth';
-import { computeLine, computeTotals, type CartItem } from '@/lib/cart';
+import {
+  lineLabel,
+  linePrice,
+  computeCartLines,
+  computeTotals,
+  type CartLineTotals,
+  type CartItem,
+  type CartLineKey,
+} from '@/lib/cart';
 import { useCheckoutData } from '@/lib/catalog';
 import { checkCredit } from '@/lib/credit-guard';
 import { fetchCustomerCredit, type CustomerCredit } from '@/lib/customers-api';
 import { isValidYmd } from '@/lib/dates';
 import { usePosCart } from '@/lib/pos-cart';
 import { printCustomerReceipt, type ReceiptContext } from '@/lib/receipt-print';
+import { SuccessView } from '@/components/pos/payment-success-dialog';
 import {
   completeSale,
   saleLocation,
+  toSaleItemPayload,
   type CompletedSale,
   type CompleteSaleDto,
   type PaymentMethodCode,
@@ -78,7 +92,18 @@ export default function PaymentPage() {
     setShopTimeZone(shopTimeZone);
   }, [shopTimeZone, setShopTimeZone]);
 
-  const totals = computeTotals(cart.items, data.settings.taxRatePercent, cart.orderDiscount);
+  const totals = computeTotals(
+    cart.items,
+    data.settings.taxRatePercent,
+    cart.orderDiscount,
+    data.promotionRules,
+  );
+  // Same derivation the totals above used, so the table and the footer cannot
+  // disagree (D123, 4.4).
+  const cartLines = React.useMemo(
+    () => new Map(computeCartLines(cart.items, data.promotionRules).map((l) => [l.lineKey, l])),
+    [cart.items, data.promotionRules],
+  );
   const total = totals.total;
 
   const [mode, setMode] = React.useState<Mode>('CASH');
@@ -97,9 +122,36 @@ export default function PaymentPage() {
   );
   const [creditUnavailable, setCreditUnavailable] = React.useState(false);
   const [printAfter, setPrintAfter] = React.useState(true);
+  /*
+   * D163 — does this workspace have an A4 bill at all?
+   *
+   * A retail workspace's sale document is the thermal slip now, and this
+   * screen was opening an A4 print window on EVERY completed sale — the
+   * toggle defaults to on. Left alone, removing the button from the sale page
+   * would have hidden the door while the till kept walking through it.
+   *
+   * Read from the resolver, never compared here (D31): the same flag that
+   * decides whether the sale page offers "Print A4 bill" decides whether the
+   * till may open one, so the two cannot disagree.
+   */
+  const { profile } = useEffectiveProfile();
+  const documentView = resolveDocumentSettingsPresentation({
+    capabilities: profile?.capabilities ?? null,
+  });
+  const canPrintA4 = documentView.showA4SaleDocument;
   const [submitting, setSubmitting] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const [completed, setCompleted] = React.useState<CompletedSale | null>(null);
+  /*
+   * D184 — the tender, SNAPSHOT at completion.
+   *
+   * D183 read `tendered` again at print time and always found it empty.
+   * Completing the sale clears the cart, `total` changes, and the effect
+   * that seeds this field with the exact amount fires and overwrites what
+   * the operator typed — before they ever reach the Thermal receipt
+   * button. The number has to be captured while it is still true.
+   */
+  const [completedTender, setCompletedTender] = React.useState<number | null>(null);
   const [receiptCtx, setReceiptCtx] = React.useState<ReceiptContext | null>(null);
   const [printing, setPrinting] = React.useState(false);
   const [summaryOpen, setSummaryOpen] = React.useState(false);
@@ -305,18 +357,16 @@ export default function PaymentPage() {
         customerId: cart.customerId || undefined,
         saleDate: cart.submittedSaleDate,
         paymentDueDate: needsDueDate ? dueDate : undefined,
-        items: cart.items.map((it) => ({
-          productId: it.product.id,
-          quantity: it.quantity,
-          discountType: it.discount?.type,
-          // Hand-written map: a field left out here is dropped with no type
-          // error, and the server would then recompute a whole-line amount while
-          // the cashier was shown the per-unit one.
-          discountBasis: it.discount?.basis,
-          discountValue: it.discount?.value,
-          discountReason: it.discount?.reason,
-          approvalToken: it.approvalToken,
-        })),
+        // D120 (1c.7) — closes the loop. Everything behind this (variant pricing,
+        // the ownership checks, per-variant depletion and its oversell guard,
+        // the D44 snapshots) was built in 1a and never once reached from the
+        // till, because the payload did not carry the variant id.
+        //
+        // A function rather than a literal so the mapping is testable: the field
+        // is optional on the wire, so forgetting it compiles silently. The same
+        // goes for `discountBasis` — the mapper carries it (D136), and restating
+        // it here would be a second copy of the rule to keep in step.
+        items: cart.items.map(toSaleItemPayload),
         payments,
         orderDiscountType: cart.orderDiscount?.type,
         orderDiscountValue: cart.orderDiscount?.value,
@@ -328,18 +378,51 @@ export default function PaymentPage() {
         currency,
         customerName,
         items: cart.items,
+        // D123 (4.4) — the fallback receipt prices from the live cart, so it
+        // needs the same rules the totals above were derived with.
+        promotionRules: data.promotionRules,
         subtotal: totals.subtotal,
         totalDiscount: totals.totalDiscount,
         orderDiscount: totals.orderDiscountAmount,
         taxAmount: totals.taxAmount,
-        storeName: 'Hardware POS',
+        storeName: getCachedDocumentProfile().companyName || undefined,
       };
       setReceiptCtx(ctx);
       setCompleted(sale);
+      // D184 — BEFORE `clearCart`, which resets `tendered` through the
+      // `total` effect. Only a cash over-tender is worth keeping; every
+      // other shape prints nothing anyway.
+      const tender = mode === 'CASH' && tenderedNum > total ? tenderedNum : null;
+      setCompletedTender(tender);
       cart.clearCart();
-      // A4 is the default bill for this client: auto-open the A4 print view
-      // (not the old thermal receipt) when "print after payment" is on.
-      if (printAfter) openA4Bill(sale.id, true);
+      /*
+       * Auto-open the A4 print view (not the old thermal receipt) when "print
+       * after payment" is on — and only where an A4 bill exists.
+       *
+       * `canPrintA4` is checked HERE as well as on the control, deliberately.
+       * The toggle's state survives a profile that resolves late, so a hidden
+       * switch left `true` would still fire. While the profile is unresolved
+       * this is false, which is the safe way round: a missing print is a
+       * button away, an unwanted one is already on paper.
+       */
+      if (printAfter) {
+        /*
+         * D187 — print the bill this workspace actually issues.
+         *
+         * D163 took the A4 away from retail and this line kept its `&&
+         * canPrintA4` guard, so a retail till completed a sale and printed
+         * NOTHING — the cashier had to find a text link. The guard now
+         * chooses instead of refusing.
+         *
+         * Safe after the await: D78 prints receipts from a hidden iframe,
+         * not a popup, so there is no transient-activation window to miss.
+         * Local `sale`, `ctx` and `tender` are used rather than the state
+         * just set — React has not re-rendered yet, and D184 is the bug
+         * that comes from reading state a beat too early.
+         */
+        if (canPrintA4) openA4Bill(sale.id, true);
+        else void printCustomerReceipt(session!, sale, ctx, tender ?? undefined);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not complete the sale');
       // The failure may be another register beating us to the stock (or a
@@ -367,9 +450,22 @@ export default function PaymentPage() {
 
   const printReceipt = async () => {
     if (!completed || !receiptCtx) return;
+    /*
+     * D183/D184 — the tender travels to the receipt, and nowhere else.
+     *
+     * The screen has shown "Change" since D74 and the paper never did,
+     * because `tendered` was local state used for that display and then
+     * dropped: the sale is completed with `amount: total`, which is
+     * correct (the difference was handed back and never entered the
+     * drawer), so the tender had no way to reach the printer.
+     *
+     * Sent only for CASH with real change. A card sale, an exact-money
+     * sale and an under-tender all send nothing and print as before.
+     */
+    const tenderToPrint = completedTender ?? undefined;
     setPrinting(true);
     try {
-      await printCustomerReceipt(session!, completed, receiptCtx);
+      await printCustomerReceipt(session!, completed, receiptCtx, tenderToPrint);
     } finally {
       setPrinting(false);
     }
@@ -385,6 +481,7 @@ export default function PaymentPage() {
         onPreviewA4={() => openA4Bill(completed.id)}
         onPrintA4={() => openA4Bill(completed.id, true)}
         onPrintThermal={printReceipt}
+        canPrintA4={canPrintA4}
         onViewSale={() => router.push(`/sales/${completed.id}`)}
         onNewSale={() => router.push('/pos')}
       />
@@ -409,12 +506,17 @@ export default function PaymentPage() {
         ) : null}
       </div>
 
-      {/* Order summary ~40% · payment workspace ~60% on lg+. */}
-      <div className="grid min-h-0 min-w-0 flex-1 gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]">
-        {/* ── Order summary (desktop / tablet-landscape) ── */}
-        <div className="hidden min-w-0 flex-col overflow-hidden rounded-2xl border border-border bg-card shadow-sm lg:flex lg:max-h-full lg:self-start">
+      {/* Order summary ~40% · payment workspace ~60% once we clear the tablet
+          landscape breakpoint (900px). Below `tab:` — iPad portrait 768–834 —
+          the summary collapses into a Sheet triggered from the workspace
+          header, because a two-column split at 800px squeezes the numeric
+          keypad and the order table into unusable widths. */}
+      <div className="grid min-h-0 min-w-0 flex-1 gap-4 tab:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]">
+        {/* ── Order summary (tablet-landscape and up) ── */}
+        <div className="hidden min-w-0 flex-col overflow-hidden rounded-2xl border border-border bg-card shadow-sm tab:flex tab:max-h-full tab:self-start">
           <OrderSummary
             items={cart.items}
+            lines={cartLines}
             totals={totals}
             currency={currency}
             taxRatePercent={data.settings.taxRatePercent}
@@ -425,11 +527,13 @@ export default function PaymentPage() {
 
         {/* ── Unified payment workspace: fixed top · scroll middle · fixed bottom ── */}
         <div className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-2xl border border-border bg-card shadow-sm">
-          {/* Compact order-summary trigger — only below lg. */}
+          {/* Compact order-summary trigger — only below tab:. The Sheet it
+              opens is height="full" so the long items list plus totals fit
+              without the operator hunting for the primary action. */}
           <button
             type="button"
             onClick={() => setSummaryOpen(true)}
-            className="flex shrink-0 items-center justify-between gap-3 border-b border-border px-4 py-3 text-left lg:hidden"
+            className="flex shrink-0 items-center justify-between gap-3 border-b border-border px-4 py-3 text-left tab:hidden"
             aria-label="View order summary"
           >
             <span className="flex items-center gap-2 text-sm font-medium">
@@ -772,13 +876,21 @@ export default function PaymentPage() {
             ) : null}
 
             <div className="flex flex-wrap items-center justify-between gap-3">
+              {/* D163 — the A4 went away for retail.
+                  D187 — the TOGGLE comes back, naming whichever bill this
+                  workspace prints. D163 hid it because there was no A4 to
+                  print; there is still a receipt, and now that it prints
+                  automatically the operator needs the switch that turns it
+                  off. */}
               <div className="flex items-center gap-2 text-sm">
                 <Printer className="h-4 w-4 text-muted-foreground" aria-hidden />
-                <span id="print-a4-label">Print A4 bill after payment</span>
+                <span id="print-after-label">
+                  {canPrintA4 ? 'Print A4 bill after payment' : 'Print receipt after payment'}
+                </span>
                 <Switch
                   checked={printAfter}
                   onCheckedChange={setPrintAfter}
-                  aria-labelledby="print-a4-label"
+                  aria-labelledby="print-after-label"
                 />
               </div>
 
@@ -808,16 +920,23 @@ export default function PaymentPage() {
         </div>
       </div>
 
-      {/* Order-summary drawer for small/portrait screens. */}
-      <Dialog
+      {/* Order-summary sheet for portrait/narrow screens. `height="full"`
+          because the summary is item-list + totals + tax + optional discounts
+          — capping it at `max-h-[85dvh]` (Sheet default) would hide the grand
+          total on a cart with a dozen items on iPad portrait. The Sheet has
+          its own header X and safe-area footer, so the negative margins the
+          old Dialog wrapper needed are gone; `-mx-6 -my-3` neutralises the
+          Sheet body padding so `OrderSummary` fills edge-to-edge. */}
+      <Sheet
         open={summaryOpen}
         onClose={() => setSummaryOpen(false)}
         title="Order summary"
-        className="max-w-lg"
+        height="full"
       >
-        <div className="-mx-6 -mb-6 max-h-[70vh] overflow-hidden rounded-b-2xl border-t border-border">
+        <div className="-mx-6 -my-3 flex h-full min-h-0 flex-col">
           <OrderSummary
             items={cart.items}
+            lines={cartLines}
             totals={totals}
             currency={currency}
             taxRatePercent={data.settings.taxRatePercent}
@@ -826,7 +945,7 @@ export default function PaymentPage() {
             hideHeader
           />
         </div>
-      </Dialog>
+      </Sheet>
     </div>
   );
 }
@@ -839,6 +958,7 @@ export default function PaymentPage() {
  */
 function OrderSummary({
   items,
+  lines,
   totals,
   currency,
   taxRatePercent,
@@ -847,11 +967,18 @@ function OrderSummary({
   hideHeader,
 }: {
   items: CartItem[];
+  /**
+   * D123 (4.4) — priced by `computeCartLines`, the same derivation the footer
+   * uses. Recomputing here with `computeLine` would miss any promotion, since a
+   * promotion needs the whole basket to resolve, and the rows would not add up
+   * to the total printed beneath them.
+   */
+  lines: Map<string, CartLineTotals>;
   totals: ReturnType<typeof computeTotals>;
   currency: string;
   taxRatePercent: number;
   total: number;
-  onChangeQty: (productId: string, delta: number) => void;
+  onChangeQty: (lineKey: CartLineKey, delta: number) => void;
   hideHeader?: boolean;
 }) {
   return (
@@ -879,10 +1006,14 @@ function OrderSummary({
           </thead>
           <tbody>
             {items.map((it) => {
-              const line = computeLine(it);
+              const line = lines.get(it.lineKey)!;
               return (
                 <tr
-                  key={it.product.id}
+                  // D120 (1c.8) — keyed by the LINE. Same collision 1c.6 fixed in the
+                  // cart: two sizes of one product were duplicate React siblings
+                  // here, reconciled by position, so a quantity change could land
+                  // on the wrong row.
+                  key={it.lineKey}
                   className="border-b border-border last:border-0 align-middle"
                 >
                   <td className="px-4 py-3">
@@ -890,13 +1021,28 @@ function OrderSummary({
                       <div className="min-w-0">
                         <div className="truncate font-medium leading-tight">{it.product.name}</div>
                         <div className="truncate text-xs text-muted-foreground">
-                          {it.product.sku ? `SKU: ${it.product.sku}` : ''}
+                          {/*
+                            D120 (1c.8) — the size, on the last screen before money
+                            changes hands.
+
+                            "Paint Brush 2 inch" hides how bad this was: hardware
+                            names often carry the size already. Clothing does not —
+                            two Cotton Shirt rows at the same price were literally
+                            indistinguishable, and a variant product's SKU is null
+                            by design (D44), so this line rendered empty on exactly
+                            the rows that needed identifying.
+                          */}
+                          {it.variant
+                            ? it.variant.name
+                            : it.product.sku
+                              ? `SKU: ${it.product.sku}`
+                              : ''}
                         </div>
                       </div>
                     </div>
                   </td>
                   <td className="whitespace-nowrap px-3 py-3 text-right">
-                    {formatMoney(it.product.unitPrice, currency)}
+                    {formatMoney(linePrice(it), currency)}
                   </td>
                   <td className="px-3 py-3">
                     <div className="flex items-center justify-center gap-1">
@@ -904,8 +1050,8 @@ function OrderSummary({
                         variant="outline"
                         size="icon"
                         className="h-8 w-8 shrink-0"
-                        aria-label={`Decrease ${it.product.name} quantity`}
-                        onClick={() => onChangeQty(it.product.id, -1)}
+                        aria-label={`Decrease ${lineLabel(it)} quantity`}
+                        onClick={() => onChangeQty(it.lineKey, -1)}
                       >
                         <Minus className="h-3.5 w-3.5" />
                       </Button>
@@ -916,8 +1062,8 @@ function OrderSummary({
                         variant="outline"
                         size="icon"
                         className="h-8 w-8 shrink-0"
-                        aria-label={`Increase ${it.product.name} quantity`}
-                        onClick={() => onChangeQty(it.product.id, 1)}
+                        aria-label={`Increase ${lineLabel(it)} quantity`}
+                        onClick={() => onChangeQty(it.lineKey, 1)}
                       >
                         <Plus className="h-3.5 w-3.5" />
                       </Button>
@@ -992,95 +1138,10 @@ function Row({
   );
 }
 
-function SuccessView({
-  sale,
-  currency,
-  printing,
-  onPreviewA4,
-  onPrintA4,
-  onPrintThermal,
-  onViewSale,
-  onNewSale,
-}: {
-  sale: CompletedSale;
-  currency: string;
-  printing: boolean;
-  onPreviewA4: () => void;
-  onPrintA4: () => void;
-  onPrintThermal: () => void;
-  onViewSale?: () => void;
-  onNewSale: () => void;
-}) {
-  return (
-    <Dialog open onClose={onNewSale} className="max-w-sm">
-      <div className="flex flex-col items-center text-center">
-        <span className="flex h-14 w-14 items-center justify-center rounded-full bg-success-soft text-success">
-          <CheckCircle2 className="h-8 w-8" />
-        </span>
-        <h2 className="mt-3 text-lg font-semibold">Payment complete</h2>
-        <p className="text-sm text-muted-foreground">Sale {sale.saleNumber}</p>
-
-        <div className="mt-5 w-full space-y-2 rounded-xl border border-border p-4 text-sm">
-          <div className="flex justify-between">
-            <span className="text-muted-foreground">Amount paid</span>
-            <span className="font-medium">{formatMoney(sale.paidAmount, currency)}</span>
-          </div>
-          {sale.balanceAmount > 0 ? (
-            <div className="flex justify-between">
-              <span className="text-muted-foreground">Balance due</span>
-              <span className="font-semibold text-danger">
-                {formatMoney(sale.balanceAmount, currency)}
-              </span>
-            </div>
-          ) : null}
-          <div className="flex items-center justify-between pt-1">
-            <span className="text-muted-foreground">Sync status</span>
-            <Badge variant="warning">
-              <Clock className="h-3.5 w-3.5" />
-              Waiting to Sync
-            </Badge>
-          </div>
-        </div>
-
-        <div className="mt-5 grid w-full gap-2">
-          <div className="grid grid-cols-2 gap-2">
-            <Button
-              variant="outline"
-              size="lg"
-              onClick={onPreviewA4}
-              leftIcon={<ReceiptText className="h-4 w-4" />}
-            >
-              Preview A4 Bill
-            </Button>
-            <Button size="lg" onClick={onPrintA4} leftIcon={<Printer className="h-4 w-4" />}>
-              Print A4 Bill
-            </Button>
-          </div>
-          <div className="flex items-center justify-center gap-3 text-xs text-muted-foreground">
-            {onViewSale ? (
-              <button onClick={onViewSale} className="font-medium text-primary hover:underline">
-                View sale
-              </button>
-            ) : null}
-            <span aria-hidden>·</span>
-            <button
-              onClick={onPrintThermal}
-              disabled={printing}
-              className="font-medium hover:underline disabled:opacity-50"
-            >
-              {printing ? 'Preparing…' : 'Thermal receipt'}
-            </button>
-          </div>
-          <Button
-            size="lg"
-            onClick={onNewSale}
-            leftIcon={<Plus className="h-4 w-4" />}
-            className="mt-1"
-          >
-            New sale
-          </Button>
-        </div>
-      </div>
-    </Dialog>
-  );
-}
+/**
+ * The payment-complete dialog.
+ *
+ * Exported for its spec (D187): which bill this offers is a per-workspace
+ * decision, and the defect it fixes was invisible to every other test
+ * because nothing rendered this page.
+ */

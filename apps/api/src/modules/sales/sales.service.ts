@@ -1,31 +1,65 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import {
+  Prisma,
+  AccountingProviderKind,
   DiscountBasis,
   DiscountType,
   PaymentStatus,
+  QuantityType,
   QuickBooksDocumentType,
 } from '@hardware-pos/database';
-import { CURRENCY_SYMBOL, type Paginated } from '@hardware-pos/shared';
+import {
+  CURRENCY_SYMBOL,
+  applyPromotions,
+  taxableBase,
+  type Paginated,
+} from '@hardware-pos/shared';
+
+import { eligiblePromotionRules } from '../promotions/promotion-pricing';
+import { PromotionsRepository } from '../promotions/promotions.repository';
 
 import { paginate } from '../../common/pagination';
 import { round2, sum2 } from '../../common/money';
+import { computeDocumentLine, discountAmountOf } from '../../common/money/document-totals';
+import { variantDisplayName } from '../../common/variant-display';
 import { AuthenticatedUser } from '../auth/auth.types';
 import { DiscountsService, ORDER_DISCOUNT_KEY } from '../discounts/discounts.service';
 import { CreditService } from '../credit/credit.service';
+import { AccountingProviderFactory } from '../providers/accounting/accounting-provider.factory';
+import { InventoryProviderFactory } from '../providers/inventory/inventory-provider.factory';
+import { InventoryProvider } from '../providers/inventory/inventory-provider';
+import { ProviderOperationUnavailableError } from '../providers/provider.errors';
 import { SettingsService } from '../settings/settings.service';
 import { CreateDraftDto } from './dto/create-draft.dto';
 import { CompleteSaleDto } from './dto/complete-sale.dto';
 import { QuerySalesDto } from './dto/query-sales.dto';
 import { SaleItemInputDto } from './dto/sale-item.dto';
 import { resolvePaymentDueDate, resolveSaleDate } from './sale-date';
-import { SaleListRow, SaleWithRelations, SalesRepository } from './sales.repository';
+import { resolveCustomerDocumentKind } from './customer-document';
+import {
+  ExternalSaleDocument,
+  PostAccounting,
+  ReduceStock,
+  SaleListRow,
+  SaleWithRelations,
+  SalesRepository,
+} from './sales.repository';
 import {
   CartItemInput,
+  ComputedLine,
   ComputedSale,
   OrderDiscountInput,
   PersistSaleInput,
   SaleListItem,
 } from './sales.types';
+
+/** D58 — see the draft-completion mapping below. */
+function requireProductId(productId: string | null, saleItemId: string): string {
+  if (productId === null) {
+    throw new Error(`Draft sale item ${saleItemId} has no productId — refusing to complete`);
+  }
+  return productId;
+}
 
 @Injectable()
 export class SalesService {
@@ -34,6 +68,9 @@ export class SalesService {
     private readonly settingsService: SettingsService,
     private readonly discountsService: DiscountsService,
     private readonly credit: CreditService,
+    private readonly accountingProviders: AccountingProviderFactory,
+    private readonly inventoryProviders: InventoryProviderFactory,
+    private readonly promotions: PromotionsRepository,
   ) {}
 
   async list(tenantId: string, query: QuerySalesDto): Promise<Paginated<SaleListItem>> {
@@ -71,7 +108,17 @@ export class SalesService {
     dto: CreateDraftDto,
   ): Promise<SaleWithRelations> {
     await this.assertLocations(tenantId, dto.branchId, dto.registerId, dto.customerId);
-    const computed = await this.computeCart(tenantId, actor, dto.items.map(toCartItem));
+    // A draft moves no stock, but it must not be built against availability the
+    // tenant's provider cannot vouch for — an EXTERNAL tenant fails closed here
+    // rather than at completion.
+    const inventory = await this.inventoryProviders.forTenant(tenantId);
+    const computed = await this.computeCart(
+      tenantId,
+      actor,
+      dto.items.map(toCartItem),
+      inventory,
+      dto.branchId,
+    );
     return this.salesRepository.createDraft({
       tenantId,
       cashierId: actor.id,
@@ -80,6 +127,35 @@ export class SalesService {
       customerId: dto.customerId,
       computed,
     });
+  }
+
+  /**
+   * `8.8` — the baskets currently on hold.
+   *
+   * A hold IS a draft. `SaleStatus.DRAFT` and `createDraft` have existed since
+   * Phase 1 with no flow on top of them: nothing listed drafts, nothing
+   * discarded one, and `complete({ saleId })` — the resume — had no caller.
+   * `8.8` is those three, not a new concept.
+   */
+  listHeld(tenantId: string, branchId?: string): Promise<SaleWithRelations[]> {
+    return this.salesRepository.findHeldSales(tenantId, branchId);
+  }
+
+  /**
+   * Discard a held basket.
+   *
+   * Refuses anything that is not a DRAFT — including a completed sale whose id
+   * someone pasted — by finding no row rather than by checking first and
+   * deleting second, which two simultaneous requests could both pass.
+   */
+  async discardHeld(tenantId: string, id: string): Promise<void> {
+    const discarded = await this.salesRepository.discardHeldSale(tenantId, id);
+    if (!discarded) {
+      // One message for "no such sale" and "that sale is completed": telling
+      // them apart would confirm the existence of a sale to someone who only
+      // guessed its id.
+      throw new NotFoundException(`No held sale ${id}`);
+    }
   }
 
   /**
@@ -104,7 +180,13 @@ export class SalesService {
         throw new NotFoundException(`Draft sale ${dto.saleId} not found`);
       }
       items = draft.items.map((it) => ({
-        productId: it.productId,
+        // D58: nullable only for PROJECTED restaurant lines. A retail draft's
+        // lines were written by this module with a product, so a null here is
+        // corruption, not a state — fail the completion rather than sell air.
+        productId: requireProductId(it.productId, it.id),
+        // D120 — a draft line already carries the variant chosen when the draft was
+        // built; completing it must sell the same one, not fall back to product level.
+        productVariantId: it.productVariantId,
         quantity: Number(it.quantity),
         discountType: it.discountType,
         discountBasis: it.discountBasis,
@@ -138,16 +220,45 @@ export class SalesService {
       reason: dto.orderDiscountReason,
       approvalToken: dto.orderApprovalToken,
     };
-    const computed = await this.computeCart(tenantId, actor, items, orderDiscountInput);
+    // Resolve BOTH providers once, from the authenticated tenant, before any work.
+    // Independent of each other by design: inventory authority and accounting
+    // destination are separate concepts (D29), and a tenant may legitimately keep
+    // stock locally while filing documents in QuickBooks. Neither is derived from
+    // the other, and no DTO field can name either.
+    const inventory = await this.inventoryProviders.forTenant(tenantId);
+
+    const computed = await this.computeCart(
+      tenantId,
+      actor,
+      items,
+      inventory,
+      branchId,
+      orderDiscountInput,
+    );
     const paidAmount = sum2(dto.payments.map((p) => p.amount));
     const { total } = computed;
     const paymentStatus: PaymentStatus =
       paidAmount <= 0 ? 'UNPAID' : paidAmount >= total ? 'PAID' : 'PARTIAL';
     const balanceAmount = Math.max(0, round2(total - paidAmount));
-    const quickbooksDocumentType: QuickBooksDocumentType =
-      paymentStatus === 'PAID' ? 'SALES_RECEIPT' : 'INVOICE';
 
-    if (quickbooksDocumentType === 'INVOICE' && !customerId) {
+    // Resolve the tenant's accounting provider ONCE, from the authenticated tenant.
+    // The same instance decides the document type and performs the submission, so
+    // the two can never come from different providers. `tenantId` reaches here from
+    // `@TenantId()` — the verified session — and there is no DTO field a client
+    // could use to name a provider.
+    const accounting = await this.accountingProviders.forTenant(tenantId);
+    const documentDecision = accounting.resolveSaleDocumentType({
+      paymentStatus,
+      hasCustomer: Boolean(customerId),
+      total,
+    });
+    const quickbooksDocumentType = documentDecision.documentType;
+
+    // The provider states the requirement; this raises the existing error with its
+    // existing wording, so the behaviour Tile Shop users and tests see is unchanged.
+    // A tenant with no accounting provider does not impose it — a QuickBooks Invoice
+    // needs a CustomerRef, a local invoice does not.
+    if (documentDecision.requiresCustomer && !customerId) {
       throw new BadRequestException('A customer is required for a credit/partial sale (Invoice)');
     }
 
@@ -185,14 +296,51 @@ export class SalesService {
       balanceAmount,
       paymentStatus,
       quickbooksDocumentType,
+      // Derived from the provider's own decision, not from its identity: a sale with
+      // an external document is PENDING a push, one without was never queued and is
+      // NOT_SYNCED. A `NONE` tenant left permanently "pending" would be showing a
+      // QuickBooks state to someone who does not use QuickBooks.
+      syncStatus: quickbooksDocumentType === null ? 'NOT_SYNCED' : 'PENDING',
     };
 
+    const postAccounting: PostAccounting = (tx, saleId) =>
+      accounting.postSale(tx, { tenantId, branchId }, saleId, quickbooksDocumentType);
+
+    // Slice 6C-A: the same resolved instance that answered the availability question
+    // performs the reduction, inside the repository's transaction. The conditional
+    // write it contains — not the read above — is what prevents two concurrent sales
+    // from both taking the last unit.
+    const reduceStock: ReduceStock = (tx, lines, saleId) =>
+      inventory.reduceStock(tx, { tenantId, branchId }, lines, {
+        // 1a.21 — supplying metadata is what asks the provider to append the
+        // stock ledger row. Only the Local provider records anything; QuickBooks
+        // stock is a cache of an upstream ledger and NONE has no stock, so this
+        // service never asks which mode it is in (D28).
+        reason: 'SALE',
+        refType: 'SALE',
+        refId: saleId,
+        createdByUserId: actor.id,
+      });
+
     return dto.saleId
-      ? this.salesRepository.completeDraft(tenantId, dto.saleId, persist)
-      : this.salesRepository.createCompleted(persist);
+      ? this.salesRepository.completeDraft(tenantId, dto.saleId, persist, postAccounting, reduceStock)
+      : this.salesRepository.createCompleted(persist, postAccounting, reduceStock);
   }
 
-  /** MOCK QuickBooks push for a completed sale (real QBO integration comes later). */
+  /**
+   * MOCK QuickBooks push for a completed sale (real QBO integration comes later).
+   *
+   * Slice 6A gated this on the tenant's accounting provider. A tenant with no
+   * external accounting has nothing to push, so the request is refused outright
+   * rather than being handed to a QuickBooks-specific code path that would invent an
+   * identifier for it. Nothing is written on the refusal.
+   *
+   * For a QuickBooks tenant the behaviour is unchanged, mock and all: the identifiers
+   * are still generated locally because there is still no real Intuit call here.
+   * That remains open question O1, deferred to Phase 2 — this slice removes the
+   * fabrication for tenants that should never have reached it, and makes the
+   * repository refuse to invent one, but it does not resolve O1.
+   */
   async syncToQuickBooks(tenantId: string, id: string): Promise<SaleWithRelations> {
     const sale = await this.salesRepository.findByIdForTenant(tenantId, id);
     if (!sale) {
@@ -201,15 +349,55 @@ export class SalesService {
     if (sale.status !== 'COMPLETED') {
       throw new BadRequestException('Only completed sales can be synced to QuickBooks');
     }
-    return this.salesRepository.markSynced(sale);
+
+    const accounting = await this.accountingProviders.forTenant(tenantId);
+    if (accounting.provider !== AccountingProviderKind.QUICKBOOKS) {
+      throw new ProviderOperationUnavailableError(accounting.name, 'QuickBooks sale sync');
+    }
+    if (sale.quickbooksDocumentType === null) {
+      // Belt and braces: a QuickBooks tenant's sales always carry a document type,
+      // so this only fires on inconsistent data — and refusing beats guessing.
+      throw new BadRequestException(
+        `Sale ${sale.saleNumber} has no QuickBooks document type and cannot be synced`,
+      );
+    }
+
+    return this.salesRepository.markSynced(sale, this.mockQuickBooksDocument(sale));
+  }
+
+  /**
+   * The mock identifiers the QuickBooks push has always produced.
+   *
+   * Isolated into a named method so the fabrication is visible rather than buried in
+   * a `??` inside the repository, and so the day a real Intuit call replaces it,
+   * exactly one function disappears. The prefix branch is now exhaustive over a
+   * non-null document type — it can no longer fall through to `INV` for a null.
+   */
+  private mockQuickBooksDocument(sale: SaleWithRelations): ExternalSaleDocument {
+    const documentType = sale.quickbooksDocumentType as QuickBooksDocumentType;
+    const prefix = documentType === 'SALES_RECEIPT' ? 'SR' : 'INV';
+    return {
+      documentId: sale.quickbooksDocumentId ?? `QBO-${prefix}-${sale.saleNumber}`,
+      documentType,
+      paymentIds: sale.payments.map((_, i) => `QBO-PMT-${sale.saleNumber}-${i + 1}`),
+    };
   }
 
   // ── compute pipeline ───────────────────────────────────────────────────────
 
+  /**
+   * Validate and price a cart.
+   *
+   * `inventory` is the provider the *caller* already resolved, passed in rather
+   * than resolved here so one operation cannot check availability against one
+   * provider and then move stock through another.
+   */
   private async computeCart(
     tenantId: string,
     actor: AuthenticatedUser,
     items: CartItemInput[],
+    inventory: InventoryProvider,
+    branchId: string,
     orderDiscountInput?: OrderDiscountInput,
   ): Promise<ComputedSale> {
     if (items.length === 0) {
@@ -219,10 +407,42 @@ export class SalesService {
     const ids = [...new Set(items.map((i) => i.productId))];
     const products = await this.salesRepository.findProductsByIds(tenantId, ids);
     const byId = new Map(products.map((p) => [p.id, p]));
+
+    // D120 — resolve every named variant in one read, mirroring the product fetch
+    // above. A cart that names no variant does no query at all, so the ordinary
+    // single-SKU sale costs exactly what it did before.
+    const variantIds = [
+      ...new Set(items.map((i) => i.productVariantId).filter((v): v is string => Boolean(v))),
+    ];
+    const variants = variantIds.length
+      ? await this.salesRepository.findVariantsByIds(tenantId, variantIds)
+      : [];
+    const variantById = new Map(variants.map((v) => [v.id, v]));
+
     const settings = this.settingsService.getSettings(tenantId);
 
-    const lines = await Promise.all(
-      items.map(async (item) => {
+    // Availability comes from the provider, not from the product row. For
+    // QUICKBOOKS and LOCAL that is still `Product.quantityOnHand`, read the same
+    // way, so the answer is identical; for DISABLED every product is unlimited and
+    // no sale is ever rejected for stock. Read-only, so it happens before the
+    // transaction opens — it is a courtesy check, and `reduceStock`'s conditional
+    // write remains the authority under concurrency.
+    const availability = await inventory.getAvailability({ tenantId, branchId }, ids);
+
+    // D120 — the same courtesy, at variant grain. Without it the two checks
+    // disagree: the product total is 10 across four sizes, so the read passes, and
+    // then `reduceStock` finds 0 on the Medium's row and refuses with the terser
+    // transactional message. Optional on the provider — QuickBooks and DISABLED
+    // cannot answer it, and for them the product-level check above is the right one.
+    const variantAvailability =
+      variantIds.length > 0 && inventory.getVariantAvailability
+        ? await inventory.getVariantAvailability({ tenantId, branchId }, variantIds)
+        : null;
+
+    const lines: ComputedLine[] = await Promise.all(
+      // Annotated so the `promotionId: null` seeds below widen to `string |
+      // null`; the basket pass writes into them a few lines further down.
+      items.map(async (item): Promise<ComputedLine> => {
         const product = byId.get(item.productId);
         if (!product) {
           throw new BadRequestException(`Unknown product ${item.productId}`);
@@ -230,7 +450,29 @@ export class SalesService {
         if (!product.isActive) {
           throw new BadRequestException(`Product ${product.name} is inactive`);
         }
-        const cachedPrice = Number(product.unitPrice);
+        // D120 — resolve and vet the variant before any money is computed from it.
+        const variant = item.productVariantId ? (variantById.get(item.productVariantId) ?? null) : null;
+        if (item.productVariantId && !variant) {
+          // Unknown id and another tenant's id give the same message on purpose:
+          // the response must not reveal that a variant exists elsewhere.
+          throw new BadRequestException(`Unknown variant ${item.productVariantId}`);
+        }
+        if (variant && variant.productId !== product.id) {
+          // Without this a client could pair a cheap variant with a dear product
+          // and pay the variant's price for the wrong thing.
+          throw new BadRequestException(
+            `Variant ${variant.sku} does not belong to ${product.name}`,
+          );
+        }
+        if (variant && !variant.isActive) {
+          throw new BadRequestException(`Variant ${variant.sku} is inactive`);
+        }
+
+        // A variant owns its price outright; the product price is NOT a fallback.
+        // `ProductVariant.unitPrice` is non-nullable, and `sellable.service`
+        // reports a variant product's own price as null for exactly this reason —
+        // `??` here would let a variant priced at 0 silently charge the product's.
+        const cachedPrice = variant ? Number(variant.unitPrice) : Number(product.unitPrice);
         if (item.unitPrice != null && round2(item.unitPrice) !== round2(cachedPrice)) {
           throw new BadRequestException(
             `Price for ${product.name} has changed; refresh the product cache`,
@@ -238,11 +480,38 @@ export class SalesService {
         }
 
         const quantity = item.quantity;
-        const onHand = Number(product.quantityOnHand);
-        if (product.type === 'Inventory' && quantity > onHand) {
-          throw new BadRequestException(
-            `Insufficient stock for ${product.name} (on hand ${onHand}, requested ${quantity})`,
-          );
+        // `isUnlimited` is how a provider says "no ceiling" without inventing a
+        // quantity. Absent from the map means the provider does not know the
+        // product, which the `!product` guard above has already excluded.
+        const stock = availability.get(product.id);
+        if (stock && !stock.isUnlimited && stock.quantityOnHand !== null) {
+          if (variant && variantAvailability) {
+            // D120 — a variant line is checked against its own row. Absent means no
+            // row, which is no stock (decision 8), so it reads as zero rather than
+            // falling back to the product total: the product may hold plenty across
+            // its other sizes while this one has none.
+            const onHand = variantAvailability.get(variant.id)?.quantityOnHand ?? 0;
+            if (quantity > onHand) {
+              // Names the variant, unlike the product-level message below. The
+              // cashier is looking at a four-size product and needs to know which
+              // size is short; the wording below is asserted verbatim by existing
+              // specs and must not move.
+              const label = variantDisplayName(variant.optionValues, variant.sku);
+              throw new BadRequestException(
+                `Insufficient stock for ${product.name} (${label}) (on hand ${onHand}, requested ${quantity})`,
+              );
+            }
+          } else {
+            const onHand = stock.quantityOnHand;
+            if (quantity > onHand) {
+              // Wording preserved verbatim — this is the message the POS surfaces and
+              // the Slice 3 characterisation spec asserts. Note it is deliberately
+              // NOT the same string `reduceStock` throws; both are unchanged.
+              throw new BadRequestException(
+                `Insufficient stock for ${product.name} (on hand ${onHand}, requested ${quantity})`,
+              );
+            }
+          }
         }
 
         if (item.discountBasis === 'UNIT' && item.discountType !== 'FIXED') {
@@ -252,11 +521,18 @@ export class SalesService {
           throw new BadRequestException('A per-unit discount must be a fixed amount');
         }
 
-        const lineSubtotal = round2(cachedPrice * quantity);
-        const discountAmount = computeDiscount(lineSubtotal, item.discountType, item.discountValue, {
-          basis: item.discountBasis,
+        // D59: line money runs in the shared Decimal engine; the number
+        // boundary is exact because every engine output is a 2dp figure. The
+        // per-unit basis (main, 2026-09-07) rides through the same engine.
+        const computedLine = computeDocumentLine({
+          unitPrice: cachedPrice,
           quantity,
+          discountType: item.discountType ?? null,
+          discountValue: item.discountValue ?? null,
+          discountBasis: item.discountBasis ?? 'LINE',
         });
+        const lineSubtotal = computedLine.lineSubtotal.toNumber();
+        const discountAmount = computedLine.discountAmount.toNumber();
         const effectivePercent = lineSubtotal > 0 ? (discountAmount / lineSubtotal) * 100 : 0;
 
         // Enforce the role-based discount limit; over-limit lines need a covering
@@ -278,6 +554,15 @@ export class SalesService {
 
         return {
           productId: product.id,
+          productVariantId: variant?.id ?? null,
+          // D44 — frozen here, at sale time. A later rename or deactivation must
+          // not be able to rewrite what this receipt said.
+          variantSkuSnapshot: variant?.sku ?? null,
+          variantNameSnapshot: variant ? variantDisplayName(variant.optionValues, variant.sku) : null,
+          // D134d — frozen here, so a shop repricing saffron from grams to
+          // kilograms cannot make an old receipt reprint 0.750 kg for what
+          // was actually 0.750 g.
+          unitOfMeasureSnapshot: product.unitOfMeasure ?? null,
           productName: product.name,
           sku: product.sku,
           trackInventory: product.type === 'Inventory',
@@ -289,17 +574,127 @@ export class SalesService {
           discountAmount,
           discountReason: item.discountReason ?? null,
           approvedByUserId,
+          // Still 0. Splitting the order-level tax across lines is per-line
+          // COMPUTATION, which is parked with grocery (D122). 3.9 records the
+          // rate; it does not change a single figure.
           taxAmount: 0,
+          /*
+           * D122 (3.9) — the rate this line was charged at, frozen now.
+           *
+           * `taxable` defaults true, so for every existing product this is the
+           * tenant rate — exactly what the order-level arithmetic below already
+           * applies. Writing it down changes no money.
+           *
+           * An exempt product and a tenant configured at 0% BOTH snapshot 0.00,
+           * and that is correct rather than a conflation: the column records
+           * WHAT WAS CHARGED, and both charged nothing. Whether that was because
+           * the product is exempt or because the tenant taxes nothing is a
+           * question `Product.taxable` still answers, by joining. Recorded here
+           * because two paths reaching the same value looks like a bug to
+           * whoever reads it next.
+           *
+           * Never null on a new line. Null on `SaleItem.taxRatePercent` means
+           * "written before 3.8", which is the signal 3.10 uses to fall back to
+           * proportional refunding — so a new sale must never produce one.
+           */
+          taxRatePercent: product.taxable ? settings.taxRatePercent : 0,
+          // Filled by the basket pass below — a promotion needs every line to
+          // resolve, so it cannot be decided inside this per-line map.
+          promotionDiscountAmount: 0,
+          promotionId: null,
+          promotionNameSnapshot: null,
           lineSubtotal,
-          lineTotal: round2(lineSubtotal - discountAmount),
+          lineTotal: computedLine.lineTotal.toNumber(),
         };
       }),
     );
 
-    const subtotal = sum2(lines.map((l) => l.lineSubtotal));
-    const totalDiscount = sum2(lines.map((l) => l.discountAmount));
+    /*
+     * D123 (4.4) — promotions, as a BASKET pass.
+     *
+     * It cannot live in the loop above: a bundle spans lines and a BOGO counts
+     * across them. It runs after, and folds its answer back into each line.
+     *
+     * Eligibility reuses the badge path's own read — `listForCatalogue` +
+     * `isPromotionActive` — so the offer a customer sees on the till and the
+     * price charged here cannot disagree about what is live. `COUNTER` is the
+     * channel `catalog.ts` sends; omitting it would make a channel-scoped
+     * promotion apply on the till and NOT here, since the evaluator refuses a
+     * scoped promotion when the context names no channel.
+     *
+     * D139 — the tenant's zone is passed for the same reason the channel is.
+     * Without it a day-of-week or time-of-day window was read on the HOST's
+     * clock: on a UTC server an 11:00–15:00 lunch offer for a Colombo tenant
+     * was live 16:30–20:30 their time.
+     */
+    const eligiblePromotions = eligiblePromotionRules(
+      await this.promotions.listForCatalogue(tenantId),
+      {
+        now: new Date(),
+        branchId,
+        channel: 'COUNTER',
+        tenantTimeZone: settings.timezone,
+      },
+    );
+
+    const promotionResult = applyPromotions({
+      lines: lines.map((l, i) => ({
+        id: String(i),
+        productId: l.productId,
+        unitPrice: l.unitPrice,
+        quantity: l.quantity,
+        lineSubtotal: l.lineSubtotal,
+        // Precedence (D123) is enforced inside the applier: a manually
+        // discounted line is invisible to promotions and cannot complete a
+        // bundle. Passing it truthfully is this call site's whole obligation.
+        manualDiscountAmount: l.discountAmount,
+        // D134a (`6.4`) — a measured line is invisible to the two
+        // QUANTITY-based promotion kinds. Set on BOTH sides: the till
+        // previews with the same flag, or the cashier is shown a discount
+        // the server refuses.
+        isMeasured: byId.get(l.productId)?.quantityType === QuantityType.DECIMAL,
+      })),
+      promotions: eligiblePromotions,
+    });
+
+    for (const won of promotionResult.lines) {
+      const line = lines[Number(won.lineId)];
+      if (!line) continue;
+      line.promotionDiscountAmount = won.discountAmount;
+      line.promotionId = won.promotionId;
+      line.promotionNameSnapshot = won.promotionName;
+      // The promotion reduces the LINE, which is what makes tax follow with no
+      // tax code: `taxableBase` reads `lineTotal`.
+      line.lineTotal = new Prisma.Decimal(line.lineTotal)
+        .minus(won.discountAmount)
+        .toDecimalPlaces(2)
+        .toNumber();
+    }
+
+    // D59: sums and tax in Decimal. Line figures are 2dp, so these sums are
+    // exact; sum2's float accumulation could drift a hair below a half.
+    const subtotal = lines
+      .reduce((acc, l) => acc.plus(l.lineSubtotal), new Prisma.Decimal(0))
+      .toNumber();
+    /*
+     * D123 (4.4) — every LINE-level reduction, manual and promotional.
+     *
+     * It has to be both. `discountedSubtotal` is derived from this and must
+     * equal Σ lineTotal; if a promotion reduced the lines but not this sum, the
+     * order discount would be computed on money the customer never owed and the
+     * tax base would drift with it. `returns.calc` reads the stored figure as
+     * its denominator for the same reason.
+     *
+     * The two are mutually exclusive per line, so this never double-counts.
+     */
+    const totalDiscount = lines
+      .reduce(
+        (acc, l) => acc.plus(l.discountAmount).plus(l.promotionDiscountAmount),
+        new Prisma.Decimal(0),
+      )
+      .toNumber();
     // Order-level discount applies to the subtotal AFTER per-line discounts.
-    const discountedSubtotal = round2(subtotal - totalDiscount);
+    const discountedSubtotal = new Prisma.Decimal(subtotal).minus(totalDiscount).toNumber();
     const orderDiscount = await this.resolveOrderDiscount(
       tenantId,
       actor,
@@ -307,9 +702,55 @@ export class SalesService {
       orderDiscountInput,
     );
 
-    const taxable = round2(discountedSubtotal - orderDiscount.amount);
-    const taxAmount = settings.taxRatePercent > 0 ? round2((taxable * settings.taxRatePercent) / 100) : 0;
-    const total = round2(taxable + taxAmount);
+    /*
+     * D122 (3.10, extracted to `shared` in 3.14) — `Product.taxable` narrows
+     * the taxable base.
+     *
+     * The rule itself lives in `@hardware-pos/shared` because the TILL has to
+     * preview the same figure. 3.10 narrowed the base here only, so a cashier
+     * was quoted 18% on an exempt item the server then charged nothing for —
+     * the retail twin of audit item A2. One implementation, two callers.
+     */
+    const taxBase = new Prisma.Decimal(
+      taxableBase(
+        lines.map((l) => ({
+          lineTotal: l.lineTotal,
+          taxable: byId.get(l.productId)?.taxable !== false,
+        })),
+        discountedSubtotal,
+        orderDiscount.amount,
+      ),
+    );
+
+    const taxAmount =
+      settings.taxRatePercent > 0
+        ? taxBase.mul(settings.taxRatePercent).div(100).toDecimalPlaces(2).toNumber()
+        : 0;
+    // The TOTAL still starts from the full discounted subtotal: an exempt line is
+    // untaxed, not unsold.
+    /*
+     * D126 — a cart-level promotion, capped so it can never exceed what is left
+     * to pay after the manual order discount.
+     *
+     * DELIBERATELY NOT in `taxableBase` above, which is where the MANUAL order
+     * discount is. Confirmed with the PO: tax is computed as it always was and
+     * this discount comes off afterwards. The asymmetry is intentional and is
+     * the reason it is applied here, three lines below the tax, rather than
+     * folded into `orderDiscount` where it would silently change tax on every
+     * sale that carries one.
+     */
+    const promotionOrderDiscountAmount = promotionResult.orderPromotion
+      ? Math.min(
+          promotionResult.orderPromotion.discountAmount,
+          new Prisma.Decimal(discountedSubtotal).minus(orderDiscount.amount).toNumber(),
+        )
+      : 0;
+
+    const total = new Prisma.Decimal(discountedSubtotal)
+      .minus(orderDiscount.amount)
+      .minus(promotionOrderDiscountAmount)
+      .plus(taxAmount)
+      .toNumber();
 
     return {
       lines,
@@ -320,6 +761,13 @@ export class SalesService {
       orderDiscountAmount: orderDiscount.amount,
       orderDiscountReason: orderDiscount.reason,
       orderDiscountApprovedById: orderDiscount.approvedById,
+      promotionOrderDiscountAmount,
+      promotionOrderId: promotionOrderDiscountAmount > 0
+        ? (promotionResult.orderPromotion?.promotionId ?? null)
+        : null,
+      promotionOrderNameSnapshot: promotionOrderDiscountAmount > 0
+        ? (promotionResult.orderPromotion?.promotionName ?? null)
+        : null,
       taxAmount,
       total,
     };
@@ -517,12 +965,19 @@ export function toSaleListItem(row: SaleListRow): SaleListItem {
     returnedAmount: Number(row.returnedAmount),
     quickbooksDocumentType: row.quickbooksDocumentType,
     syncStatus: row.syncStatus,
+    // Always present, derived from local payment state — so a client never has to
+    // fall back to the external type (or to nothing) to know what document this is.
+    documentKind: resolveCustomerDocumentKind(row.paymentStatus),
   };
 }
 
 function toCartItem(dto: SaleItemInputDto): CartItemInput {
   return {
     productId: dto.productId,
+    // D120 — forward the variant. Omitting it here would type-check cleanly and
+    // silently drop every variant the till sent, since the field is optional on
+    // both sides.
+    productVariantId: dto.productVariantId ?? null,
     quantity: dto.quantity,
     unitPrice: dto.unitPrice,
     discountType: dto.discountType,
@@ -550,14 +1005,15 @@ export function computeDiscount(
   value: number | null | undefined,
   opts: { basis?: DiscountBasis | null; quantity?: number } = {},
 ): number {
-  if (!type || value == null || value <= 0) {
-    return 0;
-  }
-  if (type === 'PERCENTAGE') {
-    return Math.min(lineSubtotal, round2((lineSubtotal * value) / 100));
-  }
-  // Multiply first, round once — the same shape as the percentage branch, and
-  // it has to match the client's copy to the cent or the sale lands PARTIAL.
-  const units = opts.basis === 'UNIT' ? (opts.quantity ?? 1) : 1;
-  return Math.min(lineSubtotal, round2(value * units));
+  /*
+   * D59: delegated to the one Decimal engine. Same signature, same
+   * cannot-exceed-base rule; the float arithmetic this replaced mis-rounded
+   * exact half-cent boundaries (10% of 19.85 → 1.98 instead of 1.99). The UNIT
+   * basis (main, 2026-09-07) multiplies first and rounds once inside the
+   * engine, so a per-unit quotation converts to a sale on the same cent.
+   */
+  return discountAmountOf(lineSubtotal, type ?? null, value ?? null, {
+    basis: opts.basis ?? null,
+    units: opts.quantity ?? 1,
+  }).toNumber();
 }

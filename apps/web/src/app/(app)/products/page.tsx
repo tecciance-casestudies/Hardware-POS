@@ -2,13 +2,24 @@
 
 import Link from 'next/link';
 import * as React from 'react';
-import { Ban, FileUp, FolderTree, PackagePlus, Pencil, RotateCcw, Search } from 'lucide-react';
+import {
+  Ban,
+  CircleCheck,
+  CircleOff,
+  FileUp,
+  PackagePlus,
+  Pencil,
+  RotateCcw,
+  Search,
+  X,
+} from 'lucide-react';
 
 import { ProductImage } from '@/components/product-image';
 import { ImportProductsDialog } from '@/components/products/import-products-dialog';
+import { InventoryTabs } from '@/components/products/inventory-tabs';
+import { ProductStatusBadge } from '@/components/products/product-status-badge';
 import { ExportMenu } from '@/components/sales/export-menu';
 import { PageHeader } from '@/components/page-header';
-import { SyncBadge } from '@/components/quickbooks/sync-badge';
 import { Badge } from '@/components/ui/badge';
 import { Button, buttonVariants } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
@@ -21,18 +32,31 @@ import { productTypeLabel } from '@hardware-pos/shared';
 
 import { useAuth } from '@/lib/auth';
 import { Permission } from '@/lib/permissions';
+import { useEffectiveProfile } from '@/lib/platform-profile';
+import { normalizeSearchTerm } from '@/lib/search-term';
+import {
+  resolveItemStockPresentation,
+  resolveProductManagementPresentation,
+  type ProfileInventoryState,
+} from '@/lib/products/product-presentation';
 import {
   deactivateProduct,
   downloadProductsReport,
   fetchCategoryTree,
   fetchProducts,
   setProductActive,
+  setProductAvailability,
   type CategoryNode,
   type ManagedProduct,
   type ProductsQuery,
   type ProductSyncStatus,
   type ReportFormat,
 } from '@/lib/products-api';
+import { fetchBrands, type Brand } from '@/lib/products/brands-api';
+import {
+  variantPriceLabel,
+  variantSkuLabel,
+} from '@hardware-pos/shared';
 import { cn, formatMoney } from '@/lib/utils';
 import { resolveImageUrl } from '@/lib/products-api';
 
@@ -41,13 +65,47 @@ function isLowStock(p: ManagedProduct): boolean {
   return p.type === 'Inventory' && p.reorderLevel != null && p.quantityOnHand <= p.reorderLevel;
 }
 
+/**
+ * The "Source" cell for one row.
+ *
+ * Both the wording and the styling come from the resolver, so the QuickBooks table
+ * keeps its exact `QuickBooks`/`Local` split while a LOCAL or DISABLED tenant sees
+ * its own neutral label — with no inventory-mode conditional in this file.
+ */
+function SourceCell({
+  inventoryMode,
+  product,
+}: {
+  inventoryMode: ProfileInventoryState;
+  product: ManagedProduct;
+}) {
+  const row = resolveProductManagementPresentation({
+    inventoryMode,
+    syncStatus: product.syncStatus,
+    quickbooksItemId: product.quickbooksItemId,
+  });
+  if (!row.sourceLabel) return null;
+  return <Badge variant={row.sourceBadgeKind}>{row.sourceLabel}</Badge>;
+}
+
 export default function ProductsPage() {
   const { session, hasPermission } = useAuth();
   const canManage = hasPermission(Permission.PRODUCT_MANAGE);
+  // D101 — the 86 switch has its own permission so the till can hold it
+  // without catalogue write access.
+  const canSetAvailability = hasPermission(Permission.PRODUCT_AVAILABILITY_SET);
+
+  // The only mode-dependent value on this screen. Everything below reads flags off
+  // it rather than asking what the tenant is configured for.
+  const { inventoryMode, status: profileStatus } = useEffectiveProfile();
+  const screen = resolveProductManagementPresentation({ inventoryMode });
 
   const [search, setSearch] = React.useState('');
   const [debouncedSearch, setDebouncedSearch] = React.useState('');
   const [categoryId, setCategoryId] = React.useState('');
+  // D133 (`8.9`) — brand as a filter, beside category. A clothing buyer's
+  // first question about a catalogue is "show me everything by this label".
+  const [brandId, setBrandId] = React.useState('');
   const [subcategoryId, setSubcategoryId] = React.useState('');
   const [stockStatus, setStockStatus] = React.useState<'' | 'IN' | 'OUT' | 'LOW'>('');
   const [active, setActive] = React.useState<'' | 'true' | 'false'>('true');
@@ -75,6 +133,7 @@ export default function ProductsPage() {
   const [pageSize, setPageSize] = React.useState(20);
 
   const [categories, setCategories] = React.useState<CategoryNode[]>([]);
+  const [brands, setBrands] = React.useState<Brand[]>([]);
   const [rows, setRows] = React.useState<ManagedProduct[]>([]);
   const [total, setTotal] = React.useState(0);
   const [loading, setLoading] = React.useState(true);
@@ -84,17 +143,41 @@ export default function ProductsPage() {
   const [importOpen, setImportOpen] = React.useState(false);
 
   React.useEffect(() => {
-    const t = window.setTimeout(() => setDebouncedSearch(search.trim()), 300);
+    /*
+     * The shared normaliser, not a bare `.trim()`. Trimming alone leaves
+     * internal runs intact, so "rice  curry" reached the API with its double
+     * space and matched nothing — the server's `contains` is literal, and the
+     * stored name has one space. Customers and Sales already collapse runs;
+     * this screen was the odd one out.
+     */
+    const t = window.setTimeout(() => setDebouncedSearch(normalizeSearchTerm(search)), 300);
     return () => window.clearTimeout(t);
   }, [search]);
 
   React.useEffect(() => {
     setPage(1);
-  }, [debouncedSearch, categoryId, subcategoryId, stockStatus, active, syncStatus, pageSize]);
+  }, [debouncedSearch, categoryId, brandId, subcategoryId, stockStatus, active, syncStatus, pageSize]);
+
+  /**
+   * Drop filters the tenant's mode does not have, including ones a deep link set.
+   *
+   * The URL effect above runs on mount, before the profile is known, so a
+   * `?syncStatus=FAILED` link would otherwise send a QuickBooks filter for a LOCAL
+   * tenant. Clearing the state — rather than merely hiding the `<select>` — is what
+   * keeps the filter out of the request as well as off the screen.
+   */
+  React.useEffect(() => {
+    if (!screen.showSyncStatus && syncStatus !== '') setSyncStatus('');
+    if (!screen.showStockControls && stockStatus !== '') setStockStatus('');
+  }, [screen.showSyncStatus, screen.showStockControls, syncStatus, stockStatus]);
 
   React.useEffect(() => {
     if (!session) return;
     fetchCategoryTree(session).then(setCategories).catch(() => setCategories([]));
+    // Archived brands are deliberately absent: this picker is where a NEW
+    // choice is made, and a retired label is not one. The products that still
+    // carry it keep showing it (D133).
+    fetchBrands(session).then(setBrands).catch(() => setBrands([]));
   }, [session]);
 
   React.useEffect(() => {
@@ -107,6 +190,7 @@ export default function ProductsPage() {
       pageSize,
       search: debouncedSearch || undefined,
       categoryId: categoryId || undefined,
+      brandId: brandId || undefined,
       subcategoryId: subcategoryId || undefined,
       stockStatus: stockStatus || undefined,
       isActive: active || undefined,
@@ -128,7 +212,7 @@ export default function ProductsPage() {
     return () => {
       cancelled = true;
     };
-  }, [session, page, pageSize, debouncedSearch, categoryId, subcategoryId, stockStatus, active, syncStatus, reloadKey]);
+  }, [session, page, pageSize, debouncedSearch, categoryId, brandId, subcategoryId, stockStatus, active, syncStatus, reloadKey]);
 
   const toggleActive = async (p: ManagedProduct) => {
     if (!session) return;
@@ -136,6 +220,20 @@ export default function ProductsPage() {
     try {
       if (p.isActive) await deactivateProduct(session, p.id);
       else await setProductActive(session, p.id, true);
+      setReloadKey((k) => k + 1);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Update failed');
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  // D101 — flip the 86 switch; the server refuses kinds a count governs.
+  const toggleAvailability = async (p: ManagedProduct) => {
+    if (!session) return;
+    setBusyId(p.id);
+    try {
+      await setProductAvailability(session, p.id, p.soldOutAt != null);
       setReloadKey((k) => k + 1);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Update failed');
@@ -154,6 +252,7 @@ export default function ProductsPage() {
         {
           search: debouncedSearch || undefined,
           categoryId: categoryId || undefined,
+          brandId: brandId || undefined,
           subcategoryId: subcategoryId || undefined,
           stockStatus: stockStatus || undefined,
           isActive: active || undefined,
@@ -168,6 +267,20 @@ export default function ProductsPage() {
     }
   };
 
+  /**
+   * The rows wait for the profile as well as for the products.
+   *
+   * Not merely cosmetic: rendering the table before the mode is known would draw
+   * one set of columns and then swap it, which is both the layout instability and
+   * the "QuickBooks label flashes for a LOCAL tenant" problem. A failed profile
+   * request is a resolved state — it settles on the safe unresolved presentation
+   * rather than waiting forever.
+   */
+  const tableBusy = loading || profileStatus === 'loading';
+  // Product, SKU, Price, [On hand], [Source], Status, Actions.
+  const columnCount =
+    4 + (screen.showStockControls ? 1 : 0) + (screen.sourceLabel ? 1 : 0);
+
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const subcategoryOptions = categoryId
     ? (categories.find((c) => c.id === categoryId)?.subcategories ?? [])
@@ -175,15 +288,15 @@ export default function ProductsPage() {
 
   return (
     <div className="space-y-6">
+      <InventoryTabs />
       <PageHeader
         title="Products"
-        description="Manage the product catalog. QuickBooks remains the inventory master."
+        description={screen.helpText}
         actions={
           <div className="flex items-center gap-2">
-            <Link href="/products/categories" className={buttonVariants({ variant: 'outline' })}>
-              <FolderTree className="h-4 w-4" />
-              Categories
-            </Link>
+            {/* No Categories button here: InventoryTabs above already carries a
+                Categories tab to the same route, and two controls for one
+                destination inches apart just makes the header noisier. */}
             {canManage ? (
               <>
                 <Button variant="outline" onClick={() => setImportOpen(true)}>
@@ -208,8 +321,24 @@ export default function ProductsPage() {
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Search name or SKU…"
-            className="pl-10"
+            // The placeholder is not an accessible name — it disappears the
+            // moment anyone types, leaving the field unlabelled.
+            aria-label="Search products"
+            className="pl-10 pr-12"
           />
+          {search !== '' ? (
+            // Same affordance the POS menu browser gives: selecting the text
+            // and deleting it is awkward on a tablet, and clearing is how you
+            // get back to the unfiltered list.
+            <button
+              type="button"
+              onClick={() => setSearch('')}
+              aria-label="Clear search"
+              className="absolute right-1.5 top-1/2 flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              <X className="h-4 w-4" aria-hidden="true" />
+            </button>
+          ) : null}
         </div>
         <SearchSelect
           ariaLabel="Filter by category"
@@ -228,6 +357,27 @@ export default function ProductsPage() {
             })),
           ]}
         />
+        {/*
+          D133 (`8.9`). Hidden entirely when the tenant has no brands rather than
+          shown empty: a shop that does not track brands should not carry a
+          permanently useless control, and an empty picker teaches nothing.
+        */}
+        {brands.length > 0 ? (
+          <SearchSelect
+            ariaLabel="Filter by brand"
+            searchPlaceholder="Search brands…"
+            value={brandId}
+            onChange={setBrandId}
+            options={[
+              { value: '', label: 'All brands' },
+              ...brands.map((b) => ({
+                value: b.id,
+                label: b.name,
+                hint: b.productCount > 0 ? String(b.productCount) : undefined,
+              })),
+            ]}
+          />
+        ) : null}
         {subcategoryOptions.length > 0 ? (
           <Select
             value={subcategoryId}
@@ -242,27 +392,33 @@ export default function ProductsPage() {
             ))}
           </Select>
         ) : null}
-        <Select
-          value={stockStatus}
-          onChange={(e) => setStockStatus(e.target.value as '' | 'IN' | 'OUT' | 'LOW')}
-          className="w-auto"
-        >
-          <option value="">All stock</option>
-          <option value="IN">In stock</option>
-          <option value="LOW">Low stock</option>
-          <option value="OUT">Out of stock</option>
-        </Select>
-        <Select
-          value={syncStatus}
-          onChange={(e) => setSyncStatus(e.target.value as '' | ProductSyncStatus)}
-          className="w-auto"
-        >
-          <option value="">All sync</option>
-          <option value="SYNCED">Synced</option>
-          <option value="PENDING">Pending</option>
-          <option value="NOT_SYNCED">Not synced</option>
-          <option value="FAILED">Failed</option>
-        </Select>
+        {screen.showStockControls ? (
+          <Select
+            value={stockStatus}
+            onChange={(e) => setStockStatus(e.target.value as '' | 'IN' | 'OUT' | 'LOW')}
+            className="w-auto"
+            aria-label="Filter by stock status"
+          >
+            <option value="">All stock</option>
+            <option value="IN">In stock</option>
+            <option value="LOW">Low stock</option>
+            <option value="OUT">Out of stock</option>
+          </Select>
+        ) : null}
+        {screen.showSyncStatus ? (
+          <Select
+            value={syncStatus}
+            onChange={(e) => setSyncStatus(e.target.value as '' | ProductSyncStatus)}
+            className="w-auto"
+            aria-label="Filter by sync status"
+          >
+            <option value="">All sync</option>
+            <option value="SYNCED">Synced</option>
+            <option value="PENDING">Pending</option>
+            <option value="NOT_SYNCED">Not synced</option>
+            <option value="FAILED">Failed</option>
+          </Select>
+        ) : null}
         <Select
           value={active}
           onChange={(e) => setActive(e.target.value as '' | 'true' | 'false')}
@@ -284,6 +440,11 @@ export default function ProductsPage() {
       </div>
 
       {error ? <p className="text-sm text-danger">{error}</p> : null}
+      {screen.warning ? (
+        <p role="status" className="text-sm text-warning">
+          {screen.warning}
+        </p>
+      ) : null}
 
       <Card className="overflow-hidden">
         <div className="overflow-x-auto">
@@ -293,27 +454,33 @@ export default function ProductsPage() {
                 <th className="px-4 py-3 font-medium">Product</th>
                 <th className="px-4 py-3 font-medium">SKU</th>
                 <th className="px-4 py-3 text-right font-medium">Price</th>
-                <th className="px-4 py-3 text-right font-medium">On hand</th>
-                <th className="px-4 py-3 font-medium">Source</th>
+                {screen.showStockControls ? (
+                  <th className="px-4 py-3 text-right font-medium">On hand</th>
+                ) : null}
+                {screen.sourceLabel ? <th className="px-4 py-3 font-medium">Source</th> : null}
                 <th className="px-4 py-3 font-medium">Status</th>
                 <th className="px-4 py-3 text-right font-medium">Actions</th>
               </tr>
             </thead>
             <tbody>
-              {loading ? (
+              {tableBusy ? (
                 <tr>
-                  <td colSpan={7} className="px-4 py-16 text-center text-muted-foreground">
+                  <td colSpan={columnCount} className="px-4 py-16 text-center text-muted-foreground">
                     Loading products…
                   </td>
                 </tr>
               ) : rows.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="px-4 py-16 text-center text-muted-foreground">
+                  <td colSpan={columnCount} className="px-4 py-16 text-center text-muted-foreground">
                     No products found.
                   </td>
                 </tr>
               ) : (
-                rows.map((p) => (
+                rows.map((p) => {
+                  // D101 — per-ITEM stock rendering: a count, the 86 switch,
+                  // or nothing, resolved in one place (no kind comparison here).
+                  const itemStock = resolveItemStockPresentation(screen, p.sellableKind);
+                  return (
                   <tr key={p.id} className="border-b border-border last:border-0 hover:bg-muted/30">
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-3">
@@ -335,37 +502,78 @@ export default function ProductsPage() {
                         </div>
                       </div>
                     </td>
-                    <td className="px-4 py-3 text-muted-foreground">{p.sku ?? '—'}</td>
-                    <td className="px-4 py-3 text-right font-medium">{formatMoney(p.unitPrice)}</td>
-                    <td className="px-4 py-3 text-right">
-                      {p.type === 'Inventory' ? (
-                        <>
-                          <span className={cn(p.quantityOnHand <= 0 && 'font-medium text-danger')}>
-                            {p.quantityOnHand}
-                          </span>
-                          {isLowStock(p) && p.quantityOnHand > 0 ? (
-                            <div className="text-xs text-warning">Low</div>
-                          ) : null}
-                        </>
-                      ) : (
-                        <span className="text-muted-foreground">—</span>
-                      )}
+                    <td className="px-4 py-3 text-muted-foreground">{variantSkuLabel(p)}</td>
+                    <td className="px-4 py-3 text-right font-medium">
+                      {variantPriceLabel(p, formatMoney)}
                     </td>
-                    <td className="px-4 py-3">
-                      {p.quickbooksItemId ? (
-                        <Badge variant="primary">QuickBooks</Badge>
-                      ) : (
-                        <Badge variant="neutral">Local</Badge>
-                      )}
-                    </td>
+                    {screen.showStockControls ? (
+                      <td className="px-4 py-3 text-right">
+                        {itemStock === 'AVAILABILITY' ? (
+                          // D101 — an untracked item's cell says what a person
+                          // decided, not a number nothing maintains.
+                          <Badge variant={p.soldOutAt ? 'danger' : 'success'}>
+                            {p.soldOutAt ? 'Sold out' : 'Available'}
+                          </Badge>
+                        ) : itemStock === 'QUANTITY' && p.type === 'Inventory' ? (
+                          <>
+                            <span
+                              className={cn(
+                                screen.showStockWarnings &&
+                                  p.quantityOnHand <= 0 &&
+                                  'font-medium text-danger',
+                              )}
+                            >
+                              {p.quantityOnHand}
+                            </span>
+                            {screen.showStockWarnings && isLowStock(p) && p.quantityOnHand > 0 ? (
+                              <div className="text-xs text-warning">Low</div>
+                            ) : null}
+                          </>
+                        ) : (
+                          <span className="text-muted-foreground">—</span>
+                        )}
+                      </td>
+                    ) : null}
+                    {screen.sourceLabel ? (
+                      <td className="px-4 py-3">
+                        <SourceCell inventoryMode={inventoryMode} product={p} />
+                      </td>
+                    ) : null}
                     <td className="px-4 py-3">
                       <div className="flex flex-col items-start gap-1">
                         {!p.isActive ? <Badge variant="danger">Inactive</Badge> : null}
-                        <SyncBadge status={p.syncStatus} />
+                        <ProductStatusBadge
+                          presentation={resolveProductManagementPresentation({
+                            inventoryMode,
+                            syncStatus: p.syncStatus,
+                            quickbooksItemId: p.quickbooksItemId,
+                          })}
+                          syncStatus={p.syncStatus}
+                        />
                       </div>
                     </td>
                     <td className="px-4 py-3">
                       <div className="flex items-center justify-end gap-1">
+                        {/* D101 — the 86 switch, for whoever holds it (the
+                            till included); catalogue write stays canManage. */}
+                        {canSetAvailability && itemStock === 'AVAILABILITY' && p.isActive ? (
+                          <Tooltip label={p.soldOutAt ? 'Mark available' : 'Mark sold out'}>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              aria-label={p.soldOutAt ? 'Mark available' : 'Mark sold out'}
+                              disabled={busyId === p.id}
+                              onClick={() => toggleAvailability(p)}
+                              className={p.soldOutAt ? 'text-success' : 'text-warning'}
+                            >
+                              {p.soldOutAt ? (
+                                <CircleCheck className="h-4 w-4" />
+                              ) : (
+                                <CircleOff className="h-4 w-4" />
+                              )}
+                            </Button>
+                          </Tooltip>
+                        ) : null}
                         {canManage ? (
                           <>
                             <Tooltip label="Edit product">
@@ -405,7 +613,8 @@ export default function ProductsPage() {
                       </div>
                     </td>
                   </tr>
-                ))
+                  );
+                })
               )}
             </tbody>
           </table>

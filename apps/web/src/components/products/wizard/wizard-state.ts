@@ -1,0 +1,1159 @@
+/**
+ * Add Product wizard — the single state shape shared across all four steps
+ * (D44). Kept as a plain type + pure helpers so the wizard can be re-hydrated
+ * from the server for the Edit route without owning React state.
+ *
+ * Every field maps 1-to-1 to what the backend persists (see D44). Names carry
+ * server ids where relevant so the wizard can PATCH without inventing routes;
+ * `variations` and `variants` hold client-only `key`s that survive rename
+ * (React key stability) and only turn into real ids after the batch POST.
+ */
+
+import { validateAttributes, type AttributeField } from '@hardware-pos/shared';
+
+import type { ClientQuantityType } from '@/lib/catalog';
+import type { ProductBusinessKind } from '@/lib/products/product-presentation';
+import type { ManagedProduct, ProductItemType } from '@/lib/products-api';
+import type {
+  ProductVariant,
+  ProductVariationDimension,
+} from '@/lib/products/variants-api';
+
+/** Restaurant Category (Food / Beverage / Dessert). Empty when not chosen yet. */
+export type RestaurantFoodType = '' | 'FOOD' | 'BEVERAGE' | 'DESSERT';
+
+export type StepKey = 'details' | 'attributes' | 'variations' | 'pricing' | 'review';
+
+/**
+ * The FULL step order. The `attributes` step (D64) only renders for tenants
+ * whose domain declares a non-empty attribute schema — the wizard shell
+ * filters it out otherwise (`visibleSteps`), but validation iterates this
+ * list unconditionally, which is safe: an empty schema validates `{}` to no
+ * errors.
+ */
+export const STEP_ORDER: StepKey[] = ['details', 'attributes', 'variations', 'pricing', 'review'];
+
+/** The steps the stepper shows this tenant (D64 — see STEP_ORDER). */
+export function visibleSteps(attributeSchema: readonly AttributeField[]): StepKey[] {
+  return attributeSchema.length > 0
+    ? STEP_ORDER
+    : STEP_ORDER.filter((s) => s !== 'attributes');
+}
+
+/**
+ * A variation dimension in draft form.
+ *
+ * `key` is a locally-minted id so an in-progress rename doesn't remount the
+ * whole option list (React key churn); it becomes irrelevant once the wizard
+ * PUTs the dimensions and receives real server ids back.
+ */
+export interface VariationDraft {
+  key: string;
+  name: string;
+  /**
+   * D125 — the attribute-library definition this dimension was chosen from.
+   *
+   * Three states, and they are all different:
+   *  - `undefined` — never mapped by this wizard. The payload OMITS the key,
+   *    which the API reads as “leave whatever is stored alone”. That is what
+   *    stops an edit through a screen that does not know about the library
+   *    from silently unmapping a product somebody mapped by hand.
+   *  - `null` — explicitly unmapped.
+   *  - an id — mapped.
+   */
+  attributeDefinitionId?: string | null;
+  options: Array<{ key: string; name: string; attributeOptionId?: string | null }>;
+}
+
+/**
+ * The library attributes offered for one category (D125a).
+ *
+ * A definition bound to this category, **plus every unbound one** — the
+ * schema is explicit that `categoryId` is a binding HINT and that “an unbound
+ * definition (`Colour`) applies everywhere”. Filtering to the exact category
+ * would hide the shared scales the library exists to share.
+ *
+ * A pure function so the reconciliation below and the step component agree
+ * on one answer, and so it can be tested without rendering anything.
+ */
+export function attributesForCategory<
+  T extends { categoryId: string | null },
+>(definitions: readonly T[], categoryId: string): readonly T[] {
+  return definitions.filter((d) => d.categoryId === null || d.categoryId === categoryId);
+}
+
+/**
+ * One row of the sellable-variants table.
+ *
+ * `optionKeys` is index-aligned to `WizardState.variations`, so entry `i` is
+ * the option chosen for dimension `i`. That layout keeps enumeration and
+ * remap logic straightforward — no lookup tables required.
+ */
+export interface VariantDraft {
+  key: string;
+  enabled: boolean;
+  sku: string;
+  barcode: string;
+  unitPrice: string;
+  costPrice: string;
+  openingQuantity: string;
+  reorderLevel: string;
+  imageUrl: string | null;
+  isActive: boolean;
+  optionKeys: string[];
+  /**
+   * Server id — present only in edit mode after hydration. Used by the wizard
+   * to route field edits through PATCH `/variants/:id` instead of the batch
+   * create endpoint. Absent on newly-added rows.
+   */
+  serverId?: string;
+}
+
+export interface WizardState {
+  // Step 1 — Product details
+  name: string;
+  type: ProductItemType;
+  categoryId: string;
+  subcategoryId: string;
+  brand: string;
+  description: string;
+  trackInventory: boolean;
+  /**
+   * D122 (3.13) — whether the product attracts tax. Defaults true, because that
+   * is already true of every product: there is no per-product exemption in any
+   * tenant's history.
+   */
+  taxable: boolean;
+  /**
+   * D134 (`6.1`) — sold by the piece, or by weight/measure.
+   *
+   * Top-level rather than inside `simple`, because it is a fact about the
+   * PRODUCT and not about one pricing shape: rice is sold by the kilo
+   * whether or not it also comes in Samba and Basmathi. A variant product
+   * carries it on the parent and every variant inherits it.
+   */
+  quantityType: ClientQuantityType;
+  /**
+   * D134b — what the quantity is measured IN: "kg", "g", "L", "m".
+   *
+   * Free text, deliberately (D134b §1): nothing computes on it, it is
+   * printed. A fixed dropdown was the original Phase 6 scope and D134
+   * reduced it to one field precisely so a shop selling by the cubit is
+   * not blocked on us adding a row.
+   *
+   * `''` here, `null` on the wire — an empty string is what an input holds.
+   */
+  unitOfMeasure: string;
+  imageUrl: string;
+
+  // Step 2 — Variations
+  hasVariations: boolean;
+  variations: VariationDraft[];
+
+  // Step 3 — Variants (only used when hasVariations)
+  variants: VariantDraft[];
+  /** Branch where opening stock lands. Required only when at least one enabled variant has openingQuantity > 0. */
+  openingBranchId: string;
+
+  // Step 3 — Simple mode (only used when !hasVariations)
+  simple: {
+    sku: string;
+    barcode: string;
+    unitPrice: string;
+    costPrice: string;
+    openingQuantity: string;
+    reorderLevel: string;
+  };
+
+  // ── Restaurant-only fields (D45). Populated by every wizard state but only
+  //    surfaced when `businessKind === 'RESTAURANT'` — carrying them
+  //    unconditionally keeps the type unbranched and means a tenant that
+  //    flips business type mid-session doesn't lose its already-entered data.
+
+  /** Food / Beverage / Dessert. Required at Step 1 for Restaurant tenants. */
+  foodType: RestaurantFoodType;
+  /** Prep time in minutes, kept as string to match the wizard's input pattern. */
+  prepMinutes: string;
+  /** Dietary chip picks — e.g. Veg / Non-Veg / Spicy. */
+  dietaryTags: string[];
+  /** ModifierGroup ids linked to this product (Step 3, card A). */
+  modifierGroupIds: string[];
+  /**
+   * KitchenStation ids this product ROUTES to (Step 3, card C).
+   *
+   * D152 restores the per-station split D147 removed, and restores the meaning
+   * of this field with it: a round is cut into one ticket per station its
+   * items route to, and these links are the routing input. That is why the
+   * choice is now REQUIRED for a restaurant tenant (see `validateStep`) and
+   * why the card preselects Main — D147's objection was precisely that this
+   * control started empty, sat in no validation rule and warned nobody, so
+   * routing on it was routing on an accident.
+   *
+   * An item that reaches save with no station is still never dropped: the API
+   * routes it to the branch's Main station (D152). The rule below exists so
+   * the operator gets to DECIDE where a dish is cooked, not so the dish
+   * survives — that part is the server's job and it holds either way.
+   */
+  kitchenStationIds: string[];
+  /**
+   * Promotion ids the operator picked/linked in Step 3, card B.
+   *
+   * These are NOT persisted from Step 4 as a promotions-array on the product
+   * itself — the wizard patches each promotion after the product exists to add
+   * a `PromotionItem` pointing at the new product id. See `product-wizard.tsx`
+   * for the exact orchestration.
+   */
+  promotionIds: string[];
+
+  /**
+   * D64 — domain attribute inputs, RAW: every value is the input's string
+   * ('' = not entered; booleans are 'true'/'false'). Conversion to the typed
+   * document happens once, in `buildAttributesDocument`, against the schema —
+   * keeping the state shape uniform with every other wizard field.
+   */
+  attributes: Record<string, string>;
+
+  /**
+   * D65 — the recipe (Step 3, card D; only when the tenant's capabilities
+   * declare `catalogue.components`). Raw input strings like every other
+   * wizard field; `wastagePercent` is the operator-facing percentage — the
+   * PUT converts to the API's 0–1 rate.
+   */
+  components: ComponentDraft[];
+}
+
+/** D65 — one recipe row. Name/SKU cached from the picker for display. */
+export interface ComponentDraft {
+  componentProductId: string;
+  componentName: string;
+  componentSku: string | null;
+  quantity: string;
+  wastagePercent: string;
+}
+
+/**
+ * A stable, cheap client id. `crypto.randomUUID` is available in every
+ * browser Next 15 targets; the fallback preserves behaviour in older test
+ * environments where jsdom hasn't polyfilled it.
+ */
+export function makeKey(prefix: string): string {
+  const rand =
+    typeof globalThis.crypto !== 'undefined' && 'randomUUID' in globalThis.crypto
+      ? globalThis.crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  return `${prefix}-${rand}`;
+}
+
+export function initialState(): WizardState {
+  return {
+    name: '',
+    type: 'Inventory',
+    categoryId: '',
+    subcategoryId: '',
+    brand: '',
+    description: '',
+    trackInventory: true,
+    taxable: true,
+    // WHOLE, like the column default (D134): a new product behaves exactly
+    // as products did before this field existed.
+    quantityType: 'WHOLE',
+    unitOfMeasure: '',
+    imageUrl: '',
+    hasVariations: false,
+    variations: [],
+    variants: [],
+    openingBranchId: '',
+    simple: {
+      sku: '',
+      barcode: '',
+      unitPrice: '',
+      costPrice: '',
+      openingQuantity: '',
+      reorderLevel: '',
+    },
+    foodType: '',
+    prepMinutes: '',
+    dietaryTags: [],
+    modifierGroupIds: [],
+    kitchenStationIds: [],
+    promotionIds: [],
+    attributes: {},
+    components: [],
+  };
+}
+
+/**
+ * Hydrate the wizard from server responses for the Edit route.
+ *
+ * Variant rows are keyed by their server id so a PATCH knows which row it is
+ * targeting; option choices are mapped through the dimension list so a stale
+ * option id from a deleted variation shows up as an empty select rather than
+ * silently landing on a different option.
+ */
+/**
+ * Restaurant-only hydration inputs, all optional.
+ *
+ * The wizard shell fetches these AFTER the main product/variants payload lands
+ * (three separate endpoints — modifier groups, stations, promotions) and passes
+ * whichever it managed to load. Missing arrays fall back to `[]` so a hydration
+ * failure does not surface as "already selected everything" or an undefined
+ * `.map`.
+ */
+export interface RestaurantHydration {
+  foodType?: RestaurantFoodType;
+  prepMinutes?: number | null;
+  dietaryTags?: string[];
+  modifierGroupIds?: string[];
+  kitchenStationIds?: string[];
+  promotionIds?: string[];
+  /** D65 — existing recipe rows, pre-converted to drafts by the shell. */
+  components?: ComponentDraft[];
+}
+
+export function hydrateFromProduct(
+  product: ManagedProduct,
+  variants: ProductVariant[],
+  dimensions: ProductVariationDimension[],
+  restaurant: RestaurantHydration = {},
+): WizardState {
+  const hasVariations = variants.length > 0 || dimensions.length > 0;
+
+  const variationDrafts: VariationDraft[] = dimensions.map((d) => ({
+    // Reuse the server id as the local key on hydration — it is unique and
+    // means the wizard can PUT with the same identifier if the operator adds
+    // an option without renaming the dimension.
+    key: d.id,
+    name: d.name,
+    // Echoed back exactly as stored, so re-saving an untouched product is a
+    // no-op on the mapping rather than a silent unmap.
+    attributeDefinitionId: d.attributeDefinitionId,
+    options: d.options.map((o) => ({
+      key: o.id,
+      name: o.name,
+      attributeOptionId: o.attributeOptionId,
+    })),
+  }));
+
+  const variantDrafts: VariantDraft[] = variants.map((v) => ({
+    key: v.id,
+    serverId: v.id,
+    enabled: v.isActive,
+    sku: v.sku,
+    barcode: v.barcode ?? '',
+    unitPrice: String(v.unitPrice),
+    costPrice: v.costPrice != null ? String(v.costPrice) : '',
+    openingQuantity: '', // Edit mode never re-seeds opening stock; that's Receive Stock.
+    reorderLevel: v.reorderLevel != null ? String(v.reorderLevel) : '',
+    imageUrl: v.imageUrl,
+    isActive: v.isActive,
+    optionKeys: dimensions.map((d) => {
+      const ov = v.optionValues.find((x) => x.dimensionId === d.id);
+      return ov?.optionId ?? '';
+    }),
+  }));
+
+  return {
+    name: product.name,
+    type: product.type,
+    categoryId: product.categoryId ?? '',
+    subcategoryId: product.subcategoryId ?? '',
+    brand: '',
+    description: product.description ?? '',
+    // D101 — for a food-typed row the CLASSIFICATION is the stored answer
+    // (`type` is always 'Inventory' on the restaurant wizard, so it cannot
+    // say); retail rows keep the D44 type-driven read.
+    trackInventory:
+      product.foodType != null
+        ? product.sellableKind === 'STOCK_ITEM'
+        : product.type === 'Inventory',
+    // Round-trips on edit. `?? true` guards a response from an API that predates
+    // the field, which must not silently flip a product to exempt.
+    taxable: product.taxable ?? true,
+    // Round-trips on edit, same as `taxable`. `?? 'WHOLE'` guards a response
+    // from an API predating the field, which must not silently convert a
+    // measured product into a counted one on the next save.
+    quantityType: product.quantityType ?? 'WHOLE',
+    unitOfMeasure: product.unitOfMeasure ?? '',
+    imageUrl: product.imageUrl ?? '',
+    hasVariations,
+    variations: variationDrafts,
+    variants: variantDrafts,
+    openingBranchId: '',
+    simple: {
+      sku: product.sku ?? '',
+      barcode: '',
+      unitPrice: hasVariations ? '' : String(product.unitPrice),
+      costPrice: !hasVariations && product.costPrice != null ? String(product.costPrice) : '',
+      openingQuantity: '',
+      reorderLevel:
+        !hasVariations && product.reorderLevel != null ? String(product.reorderLevel) : '',
+    },
+    foodType: restaurant.foodType ?? '',
+    prepMinutes:
+      restaurant.prepMinutes != null ? String(restaurant.prepMinutes) : '',
+    dietaryTags: restaurant.dietaryTags ?? [],
+    modifierGroupIds: restaurant.modifierGroupIds ?? [],
+    kitchenStationIds: restaurant.kitchenStationIds ?? [],
+    promotionIds: restaurant.promotionIds ?? [],
+    // D64 — back to raw input strings; booleans render as 'true'/'false'.
+    attributes: Object.fromEntries(
+      Object.entries(product.attributes ?? {}).map(([k, v]) => [k, String(v)]),
+    ),
+    components: restaurant.components ?? [],
+  };
+}
+
+// ── Combinations ─────────────────────────────────────────────────────────────
+
+export interface Combination {
+  optionKeys: string[];
+  label: string;
+}
+
+/**
+ * Cartesian product of every variation dimension's options.
+ *
+ * Order matches `variations` so `Combination.optionKeys[i]` is the option for
+ * dimension `i` — the same layout `VariantDraft.optionKeys` uses. The label
+ * joins by " · " (a middle dot) so it survives a comma-carrying option name.
+ */
+export function enumerateCombinations(variations: VariationDraft[]): Combination[] {
+  const usable = variations.filter(
+    (d) => d.name.trim() && d.options.some((o) => o.name.trim()),
+  );
+  if (usable.length === 0) return [];
+
+  let acc: Combination[] = [{ optionKeys: [], label: '' }];
+  for (const dim of usable) {
+    const named = dim.options.filter((o) => o.name.trim());
+    const next: Combination[] = [];
+    for (const combo of acc) {
+      for (const opt of named) {
+        next.push({
+          optionKeys: [...combo.optionKeys, opt.key],
+          label: combo.label ? `${combo.label} · ${opt.name}` : opt.name,
+        });
+      }
+    }
+    acc = next;
+  }
+  return acc;
+}
+
+/**
+ * Compose a variant's display label from its option ids. Used in the pricing
+ * table, review card, and the right-rail preview.
+ */
+export function variantLabel(
+  variant: VariantDraft,
+  variations: VariationDraft[],
+): string {
+  const parts: string[] = [];
+  for (let i = 0; i < variations.length; i += 1) {
+    const dim = variations[i]!;
+    const optKey = variant.optionKeys[i];
+    if (!optKey) continue;
+    const opt = dim.options.find((o) => o.key === optKey);
+    if (opt?.name.trim()) parts.push(opt.name);
+  }
+  return parts.join(' · ');
+}
+
+// ── Validation ───────────────────────────────────────────────────────────────
+
+export interface ValidateContext {
+  /** From the platform profile; determines whether opening-stock UI is present. */
+  inventoryMode: 'LOCAL' | 'QUICKBOOKS' | 'DISABLED' | 'EXTERNAL' | null;
+  /**
+   * Restaurant vs. Retail. When 'RESTAURANT', Step 1's Food/Beverage/Dessert
+   * `foodType` is required. Null while the profile is unresolved — same fail-
+   * safe as `inventoryMode: null`.
+   */
+  businessKind?: ProductBusinessKind | null;
+  /**
+   * D64 — the tenant domain's attribute schema. `[]` (or absent) skips the
+   * attributes step entirely; the server validates against the same list, so
+   * client validation here is usability, not authority.
+   */
+  attributeSchema?: readonly AttributeField[];
+  /**
+   * D152 — does the branch have a kitchen-station catalogue to pick FROM?
+   *
+   * The station is a required choice for a restaurant product, but only where
+   * the operator can actually make it. A branch with no active station cannot
+   * satisfy the rule at all, and a Continue button held shut by a list that
+   * cannot be filled is worse than the gap the rule closes — the card says so
+   * on screen instead, and the server still routes the item to Main.
+   *
+   * Resolved by the SHELL, which owns every other validation fact too (D31).
+   * Absent or `null` means UNRESOLVED and never blocks: the same fail-safe
+   * `inventoryMode: null` and `businessKind: null` already take.
+   */
+  hasKitchenStations?: boolean | null;
+}
+
+export const MAX_COMBINATIONS = 500;
+/** Combinations above this threshold require operator confirmation before use. */
+export const COMBINATION_CONFIRM_THRESHOLD = 100;
+
+/** `@MaxLength(80)` on CreateProductDto.sku and CreateVariantInputDto.sku/barcode. */
+export const MAX_SKU_LENGTH = 80;
+
+/**
+ * D170 — a SKU suggested from the product's name.
+ *
+ * `Cement 50kg Bag` + `A7F` -> `CEMENT-50KG-BAG-A7F`.
+ *
+ * The suffix is a PARAMETER rather than generated in here, so this stays a
+ * pure function that a test can pin exactly. `randomSkuSuffix` beside it is
+ * the one impure line, called at the click.
+ *
+ * Why a suffix at all: `@@unique([tenantId, sku])`. Two products called
+ * "Cement 50kg Bag" are ordinary in a shop that restocks under a new
+ * supplier code, and a bare slug would collide and be refused at save with
+ * an error the operator did not cause. It is a SUGGESTION, not an
+ * assignment: the field stays editable, and a clash is still the server's
+ * to report.
+ */
+export function suggestSku(name: string, suffix: string): string {
+  const slug = name
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  const tail = suffix ? `-${suffix}` : '';
+  /*
+   * A product with no usable letters ("???", or a name in a script this
+   * strips entirely) still gets a usable SKU rather than a bare `-A7F`.
+   */
+  if (!slug) return suffix ? `SKU-${suffix}` : '';
+  // Truncated from the NAME end, never the suffix: the suffix is the part
+  // carrying uniqueness, so trimming it would defeat the point.
+  const room = MAX_SKU_LENGTH - tail.length;
+  return `${slug.slice(0, Math.max(room, 0)).replace(/-+$/, '')}${tail}`;
+}
+
+/** Three base-36 characters. The only impure half of `suggestSku`. */
+export function randomSkuSuffix(): string {
+  return Math.random().toString(36).slice(2, 5).toUpperCase().padEnd(3, '0');
+}
+
+/** `@MaxLength(200)` on CreateProductDto.name. */
+export const MAX_NAME_LENGTH = 200;
+
+/**
+ * Decimal places of the value the server will parse, not of what was typed.
+ *
+ * `String(Number(x))` normalises `2.50` to `2.5` and `1e-3` to `0.001`, so a
+ * trailing zero is never counted against the operator. Magnitudes small enough
+ * to stay in exponent form after that are past any limit we set, so they are
+ * reported as over — the alternative is parsing `e` notation to prove a number
+ * nobody types is fine.
+ */
+function decimalPlacesOf(raw: string): number {
+  const normalised = String(Number(raw));
+  if (normalised.includes('e') || normalised.includes('E')) return Number.MAX_SAFE_INTEGER;
+  const dot = normalised.indexOf('.');
+  return dot === -1 ? 0 : normalised.length - dot - 1;
+}
+
+/**
+ * An OPTIONAL numeric input, checked against the same rules the DTO applies.
+ *
+ * Empty passes — absence is how the payload builders say "not set". Anything
+ * else has to survive `Number()` as a non-negative value, because that is the
+ * coercion the builders perform on commit: today a pasted word becomes `NaN`
+ * and JSON-serialises to `null` (the entry silently disappears) and a negative
+ * sails through to a `@Min(0)` rejection the operator cannot map back to a
+ * field. `maxDecimals` is passed only where the DTO actually declares
+ * `maxDecimalPlaces` — inventing a cap the server does not enforce would block
+ * saves the API would have accepted.
+ */
+function optionalNumberError(
+  raw: string,
+  label: string,
+  maxDecimals?: number,
+): string | null {
+  const trimmed = raw.trim();
+  if (trimmed === '') return null;
+  const n = Number(trimmed);
+  if (!Number.isFinite(n)) return `${label} must be a number.`;
+  if (n < 0) return `${label} cannot be negative.`;
+  if (maxDecimals != null && decimalPlacesOf(trimmed) > maxDecimals) {
+    return `${label} allows at most ${maxDecimals} decimal places.`;
+  }
+  return null;
+}
+
+export function validateStep(
+  step: StepKey,
+  state: WizardState,
+  ctx: ValidateContext,
+): Record<string, string> {
+  const errors: Record<string, string> = {};
+
+  if (step === 'details') {
+    if (!state.name.trim()) errors.name = 'Give the product a name.';
+    else if (state.name.trim().length > MAX_NAME_LENGTH) {
+      // The input caps typing at the same number, so this catches the values
+      // that never went through it: a product imported by CSV, a draft
+      // restored from localStorage, or an edit hydrated from an older row.
+      errors.name = `Product name is limited to ${MAX_NAME_LENGTH} characters.`;
+    }
+    if (!state.type) errors.type = 'Choose an item type.';
+    if (state.description.length > 800) {
+      errors.description = 'Description is limited to 800 characters.';
+    }
+    // Restaurant only: Food / Beverage / Dessert is a required categorisation.
+    // The retail wizard has no equivalent — Item Type covers it there.
+    if (ctx.businessKind === 'RESTAURANT' && !state.foodType) {
+      errors.foodType = 'Category is required';
+    }
+    if (state.prepMinutes) {
+      const n = Number(state.prepMinutes);
+      if (!Number.isFinite(n) || n < 0 || n > 360) {
+        errors.prepMinutes = 'Preparation time is 0-360 minutes.';
+      } else if (!Number.isInteger(n)) {
+        // The DTO declares `@IsInt()`, so a half-minute is a 400 on commit
+        // rather than a rounding — say so here, next to the field.
+        errors.prepMinutes = 'Preparation time must be a whole number of minutes.';
+      }
+    }
+  }
+
+  if (step === 'attributes') {
+    // D64 — run the SAME validator the server refuses with, over the typed
+    // document the payload builder will send. Errors keyed `attr-<key>` so
+    // the step highlights the exact field.
+    const schema = ctx.attributeSchema ?? [];
+    for (const issue of validateAttributes(schema, buildAttributesDocument(state, schema))) {
+      errors[issue.key ? `attr-${issue.key}` : 'attributes'] = issue.message;
+    }
+  }
+
+  if (step === 'variations') {
+    if (state.hasVariations) {
+      // Each declared dimension needs a name and at least one named option, so
+      // the eventual PUT lands with the same shape the DTO accepts.
+      // The server upserts dimensions BY NAME (see ReplaceVariationsDto), so
+      // two dimensions called "Size" are not two dimensions — they are one
+      // fighting itself, and which options survive is a coin toss.
+      const seenDimensions = new Set<string>();
+
+      state.variations.forEach((d, di) => {
+        const dimensionName = d.name.trim();
+        if (!dimensionName) {
+          errors[`variation-name-${di}`] = 'Name this variation.';
+        } else {
+          const key = dimensionName.toLowerCase();
+          if (seenDimensions.has(key)) {
+            errors[`variation-name-${di}`] = 'Variation names must be unique.';
+          }
+          seenDimensions.add(key);
+        }
+        const namedOptions = d.options.filter((o) => o.name.trim());
+        if (namedOptions.length === 0) {
+          errors[`variation-options-${di}`] = 'Add at least one option.';
+        }
+        d.options.forEach((o, oi) => {
+          if (!o.name.trim()) {
+            errors[`variation-option-${di}-${oi}`] = 'Option needs a name.';
+          }
+        });
+        // Duplicate options within a dimension would collide on the unique
+        // (dimensionId, name) constraint the server enforces.
+        const seen = new Set<string>();
+        for (const o of namedOptions) {
+          const key = o.name.trim().toLowerCase();
+          if (seen.has(key)) {
+            errors[`variation-dup-${di}`] = 'Options within a variation must be unique.';
+            break;
+          }
+          seen.add(key);
+        }
+      });
+
+      const combinations = enumerateCombinations(state.variations).length;
+      if (combinations === 0) {
+        errors['variations-empty'] = 'Add at least one option so a variant exists.';
+      } else if (combinations > MAX_COMBINATIONS) {
+        errors['variations-too-many'] = `That is ${combinations} combinations. Split into separate products or trim options — the maximum is ${MAX_COMBINATIONS}.`;
+      }
+    }
+  }
+
+  if (step === 'pricing') {
+    /**
+     * The stock inputs are conditionally rendered, and a value can outlive its
+     * field — type a reorder point, then switch Track stock off (D101), and the
+     * string stays in state with nowhere to show it. Validating it anyway would
+     * block Continue on a message the operator cannot see or clear, so these two
+     * mirror the step's own render conditions exactly.
+     */
+    const showsReorder = state.trackInventory;
+    const showsOpening = ctx.inventoryMode === 'LOCAL' && state.trackInventory;
+
+    // D134c — a measured product MUST name its unit. The server refuses it
+    // too, and the server is the authority; this is here so the operator
+    // finds out beside the field rather than as a toast after Save.
+    if (state.quantityType === 'DECIMAL' && !state.unitOfMeasure.trim()) {
+      errors['unitOfMeasure'] =
+        'Name the unit this is sold in — for example kg, g or L.';
+    }
+
+    /*
+     * D152 — a restaurant dish must name the station that cooks it.
+     *
+     * This is the half of the reversal that makes the per-station split safe
+     * again. D147 removed the split because this field started empty, was in
+     * no rule and carried no warning; requiring it here is what turns the
+     * links from an accident into an answer. It is a cheap requirement, not an
+     * obstacle: the card preselects Main the moment the catalogue lands, so an
+     * operator who does not care accepts Main and moves on.
+     *
+     * Two guards, and both are load-bearing:
+     *  - RESTAURANT only. The card is not rendered for any other business
+     *    kind, and blocking a hardware product on a field it cannot see is
+     *    worse than the gap it closes.
+     *  - `hasKitchenStations === true`. An unsatisfiable rule is not a rule;
+     *    see `ValidateContext.hasKitchenStations`.
+     */
+    if (
+      ctx.businessKind === 'RESTAURANT' &&
+      ctx.hasKitchenStations === true &&
+      state.kitchenStationIds.length === 0
+    ) {
+      errors['kitchenStationIds'] =
+        'Choose the kitchen station that prepares this item — pick Main if you are not sure.';
+    }
+
+    if (state.hasVariations) {
+      const enabled = state.variants.filter((v) => v.enabled);
+      if (enabled.length === 0) {
+        errors['pricing-none-enabled'] = 'Enable at least one variant to sell.';
+      }
+      const skus = new Set<string>();
+      enabled.forEach((v, vi) => {
+        const sku = v.sku.trim();
+        if (!sku) errors[`variant-sku-${vi}`] = 'SKU is required.';
+        else {
+          const key = sku.toLowerCase();
+          // Length loses to uniqueness only in ordering: both are reported
+          // against the same field, and the set is fed either way so a
+          // too-long SKU still counts as a duplicate of its twin.
+          if (skus.has(key)) errors[`variant-sku-${vi}`] = 'SKUs must be unique.';
+          else if (sku.length > MAX_SKU_LENGTH) {
+            errors[`variant-sku-${vi}`] = `SKU is limited to ${MAX_SKU_LENGTH} characters.`;
+          }
+          skus.add(key);
+        }
+
+        if (v.barcode.trim().length > MAX_SKU_LENGTH) {
+          errors[`variant-barcode-${vi}`] = `Barcode is limited to ${MAX_SKU_LENGTH} characters.`;
+        }
+
+        const price = Number(v.unitPrice);
+        if (v.unitPrice === '' || !Number.isFinite(price) || price < 0) {
+          errors[`variant-price-${vi}`] = 'Enter a selling price.';
+        } else if (decimalPlacesOf(v.unitPrice) > 2) {
+          // The variant DTO is stricter than the product one here
+          // (`@IsNumber({ maxDecimalPlaces: 2 })`), so mirror it per-row.
+          errors[`variant-price-${vi}`] = 'Selling price allows at most 2 decimal places.';
+        }
+
+        const openq = showsOpening
+          ? optionalNumberError(v.openingQuantity, 'Opening stock', 3)
+          : null;
+        if (openq) errors[`variant-openq-${vi}`] = openq;
+        const reorder = showsReorder
+          ? optionalNumberError(v.reorderLevel, 'Reorder point', 3)
+          : null;
+        if (reorder) errors[`variant-reorder-${vi}`] = reorder;
+      });
+
+      // Opening branch is only meaningful under LOCAL inventory AND when the
+      // operator actually asked for opening stock. Every other case is a
+      // future Receive Stock — not this wizard's concern.
+      if (ctx.inventoryMode === 'LOCAL') {
+        const needsBranch = enabled.some((v) => Number(v.openingQuantity) > 0);
+        if (needsBranch && !state.openingBranchId) {
+          errors['openingBranchId'] = 'Pick where the opening stock lands.';
+        }
+      }
+    } else {
+      /*
+       * D170 — SKU is OPTIONAL here, as it always was on the server.
+       *
+       * The column is nullable, `CreateProductDto` marks it `@IsOptional()`,
+       * and the create maps `dto.sku ?? null`. This rule was the only thing
+       * making it mandatory, and it sat directly under a placeholder reading
+       * "or leave blank to generate" — a promise no layer could keep,
+       * because nothing in the codebase generated a product SKU at all. The
+       * Generate button now fills one in; leaving it blank is also a real
+       * answer, and reaches the server as null.
+       */
+      const sku = state.simple.sku.trim();
+      if (sku.length > MAX_SKU_LENGTH) {
+        errors['simple-sku'] = `SKU is limited to ${MAX_SKU_LENGTH} characters.`;
+      }
+      const price = Number(state.simple.unitPrice);
+      if (state.simple.unitPrice === '' || !Number.isFinite(price) || price < 0) {
+        errors['simple-price'] = 'Enter a selling price.';
+      }
+      /*
+       * D170 — these two ARE capped now, and the old note explaining why
+       * they were not is what made the change necessary to state.
+       *
+       * It read: "`CreateProductDto` declares them as plain `@IsNumber()
+       * @Min(0)`, unlike the variant DTO. Only the checks the server
+       * actually makes are worth blocking a save over." That was correct
+       * while these values only ever reached `POST /products`.
+       *
+       * They now also reach `POST /inventory-receipts`, whose line DTO is
+       * the stricter one: `quantityReceived` is `maxDecimalPlaces: 3` and
+       * `unitCost` is `2`. Uncapped, a cost of `4.567` would pass every
+       * check here, create the product, and then 400 on the receipt — the
+       * operator would have a product with no opening stock and an error
+       * naming a field they cannot see.
+       *
+       * The caps match the COLUMNS too (`Decimal(12,2)` for cost,
+       * `Decimal(12,3)` for quantity), so the extra digits were being
+       * rounded away in silence even before the receipt existed. Saying so
+       * up front is the honest version of what already happened.
+       */
+      const cost = optionalNumberError(state.simple.costPrice, 'Cost price', 2);
+      if (cost) errors['simple-cost'] = cost;
+      const openq = showsOpening
+        ? optionalNumberError(state.simple.openingQuantity, 'Opening quantity', 3)
+        : null;
+      if (openq) errors['simple-openq'] = openq;
+      const reorder = showsReorder
+        ? optionalNumberError(state.simple.reorderLevel, 'Reorder point')
+        : null;
+      if (reorder) errors['simple-reorder'] = reorder;
+
+      /*
+       * D170 — the same rule the variant branch above applies, for the
+       * same reason: opening stock is posted as an inventory receipt, and a
+       * receipt has to land in a branch. A single product had no branch
+       * control at all, which is part of why its opening quantity went
+       * nowhere.
+       */
+      if (ctx.inventoryMode === 'LOCAL' && Number(state.simple.openingQuantity) > 0) {
+        if (!state.openingBranchId) {
+          errors['openingBranchId'] = 'Pick where the opening stock lands.';
+        }
+      }
+    }
+
+    // D65 — recipe rows (card D). Every listed component needs a usable
+    // quantity; wastage is a percentage and cannot reach 100.
+    state.components.forEach((c, ci) => {
+      const q = Number(c.quantity);
+      if (c.quantity.trim() === '' || !Number.isFinite(q) || q <= 0) {
+        errors[`component-qty-${ci}`] = `Enter a quantity for ${c.componentName}.`;
+      }
+      if (c.wastagePercent.trim() !== '') {
+        const w = Number(c.wastagePercent);
+        if (!Number.isFinite(w) || w < 0 || w >= 100) {
+          errors[`component-wastage-${ci}`] = 'Wastage is 0–99.99%.';
+        }
+      }
+    });
+  }
+
+  return errors;
+}
+
+/**
+ * D134 (`6.1`) — "Selling price", or "Selling price (per kg)".
+ *
+ * The operator's actual question was "where do I enter a weight price" — so
+ * the price field has to SAY it is per kilo, or the number is ambiguous the
+ * moment the product is measured.
+ *
+ * One function, three call sites: the simple form, the variant table header
+ * and the variant list. `2.12` is the standing reason — the same value
+ * labelled independently in N places becomes N different labels.
+ */
+export function sellingPriceLabel(state: WizardState): string {
+  const unit = state.unitOfMeasure.trim();
+  return state.quantityType === 'DECIMAL' && unit
+    ? `Selling price (per ${unit})`
+    : 'Selling price';
+}
+
+/** D65 — drafts → the PUT body (percent → 0–1 rate). Validated above. */
+export function buildComponentsPayload(state: WizardState) {
+  return state.components.map((c) => ({
+    componentProductId: c.componentProductId,
+    quantity: Number(c.quantity),
+    ...(c.wastagePercent.trim() !== '' && Number(c.wastagePercent) > 0
+      ? { wastageRate: Number(c.wastagePercent) / 100 }
+      : {}),
+  }));
+}
+
+// ── Payload builders ─────────────────────────────────────────────────────────
+
+/**
+ * D64 — the typed attributes document from the raw input strings, per the
+ * schema. An empty input means "not entered" and produces NO key (the server
+ * treats absence as cleared under replace semantics); a non-empty input is
+ * converted to the field's type. Uncoercible numbers pass through as the raw
+ * string so the validator rejects them with the field's own message instead
+ * of a silent NaN.
+ */
+export function buildAttributesDocument(
+  state: WizardState,
+  schema: readonly AttributeField[],
+): Record<string, string | number | boolean> {
+  const doc: Record<string, string | number | boolean> = {};
+  for (const field of schema) {
+    const raw = (state.attributes[field.key] ?? '').trim();
+    if (raw === '') continue;
+    switch (field.type) {
+      case 'integer':
+      case 'number': {
+        const n = Number(raw);
+        doc[field.key] = Number.isFinite(n) ? n : raw;
+        break;
+      }
+      case 'boolean':
+        doc[field.key] = raw === 'true';
+        break;
+      default:
+        doc[field.key] = raw;
+    }
+  }
+  return doc;
+}
+
+export interface ProductCreatePayload {
+  name: string;
+  type: ProductItemType;
+  sku: string | null;
+  description: string | null;
+  categoryId: string | null;
+  subcategoryId: string | null;
+  unitPrice: number;
+  costPrice: number | null;
+  reorderLevel: number | null;
+  isActive: boolean;
+  /** D122 (3.13) — always sent, so the value the operator saw is what is stored. */
+  taxable: boolean;
+  /** D134 (`6.1`) — always sent, for the same reason `taxable` is. */
+  quantityType: ClientQuantityType;
+  /** D134b — null when the product is sold by the piece. */
+  unitOfMeasure: string | null;
+  imageUrl?: string | null;
+  /**
+   * D45 — Restaurant fields. Emitted for every tenant; Retail tenants send
+   * empty defaults which are indistinguishable from "not set" in the DB.
+   * Only Restaurant tenants surface UI for these — this keeps the create
+   * payload shape single-branch instead of forking on businessKind.
+   */
+  foodType?: 'FOOD' | 'BEVERAGE' | 'DESSERT' | null;
+  prepMinutes?: number | null;
+  dietaryTags?: string[];
+  /**
+   * D101 — the Track-stock answer. Server-side it decides STOCK_ITEM vs
+   * COMPOSED_ITEM for food-typed items only; retail rows carry it
+   * harmlessly (their `type` already says it).
+   */
+  trackStock: boolean;
+  /**
+   * D64 — domain attributes (replace semantics). Present only when the
+   * tenant's schema declares fields; a tenant with none never sends the key,
+   * so the payload cannot trip the server's unknown-key refusal.
+   */
+  attributes?: Record<string, string | number | boolean>;
+}
+
+/** Build the `POST /products` body — Step 3 already validated the numbers. */
+export function buildCreateInput(
+  state: WizardState,
+  imageUrl: string | null,
+  attributeSchema: readonly AttributeField[] = [],
+): ProductCreatePayload {
+  const simple = state.simple;
+  const useSimpleForRoot = !state.hasVariations;
+  return {
+    name: state.name.trim(),
+    type: state.type,
+    // Product-level SKU only makes sense in simple mode; variants carry their
+    // own SKUs, so we leave the parent SKU null when hasVariations to avoid
+    // "which one is the truth" ambiguity for a cashier searching by SKU.
+    sku: useSimpleForRoot ? simple.sku.trim() || null : null,
+    description: state.description.trim() || null,
+    categoryId: state.categoryId || null,
+    subcategoryId: state.subcategoryId || null,
+    // With variations the parent price is a placeholder — the server records 0
+    // and every sale goes through a variant.
+    unitPrice: useSimpleForRoot ? Number(simple.unitPrice) || 0 : 0,
+    costPrice: useSimpleForRoot && simple.costPrice ? Number(simple.costPrice) : null,
+    reorderLevel:
+      useSimpleForRoot && simple.reorderLevel ? Number(simple.reorderLevel) : null,
+    isActive: true,
+    // Always sent, so the value the operator saw is the value stored. The server
+    // also defaults it (`dto.taxable ?? true`) for clients that omit it.
+    taxable: state.taxable,
+    quantityType: state.quantityType,
+    // Null rather than '' when sold by the piece: the column is nullable and
+    // NULL is the honest reading of "this has no unit". An empty string would
+    // be a unit whose name happens to be blank, and `saleLineQuantity` would
+    // print a trailing space on every receipt.
+    unitOfMeasure:
+      state.quantityType === 'DECIMAL' ? state.unitOfMeasure.trim() || null : null,
+    imageUrl: imageUrl || null,
+    // D45 — Restaurant fields. `foodType` sent as null when empty so a
+    // Retail create (which never surfaces the picker) explicitly clears
+    // any bad prior value on re-save.
+    foodType: state.foodType || null,
+    prepMinutes: state.prepMinutes ? Number(state.prepMinutes) || null : null,
+    dietaryTags: state.dietaryTags,
+    // D101 — the operator's stock answer travels with every save, so an
+    // edit re-derives the classification from what the wizard now says.
+    trackStock: state.trackInventory,
+    // D64 — the whole document, every save (replace semantics), but only for
+    // tenants whose domain declares fields at all.
+    ...(attributeSchema.length > 0
+      ? { attributes: buildAttributesDocument(state, attributeSchema) }
+      : {}),
+  };
+}
+
+/** Build the `PUT /products/:id/variations` body. */
+/**
+ * The `PUT /products/:id/variations` body.
+ *
+ * The library ids are spread in only when they are DEFINED. The API draws a
+ * deliberate distinction — `null` clears a mapping, an omitted key leaves it
+ * as it is — and collapsing the two with `?? null` would unmap every product
+ * saved through a path that had not picked from the library.
+ */
+export function buildVariationsPayload(state: WizardState) {
+  return {
+    dimensions: state.variations
+      .filter((d) => d.name.trim())
+      .map((d, di) => ({
+        name: d.name.trim(),
+        position: di,
+        ...(d.attributeDefinitionId !== undefined
+          ? { attributeDefinitionId: d.attributeDefinitionId }
+          : {}),
+        options: d.options
+          .filter((o) => o.name.trim())
+          .map((o, oi) => ({
+            name: o.name.trim(),
+            position: oi,
+            ...(o.attributeOptionId !== undefined
+              ? { attributeOptionId: o.attributeOptionId }
+              : {}),
+          })),
+      })),
+  };
+}
+
+/**
+ * Build the `POST /products/:id/variants:batch` body.
+ *
+ * After the variations PUT the server hands back real ids per dimension /
+ * option; the caller passes those in via `dimensionIdByKey` / `optionIdByKey`
+ * so this pure helper can turn the wizard's client-side keys into the ids the
+ * batch endpoint expects.
+ */
+export function buildVariantsBatchInput(
+  state: WizardState,
+  dimensionIdByKey: Map<string, string>,
+  optionIdByKey: Map<string, string>,
+) {
+  const enabled = state.variants.filter((v) => v.enabled);
+  return {
+    openingBranchId: state.openingBranchId || undefined,
+    variants: enabled.map((v, vi) => {
+      const optionValues: Array<{ dimensionId: string; optionId: string }> = [];
+      for (let i = 0; i < state.variations.length; i += 1) {
+        const dimKey = state.variations[i]!.key;
+        const optKey = v.optionKeys[i];
+        const dimensionId = dimensionIdByKey.get(dimKey);
+        const optionId = optKey ? optionIdByKey.get(optKey) : undefined;
+        if (dimensionId && optionId) optionValues.push({ dimensionId, optionId });
+      }
+      return {
+        sku: v.sku.trim(),
+        ...(v.barcode.trim() ? { barcode: v.barcode.trim() } : {}),
+        unitPrice: Number(v.unitPrice) || 0,
+        ...(v.costPrice ? { costPrice: Number(v.costPrice) } : {}),
+        ...(v.reorderLevel ? { reorderLevel: Number(v.reorderLevel) } : {}),
+        ...(Number(v.openingQuantity) > 0
+          ? { openingQuantity: Number(v.openingQuantity) }
+          : {}),
+        ...(v.imageUrl ? { imageUrl: v.imageUrl } : {}),
+        isActive: v.isActive,
+        position: vi,
+        optionValues,
+      };
+    }),
+  };
+}
+
+/**
+ * D170 — the opening stock of a SINGLE product, as an inventory receipt.
+ *
+ * Returns `null` when there is nothing to post, which is the common case:
+ * a variant product (its own batch endpoint handles opening stock), a
+ * blank or zero quantity, or no branch chosen.
+ *
+ * ## Why a receipt rather than a `quantityOnHand` on the create
+ *
+ * `POST /products` would accept the number and store it, and D121 says that
+ * column IS what the till reads for a variant-less product — so it would
+ * have looked fixed. But it writes nothing else: no `BranchInventory` row,
+ * no receipt in the Purchases tab, no weighted-average cost. The product's
+ * own Inventory tab would still have read empty.
+ *
+ * A receipt is the path the VARIANT half already takes (`openingQuantity`
+ * on the variants batch creates an `InventoryReceipt` and calls
+ * `receiveStock`), and it is the path every later GRN takes. Opening stock
+ * arriving by a different route than every subsequent receipt is how the
+ * average cost of a product comes to depend on how it was created.
+ *
+ * `unitCost` falls back to 0 exactly as the variant path does: a zero-cost
+ * opening receipt is a legitimate initial condition, correctable later.
+ */
+export function buildOpeningReceiptInput(
+  state: WizardState,
+  productId: string,
+): { branchId: string; lines: Array<{ productId: string; quantityReceived: number; unitCost: number }> } | null {
+  if (state.hasVariations) return null;
+  const quantity = Number(state.simple.openingQuantity);
+  if (!Number.isFinite(quantity) || quantity <= 0) return null;
+  if (!state.openingBranchId) return null;
+  return {
+    branchId: state.openingBranchId,
+    lines: [
+      {
+        productId,
+        quantityReceived: quantity,
+        unitCost: Number(state.simple.costPrice) || 0,
+      },
+    ],
+  };
+}
+
+/**
+ * Extract the price band the preview panel shows once Step 3 has been filled.
+ * Returns `null` when nothing is priced yet so the caller can render a hint.
+ */
+export function priceBand(state: WizardState): { min: number; max: number } | null {
+  if (!state.hasVariations) {
+    const n = Number(state.simple.unitPrice);
+    return Number.isFinite(n) && state.simple.unitPrice !== '' ? { min: n, max: n } : null;
+  }
+  const prices = state.variants
+    .filter((v) => v.enabled)
+    .map((v) => Number(v.unitPrice))
+    .filter((n) => Number.isFinite(n) && n >= 0);
+  if (prices.length === 0) return null;
+  return { min: Math.min(...prices), max: Math.max(...prices) };
+}

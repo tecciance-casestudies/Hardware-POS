@@ -9,19 +9,23 @@ import {
   Param,
   Patch,
   Post,
+  Put,
   Query,
   Res,
   UploadedFile,
   UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
-import { Product } from '@hardware-pos/database';
+import { IsBoolean } from 'class-validator';
+import { Product, ModuleKey } from '@hardware-pos/database';
 import type { Paginated } from '@hardware-pos/shared';
 import type { Response } from 'express';
 
+import { RequireModule } from '../../common/decorators/require-module.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { RequirePermissions } from '../../common/decorators/permissions.decorator';
 import { TenantId } from '../../common/decorators/tenant-id.decorator';
+import { AuditLogService } from '../audit-log/audit-log.service';
 import { AuthenticatedUser } from '../auth/auth.types';
 import { Permission } from '../auth/permissions';
 import { MockSyncSummary } from './products.repository';
@@ -31,7 +35,7 @@ import {
   ProductsImportService,
 } from './products-import.service';
 import { ProductsReportService } from './products-report.service';
-import { ProductsService } from './products.service';
+import { ManagedProductView, ProductsService } from './products.service';
 import { CommitImportDto } from './dto/commit-import.dto';
 import { QueryProductsReportDto } from './dto/query-products-report.dto';
 import { CreateProductDto } from './dto/create-product.dto';
@@ -45,17 +49,27 @@ interface UploadedSpreadsheet {
   originalname?: string;
 }
 
+/** D101 — the 86 switch's whole payload: available, or not. */
+export class SetAvailabilityDto {
+  @IsBoolean()
+  available!: boolean;
+}
+
 @Controller('products')
 export class ProductsController {
   constructor(
     private readonly productsService: ProductsService,
     private readonly productsImportService: ProductsImportService,
     private readonly productsReportService: ProductsReportService,
+    private readonly audit: AuditLogService,
   ) {}
 
   @Get()
   @RequirePermissions(Permission.PRODUCT_READ)
-  list(@TenantId() tenantId: string, @Query() query: QueryProductsDto): Promise<Paginated<Product>> {
+  list(
+    @TenantId() tenantId: string,
+    @Query() query: QueryProductsDto,
+  ): Promise<Paginated<ManagedProductView>> {
     return this.productsService.list(tenantId, query);
   }
 
@@ -65,7 +79,7 @@ export class ProductsController {
   search(
     @TenantId() tenantId: string,
     @Query() query: SearchProductsDto,
-  ): Promise<Paginated<Product>> {
+  ): Promise<Paginated<ManagedProductView>> {
     return this.productsService.search(tenantId, query);
   }
 
@@ -95,8 +109,10 @@ export class ProductsController {
   /** Download the blank .xlsx template for the bulk product import. */
   @Get('import/template')
   @RequirePermissions(Permission.PRODUCT_MANAGE)
-  async importTemplate(@Res() res: Response): Promise<void> {
-    const buffer = await this.productsImportService.buildTemplate();
+  async importTemplate(@TenantId() tenantId: string, @Res() res: Response): Promise<void> {
+    // D189 — per tenant: the sheet carries THIS workspace's business-detail
+    // columns, because D161 made those fields the tenant's own.
+    const buffer = await this.productsImportService.buildTemplate(tenantId);
     res.setHeader(
       'Content-Type',
       'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -137,6 +153,7 @@ export class ProductsController {
 
   /** Refresh the product cache from a mock QuickBooks pull. Owner-level roles only. */
   @Post('sync/mock')
+  @RequireModule(ModuleKey.QUICKBOOKS)
   @HttpCode(HttpStatus.OK)
   @RequirePermissions(Permission.QUICKBOOKS_MANAGE)
   mockSync(@TenantId() tenantId: string): Promise<MockSyncSummary> {
@@ -167,6 +184,32 @@ export class ProductsController {
     return this.productsService.deactivate(tenantId, id);
   }
 
+  /**
+   * D101 — 86 a prepared item, or bring it back. Deliberately NOT
+   * PRODUCT_MANAGE: pulling the last kottu off the menu mid-service is a
+   * till/floor action, and the food-service Waiter/Cashier templates hold
+   * exactly this and nothing else of the catalogue's write surface. The
+   * service refuses kinds whose availability another authority governs.
+   */
+  @Put(':id/availability')
+  @RequirePermissions(Permission.PRODUCT_AVAILABILITY_SET)
+  async setAvailability(
+    @TenantId() tenantId: string,
+    @CurrentUser() actor: AuthenticatedUser,
+    @Param('id') id: string,
+    @Body() dto: SetAvailabilityDto,
+  ): Promise<Product> {
+    const product = await this.productsService.setAvailability(tenantId, id, dto.available);
+    await this.audit.record(tenantId, {
+      userId: actor.id,
+      action: dto.available ? 'PRODUCT_MARKED_AVAILABLE' : 'PRODUCT_MARKED_SOLD_OUT',
+      entityType: 'Product',
+      entityId: id,
+      metadata: { soldOutAt: product.soldOutAt?.toISOString() ?? null },
+    });
+    return product;
+  }
+
   /** Upload the POS-side product photo (stored in S3; never sent to QuickBooks). */
   @Post(':id/image')
   @RequirePermissions(Permission.PRODUCT_MANAGE)
@@ -187,6 +230,7 @@ export class ProductsController {
   }
 
   @Post(':id/sync-to-quickbooks')
+  @RequireModule(ModuleKey.QUICKBOOKS)
   @RequirePermissions(Permission.QUICKBOOKS_MANAGE)
   syncToQuickBooks(@TenantId() tenantId: string, @Param('id') id: string): Promise<Product> {
     return this.productsService.syncToQuickBooks(tenantId, id);

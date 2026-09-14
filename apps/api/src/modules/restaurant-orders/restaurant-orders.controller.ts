@@ -1,0 +1,125 @@
+import { Controller, Get, Param, Query } from '@nestjs/common';
+import { ModuleKey } from '@hardware-pos/database';
+
+import { BranchScope, BranchScopeKind } from '../../common/decorators/branch-scope.decorator';
+import { CurrentUser } from '../../common/decorators/current-user.decorator';
+import { RequireModule } from '../../common/decorators/require-module.decorator';
+import { RequirePermissions } from '../../common/decorators/permissions.decorator';
+import { TenantId } from '../../common/decorators/tenant-id.decorator';
+import { AuthenticatedUser } from '../auth/auth.types';
+import { Permission } from '../auth/permissions';
+import {
+  OrderDetailView,
+  OrdersPage,
+  OrdersQuery,
+  OrdersStatusFilter,
+  RestaurantOrdersService,
+  UnifiedChannel,
+  UnifiedOrderStatus,
+} from './restaurant-orders.service';
+
+/**
+ * Unified read-model for the Orders screen (Pilot Change 2 Slice D).
+ *
+ * Purely additive over existing per-channel endpoints — nothing else
+ * moves. Gated on TABLE_VIEW, which every operational restaurant role
+ * already holds; TABLE_MANAGEMENT module gate matches the /tables
+ * family so a hardware tenant cannot reach this.
+ */
+@Controller('restaurant')
+@RequireModule(ModuleKey.TABLE_MANAGEMENT)
+export class RestaurantOrdersController {
+  constructor(private readonly service: RestaurantOrdersService) {}
+
+  @Get('branches/:branchId/orders')
+  @RequirePermissions(Permission.TABLE_VIEW)
+  @BranchScope(BranchScopeKind.BRANCH_SCOPED)
+  list(
+    @TenantId() tenantId: string,
+    @CurrentUser() actor: AuthenticatedUser,
+    @Param('branchId') branchId: string,
+    @Query('scope') scope?: string,
+    @Query('channel') channel?: string,
+    @Query('status') status?: string,
+    @Query('paymentStatus') paymentStatus?: string,
+    @Query('search') search?: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+    @Query('page') page?: string,
+    @Query('pageSize') pageSize?: string,
+  ): Promise<OrdersPage> {
+    const q: OrdersQuery = {
+      // D157 — anything that is not one of the two words is "decide for me",
+      // the same treatment every other filter here gives a mangled value.
+      scope: scope === 'mine' || scope === 'all' ? scope : undefined,
+      channel: parseChannel(channel),
+      status: parseStatus(status),
+      paymentStatus: parsePayment(paymentStatus),
+      search: search ?? undefined,
+      from: parseDate(from),
+      to: parseDate(to),
+      // `Number('abc')` is NaN, which would sail past a plain `? :` and reach
+      // the service as a page number that breaks the slice. Anything that is
+      // not a finite number is treated as absent, so the default applies.
+      page: toPositiveInt(page),
+      pageSize: toPositiveInt(pageSize),
+    };
+    return this.service.listOrders(tenantId, branchId, q, actor.id);
+  }
+
+  /**
+   * Full record for the drawer — line prices, financial breakdown, payments,
+   * delivery destination, status timeline. Same gates as the list: anyone who
+   * can see the queue can open a row on it.
+   */
+  @Get('branches/:branchId/orders/:orderId')
+  @RequirePermissions(Permission.TABLE_VIEW)
+  @BranchScope(BranchScopeKind.BRANCH_SCOPED)
+  detail(
+    @TenantId() tenantId: string,
+    @Param('branchId') branchId: string,
+    @Param('orderId') orderId: string,
+  ): Promise<OrderDetailView | null> {
+    return this.service.getOrderDetail(tenantId, branchId, orderId);
+  }
+}
+
+/** A query-string integer, or `undefined` for anything that is not one. */
+function toPositiveInt(v: string | undefined): number | undefined {
+  if (v === undefined || v === '') return undefined;
+  const n = Number(v);
+  return Number.isInteger(n) && n > 0 ? n : undefined;
+}
+
+function parseChannel(v: string | undefined): UnifiedChannel | 'ALL' {
+  return v === 'DINE_IN' || v === 'TAKEAWAY' || v === 'THIRD_PARTY' ? v : 'ALL';
+}
+const STATUSES: UnifiedOrderStatus[] = [
+  'DRAFT',
+  'PENDING',
+  'CONFIRMED',
+  'IN_PROGRESS',
+  'READY',
+  // D178 — was missing from this list, so the To pay tab's filter fell back
+  // to ALL on the server and the tab showed everything.
+  'AWAITING_PAYMENT',
+  'HANDED_OVER',
+  'COMPLETED',
+  'CANCELLED',
+];
+/** D179 — the two buckets the queue's tabs ask for; see `OrdersQuery.status`. */
+const BUCKETS: OrdersStatusFilter[] = ['OUTSTANDING', 'DONE'];
+function parseStatus(v: string | undefined): OrdersStatusFilter {
+  if (!v) return 'ALL';
+  if ((STATUSES as string[]).includes(v)) return v as UnifiedOrderStatus;
+  if ((BUCKETS as string[]).includes(v)) return v as OrdersStatusFilter;
+  return 'ALL';
+}
+function parsePayment(v: string | undefined) {
+  return v === 'UNPAID' || v === 'PARTIAL' || v === 'PAID' || v === 'REFUNDED' ? v : 'ALL';
+}
+function parseDate(v: string | undefined): Date | undefined {
+  if (!v) return undefined;
+  const d = new Date(v);
+  return Number.isNaN(d.getTime()) ? undefined : d;
+}

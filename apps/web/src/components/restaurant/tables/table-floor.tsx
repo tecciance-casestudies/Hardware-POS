@@ -1,0 +1,2298 @@
+'use client';
+
+import {
+  Archive,
+  Building2,
+  ConciergeBell,
+  DoorOpen,
+  Link2,
+  MoreVertical,
+  Pencil,
+  Plus,
+  UserRound,
+  Users,
+} from 'lucide-react';
+import Link from 'next/link';
+import * as React from 'react';
+
+import { AreaChip } from '@/components/restaurant/area-chip';
+import { StatusBadge } from '@/components/restaurant/status-badge';
+import { Button } from '@/components/ui/button';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { ChipRow } from '@/components/ui/chip-row';
+import { Dialog } from '@/components/ui/dialog';
+import { Input } from '@/components/ui/input';
+import { ApiError } from '@/lib/api';
+import { useAuth, type Session } from '@/lib/auth';
+import { Permission } from '@/lib/permissions';
+import {
+  diningAreas,
+  openTables,
+  restaurantTables,
+  tableSessions,
+} from '@/lib/restaurant/api';
+import {
+  TABLE_STATUS_LABELS,
+  TABLE_STATUS_TONES,
+  formatElapsed,
+} from '@/lib/restaurant/labels';
+import {
+  countAll,
+  countMine,
+  resolveOwnerScope,
+  sessionsVisibleTo,
+  supervisesTheFloor,
+  type SessionOwnerScope,
+} from '@/lib/restaurant/session-ownership';
+import { normalizeSearchTerm } from '@/lib/search-term';
+import { seatsFree } from '@/lib/restaurant/types';
+import type {
+  AssignableWaiter,
+  DiningAreaView,
+  OpenSessionView,
+  OpenTableView,
+  RestaurantTableView,
+  TableSessionView,
+} from '@/lib/restaurant/types';
+
+interface Props {
+  session: Session;
+  branchId: string;
+  canManage: boolean;
+}
+
+interface Snapshot {
+  areas: DiningAreaView[];
+  tablesByArea: Map<string, RestaurantTableView[]>;
+  /**
+   * D104 — a LIST per table. An arrangement can carry several live tabs at
+   * once, and the last-wins `new Map(...)` this replaces made all but one of
+   * them invisible on the floor plan. Each tab is an OpenSessionView, so it
+   * also carries the bumped-ticket ids the food-ready badge reads (D112).
+   */
+  sessionsByTableId: Map<string, OpenSessionView[]>;
+  /** D49 — live ad-hoc joined tables for this branch. */
+  openTables: OpenTableView[];
+}
+
+/**
+ * D112 — "Food ready" acknowledgements survive the trip into the session
+ * screen and back (this component unmounts on navigation), but stay
+ * per-device: serving is whoever carried the plate, so one tablet's ack
+ * must not clear another's bell. Same sessionStorage idiom as the POS cart.
+ */
+const READY_ACK_KEY = 'hpos.tables.readyAck';
+
+/** D104 — every live tab per table, in the order the API listed them. */
+function groupSessionsByTable(rows: OpenSessionView[]): Map<string, OpenSessionView[]> {
+  const byTable = new Map<string, OpenSessionView[]>();
+  for (const s of rows) byTable.set(s.tableId, [...(byTable.get(s.tableId) ?? []), s]);
+  return byTable;
+}
+
+/** D112 — bumped tickets on this tab that this device has not answered. */
+function unansweredReady(s: OpenSessionView, acked: Set<string>): number {
+  return s.readyTicketIds.filter((id) => !acked.has(id)).length;
+}
+
+function readAckedIds(): Set<string> {
+  try {
+    const raw = window.sessionStorage.getItem(READY_ACK_KEY);
+    const parsed: unknown = raw ? JSON.parse(raw) : [];
+    return new Set(Array.isArray(parsed) ? parsed.filter((v) => typeof v === 'string') : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function writeAckedIds(ids: Set<string>): void {
+  try {
+    window.sessionStorage.setItem(READY_ACK_KEY, JSON.stringify([...ids]));
+  } catch {
+    // Storage refusing (private mode, quota) costs a lingering badge, nothing more.
+  }
+}
+
+const EMPTY: Snapshot = {
+  areas: [],
+  tablesByArea: new Map(),
+  sessionsByTableId: new Map(),
+  openTables: [],
+};
+
+/**
+ * D155 — where "View order" goes: the POS, bound to this session.
+ *
+ * One URL shape, built in one place, because the floor has two cards that link
+ * to it (a physical table, and every tab on an arrangement) and they used to
+ * compose the path independently. The table is chosen by the tap that follows
+ * this link, so the POS opens on the menu rather than on a picker.
+ */
+const posHref = (sessionId: string): string =>
+  `/pos?mode=dine-in&sessionId=${encodeURIComponent(sessionId)}`;
+
+/**
+ * Visual floor plan grouped by dining area.
+ *
+ * Layout: an area filter across the top, then one section per area with a
+ * responsive card grid. Cards show table code + capacity + status. When a
+ * session is open on the table, the card also shows the elapsed time since
+ * open plus a "View order" link into the dine-in POS for that session (D155).
+ * Available tables expose an "Open table" action (Phase D) gated on
+ * `TABLE_OPEN`.
+ */
+export function TableFloor({ session, branchId, canManage }: Props) {
+  const { hasPermission } = useAuth();
+  const canOpenTable = hasPermission(Permission.TABLE_OPEN);
+  const [state, setState] = React.useState<{
+    status: 'loading' | 'ready' | 'error';
+    snapshot: Snapshot;
+    error?: string;
+  }>({ status: 'loading', snapshot: EMPTY });
+  const [selectedArea, setSelectedArea] = React.useState<string | 'ALL'>('ALL');
+  /*
+   * D156 — "my tables" or the whole floor. Null until a chip is tapped, which
+   * is what lets `resolveOwnerScope` default from the data without overriding
+   * an operator who has asked for something: a poll must not pull a waiter
+   * back to their own tables while they are looking at the room.
+   */
+  const [ownerChoice, setOwnerChoice] = React.useState<SessionOwnerScope | null>(null);
+  const [showNewArea, setShowNewArea] = React.useState(false);
+  const [showNewTable, setShowNewTable] = React.useState<{ areaId: string } | null>(null);
+  const [openTarget, setOpenTarget] = React.useState<RestaurantTableView | null>(null);
+  const [editArea, setEditArea] = React.useState<DiningAreaView | null>(null);
+  const [archiveArea, setArchiveArea] = React.useState<DiningAreaView | null>(null);
+  const [editTable, setEditTable] = React.useState<RestaurantTableView | null>(null);
+  const [archiveTable, setArchiveTable] = React.useState<RestaurantTableView | null>(null);
+  const canCreateArea = hasPermission(Permission.DINING_AREA_CREATE);
+  const canCreateTable = hasPermission(Permission.TABLE_CREATE);
+  // D49: joining tables is a shift decision, not creator-owned floor admin.
+  const canManageOpenTables = hasPermission(Permission.OPEN_TABLE_MANAGE);
+  const [showNewOpenTable, setShowNewOpenTable] = React.useState(false);
+  const [dissolveTarget, setDissolveTarget] = React.useState<OpenTableView | null>(null);
+  const canEditOwnArea = hasPermission(Permission.DINING_AREA_EDIT_OWN);
+  const canArchiveOwnArea = hasPermission(Permission.DINING_AREA_ARCHIVE_OWN);
+  const canEditOwnTable = hasPermission(Permission.TABLE_EDIT_OWN);
+  /*
+   * D159 — "the guests have asked for someone else." Owner-held (the Waiter
+   * template deliberately lacks it), so the control below is invisible to the
+   * floor and the server refuses it besides.
+   */
+  const canReassignWaiter = hasPermission(Permission.TABLE_SESSION_REASSIGN);
+  const [reassignTarget, setReassignTarget] = React.useState<{
+    session: OpenSessionView;
+    tableLabel: string;
+  } | null>(null);
+  const canArchiveOwnTable = hasPermission(Permission.TABLE_ARCHIVE_OWN);
+  const currentUserId = session.user.id;
+  /**
+   * The card menu is a per-row affordance: only the row's creator sees it,
+   * and only when they still hold the *_OWN permission. Hidden entirely
+   * otherwise — never rendered as a disabled control, because a greyed-out
+   * "Edit floor" reads to a manager as "you almost can, but not quite,"
+   * which is worse than absent.
+   */
+  const areaOwnsIt = (area: DiningAreaView) => area.createdByUserId === currentUserId;
+  const tableOwnsIt = (table: RestaurantTableView) => table.createdByUserId === currentUserId;
+
+  /**
+   * D50 — which open tables hold each physical table. Derived from the
+   * open-table list rather than fetched: it is the same data.
+   *
+   * D106 — this no longer gates an action, only the "Held by" line on the
+   * card. A table with no entry here is RESERVED for some other reason, and
+   * saying nothing about it is the honest answer.
+   */
+  const heldByTableId = React.useMemo(() => {
+    const map = new Map<string, OpenTableView[]>();
+    for (const open of state.snapshot.openTables) {
+      for (const member of open.members) {
+        const list = map.get(member.id) ?? [];
+        list.push(open);
+        map.set(member.id, list);
+      }
+    }
+    return map;
+  }, [state.snapshot.openTables]);
+
+  /*
+   * D112 — "food ready" state per session; D118 (PO) removed the bell that
+   * once rang here — the waiter's signal is now the VISUAL badge alone
+   * (sound lives in the kitchen only). Acked ids are state (they gate
+   * badges, so they must re-render) seeded from sessionStorage.
+   */
+  const [ackedReady, setAckedReady] = React.useState<Set<string>>(() =>
+    typeof window === 'undefined' ? new Set() : readAckedIds(),
+  );
+
+  const absorbOpenSessions = React.useCallback((rows: OpenSessionView[]) => {
+    const allReady = new Set(rows.flatMap((r) => r.readyTicketIds));
+    // Prune acks the server no longer lists: a closed session's tickets are
+    // gone for good, and a RECALLED ticket must badge again when the kitchen
+    // re-bumps it — its id leaves this set, taking the ack with it.
+    setAckedReady((cur) => {
+      const next = new Set([...cur].filter((id) => allReady.has(id)));
+      if (next.size === cur.size) return cur;
+      writeAckedIds(next);
+      return next;
+    });
+  }, []);
+
+  /** The waiter tapped into the table: its badge is answered on this device. */
+  const ackReady = React.useCallback((s: OpenSessionView) => {
+    if (s.readyTicketIds.length === 0) return;
+    setAckedReady((cur) => {
+      const next = new Set(cur);
+      for (const id of s.readyTicketIds) next.add(id);
+      writeAckedIds(next);
+      return next;
+    });
+  }, []);
+
+  const load = React.useCallback(async () => {
+    try {
+      const [areas, openSessionsRaw, liveOpenTables] = await Promise.all([
+        // null, not []: a failed sessions read must not be mistaken for
+        // "no ready tickets" — absorbing an empty list would prune every
+        // acknowledgement and resurrect badges the waiter already answered.
+        diningAreas.list(session, branchId, false),
+        tableSessions.listOpen(session, branchId).catch(() => null),
+        openTables.list(session, branchId).catch(() => []),
+      ]);
+      if (openSessionsRaw) absorbOpenSessions(openSessionsRaw);
+      const areaSorted = areas.slice().sort((a, b) => a.position - b.position);
+      const lists = await Promise.all(
+        areaSorted.map((a) => restaurantTables.list(session, a.id, false).catch(() => [])),
+      );
+      const tablesByArea = new Map<string, RestaurantTableView[]>();
+      areaSorted.forEach((a, i) => {
+        const rows = lists[i] ?? [];
+        tablesByArea.set(
+          a.id,
+          rows
+            .slice()
+            .sort((x, y) =>
+              x.code.localeCompare(y.code, undefined, { numeric: true, sensitivity: 'base' }),
+            ),
+        );
+      });
+      const sessionsByTableId = groupSessionsByTable(openSessionsRaw ?? []);
+      setState({
+        status: 'ready',
+        snapshot: { areas: areaSorted, tablesByArea, sessionsByTableId, openTables: liveOpenTables },
+      });
+    } catch (err) {
+      setState({
+        status: 'error',
+        snapshot: EMPTY,
+        error: err instanceof Error ? err.message : 'Failed to load floor plan',
+      });
+    }
+  }, [session, branchId, absorbOpenSessions]);
+
+  React.useEffect(() => {
+    void load();
+  }, [load]);
+
+  /*
+   * D112 — the floor plan's only live loop. It refreshes SESSIONS, not the
+   * furniture: areas and tables change at admin cadence and keep their
+   * explicit loads, but "whose food is up" is worthless stale. 8 s like the
+   * orders queue (5 s is the kitchen's urgency, not the floor's), gated to a
+   * visible tab, with an immediate catch-up on return — a waiter pulling the
+   * tablet out of an apron pocket sees the badges that landed meanwhile.
+   */
+  const refreshSessions = React.useCallback(async () => {
+    try {
+      const rows = await tableSessions.listOpen(session, branchId);
+      absorbOpenSessions(rows);
+      setState((cur) =>
+        cur.status === 'ready'
+          ? {
+              ...cur,
+              snapshot: {
+                ...cur.snapshot,
+                sessionsByTableId: groupSessionsByTable(rows),
+              },
+            }
+          : cur,
+      );
+    } catch {
+      // Keep the last known floor; the next tick retries.
+    }
+  }, [session, branchId, absorbOpenSessions]);
+
+  React.useEffect(() => {
+    const refreshIfVisible = () => {
+      if (document.visibilityState === 'visible') void refreshSessions();
+    };
+    const t = setInterval(refreshIfVisible, 8000);
+    window.addEventListener('focus', refreshIfVisible);
+    document.addEventListener('visibilitychange', refreshIfVisible);
+    return () => {
+      clearInterval(t);
+      window.removeEventListener('focus', refreshIfVisible);
+      document.removeEventListener('visibilitychange', refreshIfVisible);
+    };
+  }, [refreshSessions]);
+
+  const { snapshot, status } = state;
+  const visibleAreas =
+    selectedArea === 'ALL'
+      ? snapshot.areas
+      : snapshot.areas.filter((a) => a.id === selectedArea);
+
+  /*
+   * D156 — whose tables are on screen.
+   *
+   * The server now returns the branch's sessions to a waiter too, so the
+   * narrowing that used to happen in the query happens here instead — and
+   * `sessionsVisibleTo` is applied to the MAP rather than at each card, because
+   * the floor reads it in three places (a table card, an arrangement's tabs,
+   * the ready badge) and a scope honoured in two of them is a table that is
+   * hidden and still rings.
+   */
+  const mineCount = countMine(snapshot.sessionsByTableId, currentUserId);
+  const allCount = countAll(snapshot.sessionsByTableId);
+  /*
+   * D157b — mine unless the operator said otherwise; nothing about the data
+   * moves it, so there is no paint at which the answer changes under them.
+   * D157c — except that a supervisor has no "mine" worth defaulting to: the
+   * floor is their view, and they never see the chips to change it.
+   */
+  const supervises = supervisesTheFloor(session.user.role);
+  const ownerScope = resolveOwnerScope(ownerChoice ?? (supervises ? 'all' : null));
+  /** Whether the first load has landed, so a `0` on a chip is an answer. */
+  const countsKnown = status !== 'loading';
+  /*
+   * D156a — who is serving each table, read from the UNSCOPED snapshot.
+   *
+   * The PO asked for the server's name on the Tables screen, and a floor plan
+   * reads the way every other one does: the room always says who is on a
+   * table, and the Mine/All chips govern what you can WORK on rather than what
+   * you can see. So a colleague's table under "My tables" still carries their
+   * name — it just has no View order — which is also the answer to "who do I
+   * ask about M3".
+   */
+  const servedByTable = React.useMemo(() => {
+    const map = new Map<string, string[]>();
+    for (const [tableId, sessions] of snapshot.sessionsByTableId) {
+      const names = sessions
+        .map((session) => session.waiterName?.trim() || null)
+        .filter((name): name is string => name !== null);
+      if (names.length > 0) map.set(tableId, names);
+    }
+    return map;
+  }, [snapshot.sessionsByTableId]);
+  const visibleSessions = React.useMemo(
+    () => sessionsVisibleTo(snapshot.sessionsByTableId, ownerScope, currentUserId),
+    [snapshot.sessionsByTableId, ownerScope, currentUserId],
+  );
+  /*
+   * The chips are offered only to someone the server will actually answer with
+   * other people's tables (D70's key, which the waiter template now carries,
+   * D156). Without it every session returned is already theirs, and a pair of
+   * chips that filter nothing is a control that lies about what it does.
+   */
+  const canSeeWholeFloor = hasPermission(Permission.TABLE_SESSION_VIEW_ALL) && !supervises;
+
+  return (
+    <div className="space-y-4">
+      {/* D156 — whose tables. Its own row above the area strip, deliberately
+          not folded into it: these are two different questions (whose, and
+          where), and D91/D92 settled that one strip carries ONE selection —
+          mixing them was what made the picker unreadable. Counts on the chips
+          because "My tables 3 · All 7" is the whole answer a waiter wants
+          before they decide which to look at. */}
+      {canSeeWholeFloor ? (
+        <div
+          role="group"
+          aria-label="Whose tables to show"
+          className="flex items-center gap-3"
+        >
+          <span className="shrink-0 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+            Tables
+          </span>
+          <div className="flex min-w-0 flex-wrap gap-2">
+            {/* D157b — counts appear once the first load has landed, and then
+                include ZERO: "My tables · 0" beside "All tables · 16" is the
+                whole story for a waiter who has not seated anybody, and it is
+                the state that used to be papered over by widening the view.
+                Before that they are absent rather than zero, which would be
+                stating the answer before anybody counted. */}
+            <AreaChip
+              label={countsKnown ? `My tables · ${mineCount}` : 'My tables'}
+              active={ownerScope === 'mine'}
+              onClick={() => setOwnerChoice('mine')}
+            />
+            <AreaChip
+              label={countsKnown ? `All tables · ${allCount}` : 'All tables'}
+              active={ownerScope === 'all'}
+              onClick={() => setOwnerChoice('all')}
+            />
+          </div>
+        </div>
+      ) : null}
+
+      {/* Area filter + management actions.
+          The chip strip is wrapped in <ChipRow> so branches with 8+ dining
+          areas scroll horizontally on tablet portrait instead of wrapping to
+          three-plus rows and eating vertical space. The "Show" label and the
+          "New area" action sit outside the scrollable region so they stay
+          reachable at both ends. */}
+      <div className="flex items-center gap-3">
+        <span className="shrink-0 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+          Show
+        </span>
+        <ChipRow
+          ariaLabel="Filter by dining area"
+          activeKey={String(selectedArea)}
+          className="min-w-0 flex-1"
+        >
+          <AreaChip
+            label="All"
+            active={selectedArea === 'ALL'}
+            onClick={() => setSelectedArea('ALL')}
+          />
+          {snapshot.areas.map((a) => (
+            <AreaChip
+              key={a.id}
+              label={a.name}
+              active={selectedArea === a.id}
+              onClick={() => setSelectedArea(a.id)}
+            />
+          ))}
+        </ChipRow>
+        {canManage && canCreateArea ? (
+          <Button
+            size="sm"
+            variant="outline"
+            leftIcon={<Building2 className="h-4 w-4" />}
+            onClick={() => setShowNewArea(true)}
+            className="shrink-0"
+          >
+            New area
+          </Button>
+        ) : null}
+      </div>
+
+      {/* D49 — open tables: ad-hoc joined arrangements. Shown whenever any
+          exist, plus the create affordance for shift staff. Rendered FIRST,
+          above the physical floor: an open table is a live party that someone
+          is serving right now, whereas the floor plan is mostly static
+          furniture — so it is what staff need without scrolling past every
+          area to reach it. */}
+      {status === 'ready' && (snapshot.openTables.length > 0 || canManageOpenTables) ? (
+        <Card>
+          <CardHeader className="flex-row items-center justify-between">
+            <div>
+              <CardTitle>Open tables</CardTitle>
+              <p className="mt-1 text-sm text-muted-foreground">
+                Joined tables for parties that outgrow the floor plan. Several
+                parties can share one table, each with its own tab; a table is
+                freed when the last of those tabs closes.
+              </p>
+            </div>
+            {canManageOpenTables ? (
+              <Button
+                size="sm"
+                leftIcon={<Link2 className="h-4 w-4" />}
+                onClick={() => setShowNewOpenTable(true)}
+              >
+                New open table
+              </Button>
+            ) : null}
+          </CardHeader>
+          <CardContent>
+            {snapshot.openTables.length === 0 ? (
+              <p className="py-6 text-center text-sm text-muted-foreground">
+                No open tables right now.
+              </p>
+            ) : (
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 tab:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
+                {snapshot.openTables.map((t) => {
+                  const tabs = visibleSessions.get(t.id) ?? [];
+                  return (
+                    <OpenTableCard
+                      key={t.id}
+                      table={t}
+                      sessions={tabs}
+                      // D156a — every tab's server, from the unscoped snapshot.
+                      allTabs={snapshot.sessionsByTableId.get(t.id) ?? []}
+                      // D112 — a joined party's food rings too: unanswered bumps across every tab.
+                      readyCount={tabs.reduce((n, s) => n + unansweredReady(s, ackedReady), 0)}
+                      onViewOrder={ackReady}
+                      canOpen={canOpenTable}
+                      onOpenClick={() => setOpenTarget(t)}
+                      canDissolve={canManageOpenTables}
+                      onDissolve={() => setDissolveTarget(t)}
+                    />
+                  );
+                })}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      ) : null}
+
+      {status === 'loading' ? (
+        <Card>
+          <CardContent className="py-16 text-center text-sm text-muted-foreground">
+            Loading the floor plan…
+          </CardContent>
+        </Card>
+      ) : status === 'error' ? (
+        <Card>
+          <CardContent className="py-6 text-sm text-danger">
+            Could not load the floor plan. {state.error ?? ''}
+          </CardContent>
+        </Card>
+      ) : snapshot.areas.length === 0 ? (
+        <Card>
+          <CardContent className="space-y-4 py-16 text-center">
+            <p className="text-sm text-muted-foreground">
+              No dining areas configured yet.{' '}
+              {canManage
+                ? 'Create your first area to start seating guests.'
+                : 'Ask an administrator to configure the floor.'}
+            </p>
+            {canManage && canCreateArea ? (
+              <Button
+                variant="outline"
+                leftIcon={<Building2 className="h-4 w-4" />}
+                onClick={() => setShowNewArea(true)}
+              >
+                Create dining area
+              </Button>
+            ) : null}
+          </CardContent>
+        </Card>
+      ) : (
+        visibleAreas.map((area) => {
+          const tables = snapshot.tablesByArea.get(area.id) ?? [];
+          return (
+            <Card key={area.id}>
+              <CardHeader className="flex-row items-center justify-between">
+                <div>
+                  <CardTitle>{area.name}</CardTitle>
+                  {area.description ? (
+                    <p className="mt-1 text-sm text-muted-foreground">{area.description}</p>
+                  ) : null}
+                </div>
+                <div className="flex items-center gap-2">
+                  {canManage && canCreateTable ? (
+                    <Button
+                      size="sm"
+                      leftIcon={<Plus className="h-4 w-4" />}
+                      onClick={() => setShowNewTable({ areaId: area.id })}
+                    >
+                      New table
+                    </Button>
+                  ) : null}
+                  {areaOwnsIt(area) && (canEditOwnArea || canArchiveOwnArea) ? (
+                    <OwnerMenu
+                      label={`Manage ${area.name}`}
+                      items={[
+                        canEditOwnArea && {
+                          key: 'edit',
+                          label: 'Edit floor',
+                          icon: <Pencil className="h-4 w-4" />,
+                          onClick: () => setEditArea(area),
+                        },
+                        canArchiveOwnArea && {
+                          key: 'archive',
+                          label: 'Archive floor',
+                          icon: <Archive className="h-4 w-4" />,
+                          onClick: () => setArchiveArea(area),
+                          danger: true,
+                        },
+                      ]}
+                    />
+                  ) : null}
+                </div>
+              </CardHeader>
+              <CardContent>
+                {tables.length === 0 ? (
+                  <p className="py-6 text-center text-sm text-muted-foreground">
+                    No tables in this area yet.
+                  </p>
+                ) : (
+                  // iPad portrait (768) keeps 3 columns for breathing room;
+                  // the 4-column step is deferred to tab: (900) so landscape
+                  // tablets get the denser grid without cramping portrait.
+                  <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 tab:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
+                    {tables.map((t) => {
+                      // A physical table still carries at most one tab.
+                      const s = visibleSessions.get(t.id)?.[0] ?? null;
+                      return (
+                        <TableCard
+                          key={t.id}
+                          table={t}
+                          session={s}
+                          /*
+                           * D156a — the name comes from the unscoped snapshot,
+                           * so it is there whether or not this session is one
+                           * the current scope lets the operator open.
+                           */
+                          servedBy={servedByTable.get(t.id)?.[0] ?? null}
+                          /*
+                           * D159 — reassigning needs the SESSION, and the card
+                           * renders the scoped one; this comes off the branch
+                           * snapshot so a supervisor can change the waiter on a
+                           * table they are not serving, which is every table.
+                           */
+                          onChangeWaiter={
+                            canReassignWaiter
+                              ? (() => {
+                                  const live = snapshot.sessionsByTableId.get(t.id)?.[0];
+                                  return live
+                                    ? () =>
+                                        setReassignTarget({
+                                          session: live,
+                                          tableLabel: t.label ?? t.code,
+                                        })
+                                    : undefined;
+                                })()
+                              : undefined
+                          }
+                          readyCount={s ? unansweredReady(s, ackedReady) : 0}
+                          onViewOrder={() => s && ackReady(s)}
+                          canOpen={canOpenTable}
+                          onOpenClick={() => setOpenTarget(t)}
+                          heldBy={heldByTableId.get(t.id) ?? []}
+                          ownsIt={tableOwnsIt(t)}
+                          canEdit={canEditOwnTable}
+                          canArchive={canArchiveOwnTable}
+                          onEdit={() => setEditTable(t)}
+                          onArchive={() => setArchiveTable(t)}
+                        />
+                      );
+                    })}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          );
+        })
+      )}
+
+      {canManageOpenTables && showNewOpenTable ? (
+        <CreateOpenTableDialog
+          onClose={() => setShowNewOpenTable(false)}
+          onCreated={async () => {
+            setShowNewOpenTable(false);
+            await load();
+          }}
+          session={session}
+          branchId={branchId}
+          areas={snapshot.areas}
+          tablesByArea={snapshot.tablesByArea}
+        />
+      ) : null}
+      {dissolveTarget ? (
+        <DissolveOpenTableDialog
+          onClose={() => setDissolveTarget(null)}
+          onDissolved={async () => {
+            setDissolveTarget(null);
+            await load();
+          }}
+          session={session}
+          branchId={branchId}
+          table={dissolveTarget}
+        />
+      ) : null}
+
+      {canManage && showNewArea ? (
+        <NewAreaDialog
+          onClose={() => setShowNewArea(false)}
+          onCreated={async (created) => {
+            setShowNewArea(false);
+            await load();
+            setSelectedArea(created.id);
+          }}
+          session={session}
+          branchId={branchId}
+        />
+      ) : null}
+      {canManage && showNewTable ? (
+        <NewTableDialog
+          onClose={() => setShowNewTable(null)}
+          onCreated={async () => {
+            const areaId = showNewTable!.areaId;
+            setShowNewTable(null);
+            await load();
+            setSelectedArea(areaId);
+          }}
+          session={session}
+          areaId={showNewTable.areaId}
+        />
+      ) : null}
+      {reassignTarget ? (
+        <ChangeWaiterDialog
+          session={session}
+          branchId={branchId}
+          target={reassignTarget}
+          onClose={() => setReassignTarget(null)}
+          onChanged={() => {
+            setReassignTarget(null);
+            void refreshSessions();
+          }}
+        />
+      ) : null}
+      {openTarget ? (
+        <OpenTableDialog
+          onClose={() => setOpenTarget(null)}
+          onOpened={async () => {
+            setOpenTarget(null);
+            await load();
+          }}
+          session={session}
+          branchId={branchId}
+          table={openTarget}
+          arrangement={snapshot.openTables.find((o) => o.id === openTarget.id) ?? null}
+        />
+      ) : null}
+      {editArea ? (
+        <EditAreaDialog
+          onClose={() => setEditArea(null)}
+          onSaved={async () => {
+            setEditArea(null);
+            await load();
+          }}
+          session={session}
+          branchId={branchId}
+          area={editArea}
+        />
+      ) : null}
+      {archiveArea ? (
+        <ArchiveAreaDialog
+          onClose={() => setArchiveArea(null)}
+          onArchived={async () => {
+            setArchiveArea(null);
+            await load();
+          }}
+          session={session}
+          branchId={branchId}
+          area={archiveArea}
+        />
+      ) : null}
+      {editTable ? (
+        <EditTableDialog
+          onClose={() => setEditTable(null)}
+          onSaved={async () => {
+            setEditTable(null);
+            await load();
+          }}
+          session={session}
+          table={editTable}
+        />
+      ) : null}
+      {archiveTable ? (
+        <ArchiveTableDialog
+          onClose={() => setArchiveTable(null)}
+          onArchived={async () => {
+            setArchiveTable(null);
+            await load();
+          }}
+          session={session}
+          table={archiveTable}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+function TableCard({
+  table,
+  session,
+  servedBy,
+  onChangeWaiter,
+  readyCount,
+  onViewOrder,
+  canOpen,
+  onOpenClick,
+  heldBy,
+  ownsIt,
+  canEdit,
+  canArchive,
+  onEdit,
+  onArchive,
+}: {
+  table: RestaurantTableView;
+  session: OpenSessionView | null;
+  /**
+   * D156a — the waiter serving this table, named. Present whenever the branch
+   * has a session on it, including one the current scope is not showing, and
+   * including the operator's own — a floor plan that named everybody except
+   * you would be a strange thing to read over somebody's shoulder.
+   */
+  servedBy: string | null;
+  /**
+   * D159 — opens the reassign picker. Undefined when the reader may not
+   * reassign, or when the table has no live session to hand over: the name
+   * then stays a label, which is what it is for everyone but a supervisor.
+   */
+  onChangeWaiter?: () => void;
+  /** D112 — bumped tickets this device has not answered; >0 shows the bell. */
+  readyCount: number;
+  /** Tapping View order answers the badge for this session on this device. */
+  onViewOrder: () => void;
+  canOpen: boolean;
+  onOpenClick: () => void;
+  /** D50 — open tables currently holding this table; empty for every other reason a table is RESERVED. */
+  heldBy: OpenTableView[];
+  ownsIt: boolean;
+  canEdit: boolean;
+  canArchive: boolean;
+  onEdit: () => void;
+  onArchive: () => void;
+}) {
+  const isAvailable = table.status === 'AVAILABLE';
+  const isHeld = heldBy.length > 0;
+  const showMenu = ownsIt && (canEdit || canArchive);
+  return (
+    <div className="flex flex-col gap-2 rounded-xl border border-border bg-card p-3 shadow-sm">
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <p className="text-base font-semibold">{table.label ?? table.code}</p>
+          {table.label ? <p className="text-xs text-muted-foreground">{table.code}</p> : null}
+        </div>
+        <div className="flex items-center gap-1">
+          <StatusBadge
+            label={TABLE_STATUS_LABELS[table.status]}
+            tone={TABLE_STATUS_TONES[table.status]}
+          />
+          {showMenu ? (
+            <OwnerMenu
+              label={`Manage ${table.label ?? table.code}`}
+              items={[
+                canEdit && {
+                  key: 'edit',
+                  label: 'Edit table',
+                  icon: <Pencil className="h-4 w-4" />,
+                  onClick: onEdit,
+                },
+                canArchive && {
+                  key: 'archive',
+                  label: 'Archive table',
+                  icon: <Archive className="h-4 w-4" />,
+                  onClick: onArchive,
+                  danger: true,
+                },
+              ]}
+            />
+          ) : null}
+        </div>
+      </div>
+      <div className="flex items-center gap-1 text-xs text-muted-foreground">
+        <Users className="h-3.5 w-3.5" aria-hidden="true" />
+        <span>{table.capacity != null ? `Seats ${table.capacity}` : 'Seats as arranged'}</span>
+        {session ? (
+          <span className="ml-auto">Open {formatElapsed(session.openedAt)}</span>
+        ) : null}
+      </div>
+      {/* D156a — who is serving it. `UserRound`, not the `Users` above: that
+          one counts covers, this one names a person, and two lines under the
+          same icon read as one fact split in half. */}
+      {servedBy ? (
+        <p className="flex items-center gap-1 text-xs text-muted-foreground">
+          <UserRound className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+          <span className="truncate">{servedBy}</span>
+          {/* D159 — on the name, because that is the thing being changed. A
+              text button rather than a menu item: mid-service, a guest is
+              standing there, and the supervisor should not have to hunt. */}
+          {onChangeWaiter ? (
+            /*
+             * A CHIP, and `brand-100`/`brand-700` rather than `text-primary`.
+             *
+             * Both halves were reported by the PO ("Change text color is not
+             * visible") and both measured: as bare teal text this sat at
+             * 6.28:1 on the light card but 2.49:1 on the dark one — the same
+             * trap the Orders status tabs hit, because `--sem-action-primary`
+             * is Kinetic Teal in BOTH themes while the card behind it goes
+             * dark. `--sem-brand-700` lifts to Flow Aqua under dark, and this
+             * pair is the one already validated at 6.14:1 there.
+             *
+             * The border and fill are the other half: at 12px with no
+             * underline it read as part of the waiter's name rather than as
+             * something to press, which on a tablet at arm's length is the
+             * same as invisible.
+             */
+            <button
+              type="button"
+              onClick={onChangeWaiter}
+              className="inline-flex h-6 shrink-0 items-center rounded-full bg-brand-100 px-2 text-[11px] font-semibold text-brand-700 transition-colors hover:bg-brand-200"
+              aria-label={`Change the waiter serving ${table.label ?? table.code}`}
+            >
+              Change
+            </button>
+          ) : null}
+        </p>
+      ) : null}
+      {/* D50 — why this table is Reserved. Naming the holders is what stops an
+          operator unreserving something that is reserved for another reason:
+          a table with no line here has no unreserve control at all. */}
+      {isHeld ? (
+        <p className="flex items-start gap-1 text-xs text-info">
+          <Link2 className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+          <span>Held by {heldBy.map((o) => o.label ?? o.code).join(', ')}</span>
+        </p>
+      ) : null}
+      {/* D112 — the food-ready badge (D118: visual only — sound lives in
+          the kitchen). Cleared per device by opening the order, not by any
+          server state: serving has no verb here, carrying the plate is the
+          acknowledgement. */}
+      {readyCount > 0 ? (
+        <p className="flex items-center gap-1 text-xs font-semibold text-success">
+          <ConciergeBell className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+          <span>Food ready</span>
+        </p>
+      ) : null}
+      <div className="mt-auto flex gap-2 pt-1">
+        {/* `size="md"` (44px) unconditionally — this is the card's primary
+            action, and the sm variant (36px) sits just under the touch line
+            even on desktop. The empty spacer matches the same height so
+            cards without an action don't jitter the grid row. */}
+        {session ? (
+          <Button asChild size="md" fullWidth variant="secondary">
+            {/* D155 — into the POS, bound to this session. The table is already
+                chosen by the tap that got here, so the POS opens on the menu
+                with no picker in front of it. */}
+            <Link href={posHref(session.id)} onClick={onViewOrder}>
+              View order
+            </Link>
+          </Button>
+        ) : isAvailable && canOpen ? (
+          <Button
+            size="md"
+            fullWidth
+            leftIcon={<DoorOpen className="h-4 w-4" />}
+            onClick={onOpenClick}
+          >
+            Open table
+          </Button>
+        ) : (
+          /*
+           * D106 — a held table is SHOWN, not offered.
+           *
+           * This slot used to carry "Unreserve", which pulled a table out of an
+           * arrangement that was serving guests: `releaseMemberTable` guarded
+           * on the member's OWN live session, and a joined member never has one
+           * (the tab sits on the open-table row), so the guard could not fire
+           * for the case it looked like it covered. It left an arrangement
+           * running three tabs with no tables under it.
+           *
+           * D50 allowed that on purpose, for compaction — two arrangements
+           * sharing furniture, one bills, the other no longer needs all of it.
+           * D105 ended the sharing, so the case is gone with it. What is left
+           * is the badge and the "Held by" line above: where the table went,
+           * and nothing to press. It comes back when the last tab closes (D104)
+           * or when the arrangement is dissolved.
+           */
+          <div className="h-11" aria-hidden="true" />
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Dialogs ───────────────────────────────────────────────────────────────
+
+function OpenTableDialog({
+  onClose,
+  onOpened,
+  session,
+  branchId,
+  table,
+  arrangement,
+}: {
+  onClose: () => void;
+  onOpened: (opened: TableSessionView) => void;
+  session: Session;
+  branchId: string;
+  table: RestaurantTableView;
+  /**
+   * D104 — the open-table view of `table` when this was opened from an
+   * arrangement, else null. Only an arrangement is shared, so only an
+   * arrangement counts seats against what is free and asks who the tab is for.
+   */
+  arrangement: OpenTableView | null;
+}) {
+  /*
+   * D104 — on an arrangement the ceiling is what is FREE, not the whole
+   * capacity: two tabs of four each on a six-top both validated against 6
+   * before this record and the server now refuses the second.
+   *
+   * `arrangement` is the D49 open-table view when this dialog was opened from
+   * one; a physical table keeps exactly its old behaviour.
+   */
+  const free = arrangement ? seatsFree(arrangement) : null;
+  const ceiling = arrangement ? free : table.capacity;
+  const [guestCount, setGuestCount] = React.useState(String(Math.min(ceiling ?? 2, 2)));
+  const [tabName, setTabName] = React.useState('');
+  const [saving, setSaving] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+  const guestNum = Number(guestCount);
+  // A sibling tab is already running, so this one has to be nameable (D104).
+  const nameRequired = (arrangement?.liveTabs ?? 0) > 0;
+  const valid =
+    Number.isInteger(guestNum) &&
+    guestNum >= 1 &&
+    (ceiling == null || guestNum <= ceiling) &&
+    (!nameRequired || tabName.trim().length > 0);
+
+  const submit = async () => {
+    if (!valid) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const opened = await tableSessions.open(session, branchId, {
+        tableId: table.id,
+        guestCount: guestNum,
+        waiterUserId: session.user.id,
+        ...(tabName.trim() ? { tabName: tabName.trim() } : {}),
+      });
+      onOpened(opened);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to open table');
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Dialog
+      open
+      onClose={onClose}
+      title={`Open ${table.label ?? table.code}`}
+      description={
+        arrangement && free !== null
+          ? `${arrangement.capacity} seats, ${arrangement.seatsTaken} taken — ${free} free.`
+          : table.capacity != null
+            ? `Seats up to ${table.capacity} guests.`
+            : 'Seating as arranged — no registered capacity.'
+      }
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose} disabled={saving}>
+            Cancel
+          </Button>
+          <Button onClick={submit} isLoading={saving} disabled={!valid}>
+            Open table
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-4">
+        <div className="space-y-1.5">
+          <label className="text-sm font-medium" htmlFor="guest-count">
+            Guest count
+          </label>
+          <Input
+            id="guest-count"
+            value={guestCount}
+            onChange={(e) => setGuestCount(e.target.value)}
+            inputMode="numeric"
+            autoFocus
+          />
+          {guestCount && !(Number.isInteger(guestNum) && guestNum >= 1 && (ceiling == null || guestNum <= ceiling)) ? (
+            <p className="text-xs text-danger">
+              {arrangement && free !== null
+                ? `Between 1 and ${free} — the rest of this table is already taken.`
+                : table.capacity != null
+                  ? `Between 1 and ${table.capacity} (the table's capacity).`
+                  : 'The number of guests being seated.'}
+            </p>
+          ) : null}
+        </div>
+        {/* D104 — only an arrangement can carry two parties, so only an
+            arrangement asks who this tab is for. */}
+        {arrangement ? (
+          <div className="space-y-1.5">
+            <label className="text-sm font-medium" htmlFor="tab-name">
+              Tab name{nameRequired ? '' : ' (optional)'}
+            </label>
+            <Input
+              id="tab-name"
+              value={tabName}
+              onChange={(e) => setTabName(e.target.value)}
+              placeholder="Who this tab is for"
+            />
+            <p className="text-xs text-muted-foreground">
+              {nameRequired
+                ? 'Another party is already here — name this tab so the kitchen can tell them apart.'
+                : 'Only needed once a second party shares this table.'}
+            </p>
+          </div>
+        ) : null}
+        {error ? <p className="text-sm text-danger">{error}</p> : null}
+      </div>
+    </Dialog>
+  );
+}
+
+function NewAreaDialog({
+  onClose,
+  onCreated,
+  session,
+  branchId,
+}: {
+  onClose: () => void;
+  onCreated: (area: DiningAreaView) => void;
+  session: Session;
+  branchId: string;
+}) {
+  const [name, setName] = React.useState('');
+  const [description, setDescription] = React.useState('');
+  const [saving, setSaving] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+
+  const submit = async () => {
+    if (!name.trim()) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const created = await diningAreas.create(session, branchId, {
+        name: name.trim(),
+        description: description.trim() || undefined,
+      });
+      onCreated(created);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to create area');
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Dialog
+      open
+      onClose={onClose}
+      title="New dining area"
+      description="A section of the floor plan, e.g. Ground Floor, Outdoor, Bar."
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose} disabled={saving}>
+            Cancel
+          </Button>
+          <Button onClick={submit} isLoading={saving} disabled={!name.trim()}>
+            Create area
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-4">
+        <div className="space-y-1.5">
+          <label className="text-sm font-medium" htmlFor="area-name">
+            Name
+          </label>
+          <Input
+            id="area-name"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="Ground floor"
+            autoFocus
+          />
+        </div>
+        <div className="space-y-1.5">
+          <label className="text-sm font-medium" htmlFor="area-desc">
+            Description
+          </label>
+          <Input
+            id="area-desc"
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            placeholder="Optional"
+          />
+        </div>
+        {error ? <p className="text-sm text-danger">{error}</p> : null}
+      </div>
+    </Dialog>
+  );
+}
+
+function NewTableDialog({
+  onClose,
+  onCreated,
+  session,
+  areaId,
+}: {
+  onClose: () => void;
+  onCreated: (table: RestaurantTableView) => void;
+  session: Session;
+  areaId: string;
+}) {
+  const [code, setCode] = React.useState('');
+  const [label, setLabel] = React.useState('');
+  const [capacity, setCapacity] = React.useState('4');
+  const [saving, setSaving] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+
+  const capacityNum = Number(capacity);
+  const codeIsValid = /^[A-Z0-9][A-Z0-9-]*$/.test(code);
+
+  const submit = async () => {
+    if (!codeIsValid || !Number.isInteger(capacityNum) || capacityNum < 1) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const created = await restaurantTables.create(session, areaId, {
+        code,
+        label: label.trim() || undefined,
+        capacity: capacityNum,
+      });
+      onCreated(created);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to create table');
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Dialog
+      open
+      onClose={onClose}
+      title="New table"
+      description="Codes are unique per area (e.g. T1, BAR-3). Case-insensitive; stored as uppercase."
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose} disabled={saving}>
+            Cancel
+          </Button>
+          <Button
+            onClick={submit}
+            isLoading={saving}
+            disabled={!codeIsValid || !capacityNum || capacityNum < 1}
+          >
+            Create table
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-4">
+        <div className="space-y-1.5">
+          <label className="text-sm font-medium" htmlFor="table-code">
+            Code
+          </label>
+          <Input
+            id="table-code"
+            value={code}
+            onChange={(e) => setCode(e.target.value.toUpperCase())}
+            placeholder="T1"
+            autoFocus
+          />
+          {code && !codeIsValid ? (
+            <p className="text-xs text-danger">
+              Codes must start with a letter or digit; letters, digits and hyphens only.
+            </p>
+          ) : null}
+        </div>
+        <div className="space-y-1.5">
+          <label className="text-sm font-medium" htmlFor="table-label">
+            Display label
+          </label>
+          <Input
+            id="table-label"
+            value={label}
+            onChange={(e) => setLabel(e.target.value)}
+            placeholder="Optional — e.g. Window 1"
+          />
+        </div>
+        <div className="space-y-1.5">
+          <label className="text-sm font-medium" htmlFor="table-capacity">
+            Capacity (seats)
+          </label>
+          <Input
+            id="table-capacity"
+            value={capacity}
+            onChange={(e) => setCapacity(e.target.value)}
+            inputMode="numeric"
+          />
+        </div>
+        {error ? <p className="text-sm text-danger">{error}</p> : null}
+      </div>
+    </Dialog>
+  );
+}
+
+// ── Owner-scoped menus + dialogs (Restaurant Pilot Change 1) ──────────────
+
+/**
+ * A tiny click-out dropdown for the per-row overflow menu. Only rendered by
+ * the caller when the caller has proven ownership *and* holds at least one
+ * of the item permissions — the menu itself never re-decides that.
+ */
+function OwnerMenu({
+  label,
+  items,
+}: {
+  label: string;
+  items: Array<
+    | false
+    | {
+        key: string;
+        label: string;
+        icon: React.ReactNode;
+        onClick: () => void;
+        danger?: boolean;
+      }
+  >;
+}) {
+  const [open, setOpen] = React.useState(false);
+  const ref = React.useRef<HTMLDivElement>(null);
+  React.useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && setOpen(false);
+    document.addEventListener('mousedown', onDoc);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDoc);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+  const real = items.filter(
+    (it): it is Exclude<typeof it, false> => it !== false,
+  );
+  if (real.length === 0) return null;
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        type="button"
+        aria-label={label}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+        // touch-target-coarse expands the tap area to 44×44 on touch devices
+        // without changing the mouse footprint — the icon stays the same
+        // visual size in both places.
+        className="touch-target-coarse inline-flex items-center justify-center rounded-md p-1.5 text-muted-foreground hover:bg-muted"
+      >
+        <MoreVertical className="h-4 w-4" />
+      </button>
+      {open ? (
+        <div
+          role="menu"
+          className="absolute right-0 top-full z-20 mt-1 min-w-40 rounded-lg border border-border bg-surface p-1 shadow-lg"
+        >
+          {real.map((it) => (
+            <button
+              key={it.key}
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setOpen(false);
+                it.onClick();
+              }}
+              className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm ${
+                it.danger ? 'text-danger hover:bg-danger/10' : 'text-foreground hover:bg-muted'
+              }`}
+            >
+              {it.icon}
+              <span>{it.label}</span>
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * Turns the server's error code into the copy the directive specifies.
+ * Falls back to the raw message for anything unmapped — server-provided
+ * messages already carry the generic wording, so a fallback here does not
+ * regress an unmapped case to "Something went wrong."
+ */
+function translateError(err: unknown): string {
+  if (err instanceof ApiError) {
+    const body = err.body as { code?: string; message?: string } | undefined;
+    switch (body?.code) {
+      case 'FORBIDDEN_NOT_CREATOR':
+        return 'You can only edit tables or dining areas that you created.';
+      case 'TABLE_IN_SERVICE':
+        return 'This table is currently in service and cannot be archived.';
+      case 'AREA_HAS_TABLES':
+        return 'Move or archive the tables in this dining area before archiving it.';
+      case 'AREA_NAME_TAKEN':
+        return body?.message ?? 'That area name is already in use on this branch.';
+      case 'TABLE_CODE_TAKEN':
+        return body?.message ?? 'That table code is already in use in this area.';
+      default:
+        return body?.message ?? err.message;
+    }
+  }
+  return err instanceof Error ? err.message : 'Something went wrong.';
+}
+
+function EditAreaDialog({
+  onClose,
+  onSaved,
+  session,
+  branchId,
+  area,
+}: {
+  onClose: () => void;
+  onSaved: () => void;
+  session: Session;
+  branchId: string;
+  area: DiningAreaView;
+}) {
+  const [name, setName] = React.useState(area.name);
+  const [description, setDescription] = React.useState(area.description ?? '');
+  const [saving, setSaving] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+  const submit = async () => {
+    if (!name.trim()) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await diningAreas.update(session, branchId, area.id, {
+        name: name.trim(),
+        description: description.trim() || undefined,
+      });
+      onSaved();
+    } catch (err) {
+      setError(translateError(err));
+      setSaving(false);
+    }
+  };
+  return (
+    <Dialog
+      open
+      onClose={onClose}
+      title={`Edit ${area.name}`}
+      description="Rename this floor or update its description."
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose} disabled={saving}>
+            Cancel
+          </Button>
+          <Button onClick={submit} isLoading={saving} disabled={!name.trim()}>
+            Save
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-4">
+        <div className="space-y-1.5">
+          <label className="text-sm font-medium" htmlFor="edit-area-name">
+            Name
+          </label>
+          <Input
+            id="edit-area-name"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            autoFocus
+          />
+        </div>
+        <div className="space-y-1.5">
+          <label className="text-sm font-medium" htmlFor="edit-area-desc">
+            Description
+          </label>
+          <Input
+            id="edit-area-desc"
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            placeholder="Optional"
+          />
+        </div>
+        {error ? <p className="text-sm text-danger">{error}</p> : null}
+      </div>
+    </Dialog>
+  );
+}
+
+function ArchiveAreaDialog({
+  onClose,
+  onArchived,
+  session,
+  branchId,
+  area,
+}: {
+  onClose: () => void;
+  onArchived: () => void;
+  session: Session;
+  branchId: string;
+  area: DiningAreaView;
+}) {
+  const [saving, setSaving] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+  const submit = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      await diningAreas.archive(session, branchId, area.id);
+      onArchived();
+    } catch (err) {
+      setError(translateError(err));
+      setSaving(false);
+    }
+  };
+  return (
+    <Dialog
+      open
+      onClose={onClose}
+      title={`Archive ${area.name}?`}
+      description="All active tables must first be moved or archived."
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose} disabled={saving}>
+            Cancel
+          </Button>
+          <Button variant="destructive" onClick={submit} isLoading={saving}>
+            Archive floor
+          </Button>
+        </>
+      }
+    >
+      {error ? (
+        <p className="text-sm text-danger">{error}</p>
+      ) : (
+        <p className="text-sm text-muted-foreground">
+          Historical orders and reports for this floor will remain available.
+        </p>
+      )}
+    </Dialog>
+  );
+}
+
+function EditTableDialog({
+  onClose,
+  onSaved,
+  session,
+  table,
+}: {
+  onClose: () => void;
+  onSaved: () => void;
+  session: Session;
+  table: RestaurantTableView;
+}) {
+  const [label, setLabel] = React.useState(table.label ?? '');
+  const [capacity, setCapacity] = React.useState(String(table.capacity ?? ''));
+  const [saving, setSaving] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+  const capacityNum = Number(capacity);
+  const valid = Number.isInteger(capacityNum) && capacityNum >= 1;
+  const submit = async () => {
+    if (!valid) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await restaurantTables.update(session, table.areaId ?? '', table.id, {
+        label: label.trim() || undefined,
+        capacity: capacityNum,
+      });
+      onSaved();
+    } catch (err) {
+      setError(translateError(err));
+      setSaving(false);
+    }
+  };
+  return (
+    <Dialog
+      open
+      onClose={onClose}
+      title={`Edit ${table.label ?? table.code}`}
+      description={`Code (${table.code}) is fixed for consistency with the shared vocabulary.`}
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose} disabled={saving}>
+            Cancel
+          </Button>
+          <Button onClick={submit} isLoading={saving} disabled={!valid}>
+            Save
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-4">
+        <div className="space-y-1.5">
+          <label className="text-sm font-medium" htmlFor="edit-table-label">
+            Display label
+          </label>
+          <Input
+            id="edit-table-label"
+            value={label}
+            onChange={(e) => setLabel(e.target.value)}
+            placeholder="Optional — e.g. Window 1"
+            autoFocus
+          />
+        </div>
+        <div className="space-y-1.5">
+          <label className="text-sm font-medium" htmlFor="edit-table-capacity">
+            Capacity (seats)
+          </label>
+          <Input
+            id="edit-table-capacity"
+            value={capacity}
+            onChange={(e) => setCapacity(e.target.value)}
+            inputMode="numeric"
+          />
+        </div>
+        {error ? <p className="text-sm text-danger">{error}</p> : null}
+      </div>
+    </Dialog>
+  );
+}
+
+function ArchiveTableDialog({
+  onClose,
+  onArchived,
+  session,
+  table,
+}: {
+  onClose: () => void;
+  onArchived: () => void;
+  session: Session;
+  table: RestaurantTableView;
+}) {
+  const [saving, setSaving] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+  const submit = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      await restaurantTables.archive(session, table.areaId ?? '', table.id);
+      onArchived();
+    } catch (err) {
+      setError(translateError(err));
+      setSaving(false);
+    }
+  };
+  return (
+    <Dialog
+      open
+      onClose={onClose}
+      title={`Archive ${table.label ?? table.code}?`}
+      description="This table will no longer be available for new guests."
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose} disabled={saving}>
+            Cancel
+          </Button>
+          <Button variant="destructive" onClick={submit} isLoading={saving}>
+            Archive table
+          </Button>
+        </>
+      }
+    >
+      {error ? (
+        <p className="text-sm text-danger">{error}</p>
+      ) : (
+        <p className="text-sm text-muted-foreground">
+          Historical orders and reports will remain available.
+        </p>
+      )}
+    </Dialog>
+  );
+}
+
+/**
+ * D159 — hand an open table to a different waiter.
+ *
+ * The list is the SERVER's answer to "who can serve here" (roles carrying
+ * ORDER_SEND_TO_KITCHEN, on this branch), not a client-side guess, so the
+ * picker cannot offer somebody the reassign would then refuse. The waiter
+ * currently on the table is shown and disabled: it is the answer to "who is on
+ * it" and never a thing to pick.
+ *
+ * Every round keeps the waiter who SENT it — this changes who is responsible
+ * from now on, which is what a guest asking for someone else means, and the
+ * table moves between the two waiters' "my tables" (D156) and their "my
+ * orders" (D157) on the next poll.
+ */
+/**
+ * D159 — hand an open table to a different waiter.
+ *
+ * The list is the SERVER's answer to "who can serve here" (roles carrying
+ * ORDER_SEND_TO_KITCHEN, on this branch), not a client-side guess, so the
+ * picker cannot offer somebody the reassign would then refuse. The waiter
+ * currently on the table is shown and disabled: it is the answer to "who is on
+ * it" and never a thing to pick.
+ *
+ * Every round keeps the waiter who SENT it — this changes who is responsible
+ * from now on, which is what a guest asking for someone else means, and the
+ * table moves between the two waiters' "my tables" (D156) and their "my
+ * orders" (D157) on the next poll.
+ *
+ * ## D159a — what a list of fifteen needs that a list of three does not
+ *
+ * A restaurant runs more waiters than fit a dialog, so three things carry the
+ * long case, in the order a supervisor actually decides:
+ *
+ *   1. SERVING NOW first, with their table count. The question mid-service is
+ *      never "who exists" but "who is here and has room", and — with no
+ *      clock-in in this schema — "holding an open session on this branch" is
+ *      the only honest reading of "here". It is also the same fact the floor
+ *      behind the dialog is showing.
+ *   2. A search box once the list passes {@link SEARCH_FROM}. Below that it
+ *      would be a control that costs a tap and saves none — and it is NOT
+ *      auto-focused: on a tablet, focus raises the on-screen keyboard over the
+ *      list, and the commonest action here is tapping a name, not typing one.
+ *   3. A capped, scrolling body. The dialog must not grow past the screen on
+ *      the tablet this is used on.
+ *
+ * Client-side filtering on purpose: this list is the branch's floor staff —
+ * tens of rows, already fetched — so a server round-trip per keystroke would
+ * add latency to a decision being made in front of a guest.
+ */
+/*
+ * Six, not eight (PO asked twice about big floors): at five names every row is
+ * on screen and a keyboard would cover them; by six the list starts to scroll
+ * on a tablet, which is the moment search earns its place.
+ */
+const SEARCH_FROM = 6;
+
+function ChangeWaiterDialog({
+  session,
+  branchId,
+  target,
+  onClose,
+  onChanged,
+}: {
+  session: Session;
+  branchId: string;
+  target: { session: OpenSessionView; tableLabel: string };
+  onClose: () => void;
+  onChanged: () => void;
+}) {
+  const [staff, setStaff] = React.useState<AssignableWaiter[] | null>(null);
+  const [picked, setPicked] = React.useState<string | null>(null);
+  const [query, setQuery] = React.useState('');
+  const [saving, setSaving] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    tableSessions
+      .listAssignableWaiters(session, branchId)
+      .then((rows) => {
+        if (!cancelled) setStaff(rows);
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : 'Could not load the floor staff');
+          setStaff([]);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [session, branchId]);
+
+  const submit = async () => {
+    if (!picked || saving) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await tableSessions.reassignWaiter(session, branchId, target.session.id, picked);
+      onChanged();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not change the waiter');
+      setSaving(false);
+    }
+  };
+
+  const current = target.session.waiterUserId;
+  const all = staff ?? [];
+  /*
+   * The current waiter is not a candidate, so they are neither searched nor
+   * grouped — they are shown once, at the top, as context.
+   */
+  const candidates = all.filter((person) => person.id !== current);
+  const needle = normalizeSearchTerm(query).toLowerCase();
+  const matching = needle
+    ? candidates.filter((person) => person.name.toLowerCase().includes(needle))
+    : candidates;
+  /*
+   * The second group is the COMPLEMENT of the first, not `=== 0`: a row whose
+   * count did not arrive (an older server, a payload trimmed by a proxy) would
+   * otherwise belong to neither group and vanish from a picker that is supposed
+   * to list everybody who can take the table.
+   */
+  const serving = matching.filter((person) => person.openTableCount > 0);
+  const free = matching.filter((person) => !(person.openTableCount > 0));
+  const currentPerson = all.find((person) => person.id === current) ?? null;
+
+  const row = (person: AssignableWaiter) => (
+    <button
+      key={person.id}
+      type="button"
+      disabled={saving}
+      onClick={() => setPicked(person.id)}
+      aria-pressed={picked === person.id}
+      className={`flex w-full items-center justify-between gap-3 rounded-xl border p-3 text-left text-sm transition-colors disabled:cursor-not-allowed ${
+        picked === person.id ? 'border-primary bg-brand-50' : 'border-border hover:border-primary'
+      }`}
+    >
+      <span className="flex min-w-0 items-center gap-2">
+        <UserRound className="h-4 w-4 shrink-0" aria-hidden="true" />
+        <span className="truncate font-medium">{person.name}</span>
+      </span>
+      {/* The load, in words: "2 tables" decides a handover in a way a bare
+          name cannot. Absent at zero — that IS the group they are in. */}
+      {person.openTableCount > 0 ? (
+        <span className="shrink-0 text-xs text-muted-foreground">
+          {person.openTableCount} table{person.openTableCount === 1 ? '' : 's'}
+        </span>
+      ) : null}
+    </button>
+  );
+
+  const group = (label: string, people: AssignableWaiter[]) =>
+    people.length === 0 ? null : (
+      <div className="space-y-2" role="group" aria-label={label}>
+        <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+          {label} · {people.length}
+        </p>
+        {people.map(row)}
+      </div>
+    );
+
+  return (
+    <Dialog
+      open
+      onClose={saving ? () => undefined : onClose}
+      title={`Change waiter — ${target.tableLabel}`}
+      description="The new waiter takes over from now. Rounds already sent keep the waiter who sent them, and the bill is unaffected."
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose} disabled={saving}>
+            Cancel
+          </Button>
+          <Button onClick={() => void submit()} isLoading={saving} disabled={!picked}>
+            Change waiter
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-3">
+        {error ? <p className="text-sm text-danger">{error}</p> : null}
+
+        {/* Who is on it now — once, at the top, and not a choice. */}
+        {currentPerson ? (
+          <div className="flex items-center justify-between gap-3 rounded-xl border border-border bg-muted p-3 text-sm text-muted-foreground">
+            <span className="flex min-w-0 items-center gap-2">
+              <UserRound className="h-4 w-4 shrink-0" aria-hidden="true" />
+              <span className="truncate font-medium">{currentPerson.name}</span>
+            </span>
+            <span className="shrink-0 text-xs uppercase tracking-wide">On this table</span>
+          </div>
+        ) : null}
+
+        {/* D159a — offered only when the list is long enough to need it. */}
+        {candidates.length >= SEARCH_FROM ? (
+          <Input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search staff by name…"
+            aria-label="Search staff by name"
+          />
+        ) : null}
+
+        {staff === null ? (
+          <p className="py-4 text-sm text-muted-foreground">Loading the floor staff…</p>
+        ) : candidates.length === 0 ? (
+          <p className="py-4 text-sm text-muted-foreground">
+            No other staff on this branch can be given a table. A waiter needs a role that can
+            send orders to the kitchen.
+          </p>
+        ) : matching.length === 0 ? (
+          <p className="py-4 text-sm text-muted-foreground">
+            Nobody matches &ldquo;{query.trim()}&rdquo;.
+          </p>
+        ) : (
+          /*
+           * Capped and scrolling: fifteen rows must not push the footer — and
+           * with it the confirm — off a tablet.
+           */
+          <div className="max-h-[46dvh] space-y-4 overflow-y-auto pr-1">
+            {group('Serving now', serving)}
+            {group('No tables right now', free)}
+          </div>
+        )}
+      </div>
+    </Dialog>
+  );
+}
+
+// ── Open tables (D49) ─────────────────────────────────────────────────────
+
+function OpenTableCard({
+  table,
+  sessions,
+  allTabs,
+  readyCount,
+  onViewOrder,
+  canOpen,
+  onOpenClick,
+  canDissolve,
+  onDissolve,
+}: {
+  table: OpenTableView;
+  /** D104 — every live tab on this arrangement, not just the first. */
+  sessions: OpenSessionView[];
+  /**
+   * D156a — every tab the BRANCH has on this arrangement, scope or no scope,
+   * so the "served by" line names all of them while the buttons above it stay
+   * scoped to what the operator may open.
+   */
+  allTabs: OpenSessionView[];
+  /** D112 — see TableCard: unanswered bumped tickets across this arrangement's tabs. */
+  readyCount: number;
+  /** Tapping a tab's link answers the badge for THAT tab on this device. */
+  onViewOrder: (session: OpenSessionView) => void;
+  canOpen: boolean;
+  onOpenClick: () => void;
+  canDissolve: boolean;
+  onDissolve: () => void;
+}) {
+  /*
+   * D104 — an arrangement is seatable while it has chairs left, not while it
+   * is AVAILABLE. It leaves AVAILABLE the moment the first party sits, and the
+   * whole point of the record is that a second party may still join. An
+   * arrangement with no recorded seat count (D49) has no limit to hit.
+   */
+  const free = seatsFree(table);
+  const canSeat = free === null || free > 0;
+  return (
+    <div className="flex min-w-0 flex-col gap-2 rounded-xl border border-dashed border-border bg-card p-3 shadow-sm">
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <p className="truncate text-base font-semibold" title={table.label ?? table.code}>
+            {table.label ?? table.code}
+          </p>
+          <p className="text-xs text-muted-foreground">{table.code}</p>
+        </div>
+        <StatusBadge
+          label={TABLE_STATUS_LABELS[table.status]}
+          tone={TABLE_STATUS_TONES[table.status]}
+        />
+      </div>
+      <div className="flex items-center gap-1 text-xs text-muted-foreground">
+        <Users className="h-3.5 w-3.5" aria-hidden="true" />
+        <span>
+          {table.capacity != null
+            ? `${table.capacity} seats · ${table.seatsTaken} taken, ${free} free`
+            : 'Seats as arranged'}
+        </span>
+        {sessions.length > 0 ? (
+          <span className="ml-auto">
+            {sessions.length} tab{sessions.length === 1 ? '' : 's'}
+          </span>
+        ) : null}
+      </div>
+      {/* The joined physical tables — the operator's answer to "where do I
+          actually put these people". */}
+      <p className="text-xs text-muted-foreground">
+        Joins {table.members.map((m) => m.label ?? m.code).join(' + ') || '—'}
+      </p>
+      {/* D112 — same bell as TableCard; a joined party's food rings too. */}
+      {readyCount > 0 ? (
+        <p className="flex items-center gap-1 text-xs font-semibold text-success">
+          <ConciergeBell className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+          <span>Food ready</span>
+        </p>
+      ) : null}
+      {/* Stacked, not side by side: these cards are one narrow grid cell wide,
+          and a second button on the same row overflows into its neighbour. */}
+      <div className="mt-auto flex flex-col gap-2 pt-1">
+        {/* D104 — ONE link per tab. A single "View order" reached whichever tab
+            the old map happened to keep, leaving the other party's order with
+            no entry point anywhere in the product. */}
+        {sessions.map((s) => {
+          const label = s.tabName ? `View ${s.tabName}` : 'View order';
+          const elapsed = formatElapsed(s.openedAt);
+          return (
+            /* The tab name is operator-typed and can be any length, while the
+               card is one narrow grid cell wide. Truncate the name and keep the
+               elapsed time — the part that decides whether to walk over — on
+               screen, rather than letting the label spill past the button. */
+            <Button key={s.id} asChild size="md" fullWidth variant="secondary">
+              <Link
+                href={posHref(s.id)}
+                onClick={() => onViewOrder(s)}
+                className="min-w-0 gap-1 px-3"
+                title={`${label} · ${elapsed}`}
+              >
+                <span className="min-w-0 truncate">{label}</span>
+                <span className="shrink-0" aria-hidden="true">
+                  ·
+                </span>
+                <span className="shrink-0">{elapsed}</span>
+              </Link>
+            </Button>
+          );
+        })}
+        {/* Who is serving, under the buttons: a name inside a 44px button on
+            a one-cell-wide card pushes the elapsed time — the part that
+            decides whether to walk over — off the chip. D156a: every tab, not
+            only other people's, and read from the unscoped list so the line
+            does not change with the chips. D156b: NAMES, de-duplicated, with
+            no tab prefix — "surandi: Restaurant Waiter" repeated the tab
+            name that is already on the View button directly above it, and
+            one waiter running two tabs was named twice. */}
+        {allTabs.some((s) => s.waiterName?.trim()) ? (
+          <p className="flex items-start gap-1 text-xs text-muted-foreground">
+            <UserRound className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+            <span className="min-w-0">
+              {[
+                ...new Set(
+                  allTabs
+                    .map((s) => s.waiterName?.trim())
+                    .filter((name): name is string => !!name),
+                ),
+              ].join(' · ')}
+            </span>
+          </p>
+        ) : null}
+        {canSeat && canOpen ? (
+          <Button
+            size="md"
+            fullWidth
+            variant={sessions.length > 0 ? 'outline' : 'primary'}
+            leftIcon={<DoorOpen className="h-4 w-4" />}
+            onClick={onOpenClick}
+          >
+            {sessions.length > 0 ? 'Add a tab' : 'Open table'}
+          </Button>
+        ) : sessions.length === 0 ? (
+          <div className="h-11" aria-hidden="true" />
+        ) : null}
+        {sessions.length === 0 && canDissolve ? (
+          <Button size="md" fullWidth variant="outline" onClick={onDissolve}>
+            Dissolve
+          </Button>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function CreateOpenTableDialog({
+  onClose,
+  onCreated,
+  session,
+  branchId,
+  areas,
+  tablesByArea,
+}: {
+  onClose: () => void;
+  onCreated: () => Promise<void> | void;
+  session: Session;
+  branchId: string;
+  areas: DiningAreaView[];
+  tablesByArea: Map<string, RestaurantTableView[]>;
+}) {
+  const [name, setName] = React.useState('');
+  const [seats, setSeats] = React.useState('');
+  const [selected, setSelected] = React.useState<Set<string>>(new Set());
+  const [saving, setSaving] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+
+  /*
+   * D105 — AVAILABLE only. A table already inside an arrangement is not
+   * offered to a second one.
+   *
+   * D50 used to offer RESERVED tables too, so two unrelated pairs could each
+   * hold their own arrangement over one free four-top. After D104 a member
+   * stays RESERVED while its arrangement fills with guests, so that widening
+   * was quietly offering tables with people sitting at them. The second pair
+   * now opens a second TAB on the existing arrangement instead.
+   *
+   * The server enforces the same rule; this filter only keeps the picker
+   * honest (CLAUDE.md — frontend hiding is usability, never authority).
+   */
+  const joinable = areas
+    .map((area) => ({
+      area,
+      tables: (tablesByArea.get(area.id) ?? []).filter(
+        (t) => t.status === 'AVAILABLE' && t.isActive && t.kind === 'PHYSICAL',
+      ),
+    }))
+    .filter((g) => g.tables.length > 0);
+
+  const seatsNum = seats.trim() === '' ? undefined : Number(seats);
+  const valid =
+    name.trim().length > 0 &&
+    selected.size >= 1 &&
+    (seatsNum === undefined || (Number.isInteger(seatsNum) && seatsNum >= 1));
+
+  const toggle = (id: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const submit = async () => {
+    if (!valid || saving) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await openTables.create(session, branchId, {
+        name: name.trim(),
+        seats: seatsNum,
+        memberTableIds: [...selected],
+      });
+      await onCreated();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not create the open table');
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Dialog
+      open
+      onClose={onClose}
+      title="New open table"
+      description="Join free physical tables for a party that outgrows the floor plan. A table already inside another open table is not listed — to give a new party its own tab there, add a tab to that open table instead."
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose} disabled={saving}>
+            Cancel
+          </Button>
+          <Button onClick={() => void submit()} isLoading={saving} disabled={!valid}>
+            Create open table
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-4">
+        {error ? <p className="text-sm text-danger">{error}</p> : null}
+        <div className="grid grid-cols-2 gap-3">
+          <div className="space-y-1.5">
+            <label className="text-sm font-medium" htmlFor="open-table-name">
+              Name
+            </label>
+            <Input
+              id="open-table-name"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="Party of six"
+            />
+          </div>
+          <div className="space-y-1.5">
+            <label className="text-sm font-medium" htmlFor="open-table-seats">
+              Seats (optional)
+            </label>
+            <Input
+              id="open-table-seats"
+              type="number"
+              min={1}
+              value={seats}
+              onChange={(e) => setSeats(e.target.value)}
+              placeholder="No registered capacity"
+            />
+          </div>
+        </div>
+        <div className="space-y-1.5">
+          <p className="text-sm font-medium">Tables to reserve</p>
+          {joinable.length === 0 ? (
+            <p className="rounded-xl border border-border p-3 text-sm text-muted-foreground">
+              No available tables to reserve right now.
+            </p>
+          ) : (
+            <div className="max-h-64 space-y-3 overflow-y-auto rounded-xl border border-border p-3">
+              {joinable.map(({ area, tables }) => (
+                <div key={area.id}>
+                  <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                    {area.name}
+                  </p>
+                  <div className="flex flex-wrap gap-2">
+                    {tables.map((t) => (
+                      <label
+                        key={t.id}
+                        className={
+                          'flex cursor-pointer items-center gap-2 rounded-lg border px-3 py-2 text-sm ' +
+                          (selected.has(t.id) ? 'border-primary bg-primary/10' : 'border-border')
+                        }
+                      >
+                        <input
+                          type="checkbox"
+                          className="h-4 w-4 accent-primary"
+                          checked={selected.has(t.id)}
+                          onChange={() => toggle(t.id)}
+                        />
+                        <span>
+                          {t.label ?? t.code}
+                          <span className="ml-1 text-xs text-muted-foreground">({t.capacity})</span>
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+          <p className="text-xs text-muted-foreground">
+            Selected tables go Reserved and cannot be seated separately. They
+            are freed when the last tab on this open table closes, or if it is
+            dissolved before anyone is seated.
+          </p>
+        </div>
+      </div>
+    </Dialog>
+  );
+}
+
+function DissolveOpenTableDialog({
+  onClose,
+  onDissolved,
+  session,
+  branchId,
+  table,
+}: {
+  onClose: () => void;
+  onDissolved: () => Promise<void> | void;
+  session: Session;
+  branchId: string;
+  table: OpenTableView;
+}) {
+  const [busy, setBusy] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+
+  const submit = async () => {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await openTables.dissolve(session, branchId, table.id);
+      await onDissolved();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not dissolve the open table');
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Dialog
+      open
+      onClose={onClose}
+      title={`Dissolve ${table.label ?? table.code}?`}
+      description={
+        // D104 — dissolve is only reachable with no live tab, so the members do
+        // all come back; the qualifier is about the OTHER arrangements that may
+        // still hold them (D50), which this dialog used to promise away.
+        `${table.members.map((m) => m.label ?? m.code).join(', ')} return to Available, unless another open table still holds them.`
+      }
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose} disabled={busy}>
+            Cancel
+          </Button>
+          <Button variant="destructive" onClick={() => void submit()} isLoading={busy}>
+            Dissolve
+          </Button>
+        </>
+      }
+    >
+      {error ? <p className="text-sm text-danger">{error}</p> : null}
+    </Dialog>
+  );
+}
+

@@ -241,6 +241,35 @@ export class UpdateDocumentSettingsDto {
   @IsBoolean()
   @IsOptional()
   signatureFields?: boolean;
+
+  /*
+   * D99 — thermal paper geometry. The bounds are not taste: a page narrower
+   * than 40mm is not a receipt roll, and insets that swallow the column would
+   * render a bill with nowhere to print the amounts. The client-side resolver
+   * clamps as well, because the web app renders from a cached profile that
+   * never passed through this DTO.
+   */
+  @IsNumber()
+  @Min(40)
+  @Max(120)
+  @IsOptional()
+  billPaperWidthMm?: number;
+
+  @IsNumber()
+  @Min(0)
+  @Max(20)
+  @IsOptional()
+  billLeftInsetMm?: number;
+
+  @IsNumber()
+  @Min(0)
+  @Max(20)
+  @IsOptional()
+  billRightInsetMm?: number;
+
+  @IsBoolean()
+  @IsOptional()
+  billFitToContent?: boolean;
 }
 
 export class UpdateSharingSettingsDto {
@@ -275,6 +304,100 @@ export class UpdateSharingSettingsDto {
   @Max(3650)
   @IsOptional()
   pdfStorageDurationDays?: number;
+}
+
+/** Phase 5 `5.8` — label geometry, in millimetres. */
+export class UpdateLabelSettingsDto {
+  @IsNumber()
+  @Min(10)
+  @Max(300)
+  @IsOptional()
+  widthMm?: number;
+
+  @IsNumber()
+  @Min(10)
+  @Max(300)
+  @IsOptional()
+  heightMm?: number;
+
+  @IsInt()
+  @Min(1)
+  @Max(20)
+  @IsOptional()
+  columns?: number;
+
+  @IsInt()
+  @Min(1)
+  @Max(50)
+  @IsOptional()
+  rows?: number;
+
+  @IsNumber()
+  @Min(0)
+  @Max(100)
+  @IsOptional()
+  marginTopMm?: number;
+
+  @IsNumber()
+  @Min(0)
+  @Max(100)
+  @IsOptional()
+  marginLeftMm?: number;
+
+  @IsNumber()
+  @Min(0)
+  @Max(50)
+  @IsOptional()
+  gapXMm?: number;
+
+  @IsNumber()
+  @Min(0)
+  @Max(50)
+  @IsOptional()
+  gapYMm?: number;
+
+  @IsBoolean()
+  @IsOptional()
+  showProductName?: boolean;
+
+  @IsBoolean()
+  @IsOptional()
+  showVariantOptions?: boolean;
+
+  @IsBoolean()
+  @IsOptional()
+  showPrice?: boolean;
+
+  @IsBoolean()
+  @IsOptional()
+  showSku?: boolean;
+
+  @IsIn(['EAN13', 'CODE128'])
+  @IsOptional()
+  symbology?: 'EAN13' | 'CODE128';
+}
+
+/** D125 Part 3 `5.4` + `5.8`. */
+export class UpdateCatalogueSettingsDto {
+  /**
+   * 2-6 digits starting `02` or `20`-`29`. The shape is checked here; the GS1
+   * range rule is checked by the shared `ean13PrefixIssue`, so the API and the
+   * settings form give the identical explanation for a refusal.
+   *
+   * `null` is allowed and means "not configured" — allocation then refuses,
+   * which is the D125 sequencing constraint made real rather than documented.
+   */
+  @Matches(/^\d{2,6}$/)
+  @IsOptional()
+  barcodePrefix?: string | null;
+
+  @IsOptional()
+  barcodePrefixByCategoryId?: Record<string, string>;
+
+  @ValidateNested()
+  @Type(() => UpdateLabelSettingsDto)
+  @IsOptional()
+  label?: UpdateLabelSettingsDto;
 }
 
 export class UpdateSettingsDto {
@@ -322,6 +445,11 @@ export class UpdateSettingsDto {
   @Type(() => UpdateDocumentSettingsDto)
   @IsOptional()
   documents?: UpdateDocumentSettingsDto;
+
+  @ValidateNested()
+  @Type(() => UpdateCatalogueSettingsDto)
+  @IsOptional()
+  catalogue?: UpdateCatalogueSettingsDto;
 
   @ValidateNested()
   @Type(() => UpdateSharingSettingsDto)

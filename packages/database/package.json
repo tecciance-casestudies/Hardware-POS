@@ -19,6 +19,10 @@
     "db:format": "prisma format",
     "db:seed": "prisma db seed",
     "db:provision": "tsx prisma/provision-tenant.ts",
+    "db:add-staff": "tsx prisma/add-staff.ts",
+    "db:export-catalogue": "tsx prisma/export-catalogue.ts",
+    "db:backfill-roles": "tsx prisma/backfill-tenant-roles.ts",
+    "db:role-report": "tsx prisma/role-authority-report.ts",
     "build": "prisma generate && tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "echo \"(no linter configured for @hardware-pos/database yet)\"",
@@ -28,7 +32,8 @@
     "seed": "tsx prisma/seed.ts"
   },
   "dependencies": {
-    "@prisma/client": "^6.1.0"
+    "@prisma/client": "^6.1.0",
+    "@hardware-pos/shared": "workspace:*"
   },
   "devDependencies": {
     "@types/bcryptjs": "^2.4.6",

@@ -1,31 +1,82 @@
+import type { PromotionRule } from '@hardware-pos/shared';
+
 import { api } from './api';
+import { renderThermalBill, type ThermalBillInput } from './thermal-bill';
+import {
+  pageHeightMm,
+  readBillGeometry,
+  resolveBillGeometry,
+  type BillGeometry,
+} from './thermal-bill-geometry';
 import type { Session } from './auth';
 import type { CartItem } from './cart';
-import { computeLine } from './cart';
+import { computeCartLines, linePrice } from './cart';
 import type { CompletedSale } from './sales';
+import { getCachedDocumentProfile, type DocumentProfile } from './document-template-service';
 import { formatMoney } from './utils';
+import {
+  saleLineLabel,
+  saleLinePromotionNote,
+  saleLineQuantity,
+  splitLineDiscounts,
+  taxRateLabel,
+} from '@hardware-pos/shared';
 
 export interface ReceiptContext {
   currency: string;
   customerName: string;
   items: CartItem[];
+  /**
+   * D123 (4.4) — the promotions this sale was priced with. Empty is safe and
+   * means "none applied"; without them the fallback would print pre-promotion
+   * line totals under a post-promotion total.
+   */
+  promotionRules?: readonly PromotionRule[];
   subtotal: number;
   totalDiscount: number;
   orderDiscount: number;
   taxAmount: number;
+  /** D122 (3.12) — per-rate rows, empty when a single rate covers the sale. */
+  taxBreakdown?: { ratePercent: number; taxAmount: number }[];
   storeName?: string;
 }
 
 function esc(v: unknown): string {
-  return String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return String(v ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
 }
 
 /** Minimal printable receipt used as a fallback when the server render fails. */
 function clientReceiptHtml(sale: CompletedSale, ctx: ReceiptContext): string {
+  const priced = new Map(
+    computeCartLines(ctx.items, ctx.promotionRules ?? []).map((l) => [l.lineKey, l]),
+  );
+  /*
+   * D123 (4.6) — the SHARED split, so this fallback and the server receipt
+   * divide the same figure the same way. The live cart is the source here, so
+   * the promotional part is summed from the lines just priced.
+   */
+  const split = splitLineDiscounts(
+    [...priced.values()].map((l) => ({ promotionDiscountAmount: l.promotionDiscountAmount })),
+    ctx.totalDiscount,
+  );
   const rows = ctx.items
     .map((it) => {
-      const line = computeLine(it);
-      return `<tr><td>${esc(it.product.name)}<br><span class="m">${it.quantity} × ${formatMoney(it.product.unitPrice, ctx.currency)}</span></td><td class="r">${formatMoney(line.lineTotal, ctx.currency)}</td></tr>`;
+      const line = priced.get(it.lineKey)!;
+      // D120 (1c.7 / 2.12) — the size goes on the paper. Unlike the server
+      // document this reads the live cart rather than a snapshot, because it
+      // prints at the moment of sale: there is nothing yet to have drifted from.
+      // The FORMAT is shared, so this fallback and the server render identically.
+      const label = saleLineLabel(it.product.name, it.variant?.name ?? null);
+      // D123 (4.6) — the offer, under the item, exactly as the other three
+      // renderers print it. A free line at 0.00 with no reason reads as an error.
+      // D134d (`6.5`) — the unit beside the amount: `0.75 kg × Rs 200.00`. Read
+      // from the LIVE product like the label above, and for the same reason —
+      // this prints at the moment of sale, so nothing has drifted yet.
+      const promo = saleLinePromotionNote(line.promotionName);
+      return `<tr><td>${esc(label)}${promo ? `<br><span class="m">${esc(promo)}</span>` : ''}<br><span class="m">${saleLineQuantity(it.quantity, it.product.unitOfMeasure)} × ${formatMoney(linePrice(it), ctx.currency)}</span></td><td class="r">${formatMoney(line.lineTotal, ctx.currency)}</td></tr>`;
     })
     .join('');
   return `<!doctype html><html><head><meta charset="utf-8"><title>Receipt ${esc(sale.saleNumber)}</title>
@@ -36,13 +87,20 @@ table{width:100%;border-collapse:collapse;font-size:12px}td{padding:3px 0;vertic
 .row{display:flex;justify-content:space-between;padding:1px 0}.g{font-weight:bold;font-size:14px;border-top:1px solid #333;margin-top:3px;padding-top:3px}
 .btn{display:block;margin:0 auto 12px;padding:8px 16px;cursor:pointer}@media print{.btn{display:none}body{padding:0}}</style></head>
 <body><button class="btn" onclick="window.print()">Print</button>
-<h1>${esc(ctx.storeName ?? 'Hardware POS')}</h1>
+<h1>${esc(ctx.storeName ?? getCachedDocumentProfile().companyName ?? '')}</h1>
 <div class="sub">Sales Receipt · ${esc(sale.saleNumber)}<br>Customer: ${esc(ctx.customerName)}</div>
 <table>${rows}</table>
 <div class="tot">
 <div class="row"><span>Subtotal</span><span>${formatMoney(ctx.subtotal, ctx.currency)}</span></div>
-<div class="row"><span>Product discount</span><span>-${formatMoney(ctx.totalDiscount, ctx.currency)}</span></div>
+${split.manual > 0 ? `<div class="row"><span>Product discount</span><span>-${formatMoney(split.manual, ctx.currency)}</span></div>` : ''}
+${split.promotional > 0 ? `<div class="row"><span>Promotions</span><span>-${formatMoney(split.promotional, ctx.currency)}</span></div>` : ''}
 ${ctx.orderDiscount > 0 ? `<div class="row"><span>Order discount</span><span>-${formatMoney(ctx.orderDiscount, ctx.currency)}</span></div>` : ''}
+${(ctx.taxBreakdown ?? [])
+  .map(
+    (t) =>
+      `<div class="row"><span>Tax @ ${esc(taxRateLabel(t.ratePercent))}</span><span>${formatMoney(t.taxAmount, ctx.currency)}</span></div>`,
+  )
+  .join('')}
 <div class="row"><span>Tax</span><span>${formatMoney(ctx.taxAmount, ctx.currency)}</span></div>
 <div class="row g"><span>Total</span><span>${formatMoney(sale.total, ctx.currency)}</span></div>
 <div class="row"><span>Paid</span><span>${formatMoney(sale.paidAmount, ctx.currency)}</span></div>
@@ -52,33 +110,212 @@ ${ctx.orderDiscount > 0 ? `<div class="row"><span>Order discount</span><span>-${
 
 let printTimer: number | null = null;
 
-function openPrintWindow(html: string): void {
-  // One *named* popup, reused across prints: repeated clicks replace the
-  // receipt in place instead of stacking new windows and print dialogs
-  // (which eventually hangs the tab).
-  const win = window.open('', 'hpos-receipt-print', 'width=420,height=680');
-  if (!win) return;
-  if (printTimer != null) window.clearTimeout(printTimer);
-  win.document.open();
-  win.document.write(html);
-  win.document.close();
-  win.focus();
-  printTimer = window.setTimeout(() => {
-    printTimer = null;
-    win.print();
-  }, 400);
+/**
+ * A print window opened NOW, filled in later.
+ *
+ * D74 — the popup must be opened in the click's own turn. Browsers grant a
+ * gesture a few seconds of "transient activation" and `window.open` after an
+ * `await` gambles on that not having lapsed: the bill screen fetches the
+ * document profile first, so on a slow connection the popup is simply
+ * blocked and the operator sees nothing happen at all.
+ *
+ * `abort()` exists because a window opened up front must not be left blank
+ * and orphaned when the data it was opened for fails to arrive.
+ */
+/**
+ * D78 — print a receipt from a hidden IFRAME, not a popup window.
+ *
+ * Three rounds were spent trying to make a popup close itself: the opener
+ * cannot reliably close it (Chrome ignores `close()` while the preview is
+ * up, and does not deliver `afterprint` to a listener the opener
+ * registered), and a script inside the document did not do it either.
+ *
+ * An iframe removes the problem rather than patching it. There is no window
+ * to close: the print dialog opens over the app, and when it is dismissed
+ * the operator is already back where they were. Cleanup is a detached DOM
+ * node — if it were ever delayed, nobody would see anything, which is the
+ * opposite of a receipt window left standing open.
+ *
+ * It also drops the popup blocker from the picture entirely, so the document
+ * profile can be fetched before printing without racing a user gesture.
+ */
+export function printReceipt(html: string, options: { fitToContent?: boolean } = {}): void {
+  const frame = document.createElement('iframe');
+  frame.setAttribute('aria-hidden', 'true');
+  frame.title = 'Receipt';
+  /*
+   * D99 — nothing is visible in this frame, so there is nothing to scroll. A
+   * scrollbar drawn on its initial containing block would narrow the layout
+   * column, move every wrap, and change the height that gets measured.
+   */
+  frame.setAttribute('scrolling', 'no');
+  /*
+   * The width is provisional until the document is written. A document that
+   * carries no geometry — a retail receipt, a quotation, anything the server
+   * rendered — lays out at the default page width, exactly as it always has.
+   */
+  const provisional = resolveBillGeometry(null);
+  frame.style.cssText = frameCss(provisional);
+  document.body.appendChild(frame);
+
+  const win = frame.contentWindow;
+  const doc = frame.contentDocument ?? win?.document;
+  if (!win || !doc) {
+    frame.remove();
+    return;
+  }
+  doc.open();
+  doc.write(html);
+  doc.close();
+
+  /*
+   * D99 — the geometry travels INSIDE the document, so the width this frame
+   * lays out at and the width the stylesheet prints at are the same numbers by
+   * construction rather than by two people remembering. Set before the height
+   * is measured, or the measurement is taken against the provisional width and
+   * the error is silent on any roll that is not 78mm.
+   */
+  const g = readBillGeometry(doc) ?? provisional;
+  frame.style.cssText = frameCss(g);
+
+  const cleanup = () => frame.remove();
+
+  void whenImagesSettle(doc).then(() => {
+    // An explicit `false` overrides the document: a retail receipt prints to
+    // whatever sheet the till is set up with (D16), whatever a bill would ask.
+    if (options.fitToContent !== false && g.fitToContent) fitPageToContent(win, g);
+    // A beat for the injected @page rule and final layout to take effect.
+    window.setTimeout(() => {
+      win.focus();
+      win.print();
+      /*
+       * Removed on `afterprint` where the browser sends it, and on a timer
+       * regardless. The frame is invisible, so a late removal costs nothing
+       * — and removing it too early would tear the document out from under
+       * a dialog that is still open.
+       */
+      win.addEventListener('afterprint', cleanup, { once: true });
+      window.setTimeout(cleanup, 60_000);
+    }, 120);
+  });
 }
 
-/** Print the customer receipt: server-rendered, with a client-side fallback. */
+/**
+ * D75/D79 — make the printed page exactly as tall as the receipt.
+ *
+ * Only for thermal bills, and only useful once the driver can honour it: the
+ * PO's Xprinter had a Maximum Length of 101.6 mm, so every page-sized request
+ * beyond that was refused and the receipt split. Raising that length in the
+ * driver is what made this work.
+ *
+ * `size: 78mm auto` would be the obvious thing to write and is invalid CSS —
+ * the property takes one or two lengths — so the height is measured. After
+ * images settle: a logo that has not decoded reports no height and would
+ * truncate the receipt to the height of its text.
+ *
+ * D102 — the height itself comes from `pageHeightMm`, which floors it above the
+ * paper width. Those two lengths carry the ORIENTATION: a page wider than it is
+ * tall is a landscape page, and a bill short enough to hit that printed
+ * sideways on the roll.
+ */
+function fitPageToContent(win: Window, g: BillGeometry): void {
+  const doc = win.document;
+  const heightPx = Math.max(doc.body.scrollHeight, doc.documentElement.scrollHeight);
+  /*
+   * Nothing laid out — leave the driver's own sheet alone. Deliberately NOT
+   * the D102 floor: a failed measurement is a bug, and printing a minimum-size
+   * page would hide it behind a plausible-looking receipt.
+   */
+  if (heightPx <= 0) return;
+  /*
+   * D102 — the arithmetic, including the floor that keeps the page taller than
+   * it is wide, belongs to the geometry module. A height computed here would be
+   * a second source of truth for the one number that decides which way up the
+   * bill comes out.
+   */
+  const heightMm = pageHeightMm(g, heightPx);
+  const style = doc.createElement('style');
+  style.dataset.role = 'page-size';
+  /*
+   * The PAGE width, not the content width. The page box matches the driver's
+   * stock so nothing is ever centred — that is the D79 lesson D99 leaves
+   * intact — and the insets in the body are what hold the text off the head.
+   */
+  style.textContent = `@page{size:${g.pageWidthMm}mm ${heightMm}mm;margin:0}`;
+  doc.head.appendChild(style);
+}
+
+/**
+ * The whole frame style, in one string, so the provisional layout and the
+ * geometry-driven one cannot be written two different ways.
+ *
+ * Off-screen rather than zero-sized: the document has to LAY OUT at the
+ * receipt's true width, because the page height is measured from it. A 0×0
+ * frame lays out at zero width, wraps every line, and would report a height
+ * with nothing to do with the printed bill.
+ */
+function frameCss(g: BillGeometry): string {
+  return `position:fixed;left:-10000px;top:0;width:${g.pageWidthPx}px;height:0;border:0;visibility:hidden`;
+}
+
+/**
+ * Resolve once every image has loaded or failed, with a ceiling.
+ *
+ * `print()` captures the document as it stands: fire it while the tenant's
+ * logo is still decoding and the logo prints as a blank box. `error` counts
+ * as settled — a broken image must not hold the dialog hostage — and the
+ * 4 s ceiling means an unreachable host cannot mean a dialog that never
+ * opens, which reads as "the button is broken".
+ */
+function whenImagesSettle(doc: Document): Promise<unknown> {
+  const pending = Array.from(doc.images)
+    .filter((img) => !img.complete)
+    .map(
+      (img) =>
+        new Promise<void>((resolve) => {
+          img.addEventListener('load', () => resolve(), { once: true });
+          img.addEventListener('error', () => resolve(), { once: true });
+        }),
+    );
+  return Promise.race([
+    Promise.all(pending),
+    new Promise((resolve) => window.setTimeout(resolve, 4000)),
+  ]);
+}
+
+/**
+ * D79 — kept for the callers that still say "open a print window", but there
+ * is no window: it delegates to the iframe.
+ *
+ * Every popup-based path had the same defect — a receipt window the operator
+ * had to close by hand — and fixing it per call site would have left the next
+ * one to rediscover it. The page SIZE is not touched here: a retail receipt
+ * prints to whatever sheet the till is set up with (D16), and only the
+ * thermal bill asks to be sized to its content.
+ */
+export function openPrintWindow(html: string): void {
+  printReceipt(html, { fitToContent: false });
+}
+
+/**
+ * Print the customer receipt: server-rendered, with a client-side fallback.
+ *
+ * D183 — `amountTendered` is what the operator actually took, and it is
+ * sent only from the till, where it was observed. The server prints
+ * "Cash received" and "Change" from it and ignores it unless it exceeds the
+ * total; it changes no stored money. `reprintCustomerReceipt` below sends
+ * nothing, because a reprint has no honest tender to claim.
+ */
 export async function printCustomerReceipt(
   session: Session,
   sale: CompletedSale,
   ctx: ReceiptContext,
+  amountTendered?: number,
 ): Promise<void> {
   try {
     const res = await api.post<{ printJob: { html: string } }>(
       `/receipts/${sale.id}/customer`,
-      undefined,
+      amountTendered != null ? { amountTendered } : undefined,
       { token: session.token, tenantId: session.user.tenantId },
     );
     openPrintWindow(res.printJob.html);
@@ -107,4 +344,95 @@ export async function reprintCustomerReceipt(session: Session, saleId: string): 
   } finally {
     reprintInFlight = false;
   }
+}
+
+/**
+ * D69/D72 — the whole table bill, printed by the cashier.
+ *
+ * Rendered CLIENT-side, deliberately: `/receipts/:saleId/customer` sits
+ * behind `@RequireModule(RETAIL_POS)` and answers 403 to every food-service
+ * workspace, owner included.
+ *
+ * D72 replaced the ad-hoc markup with `renderThermalBill`, so this and the
+ * split bill below print the SAME document — same header, same columns, same
+ * totals block. Two hand-written receipt templates is how a tenant ends up
+ * with a logo on one bill and not the other.
+ */
+export function printTableBill(
+  input: Omit<ThermalBillInput, 'profile'> & {
+    profile?: DocumentProfile;
+  },
+): void {
+  printReceipt(
+    renderThermalBill({ ...input, profile: input.profile ?? getCachedDocumentProfile() }),
+  );
+}
+
+/**
+ * D51 — a printable bill for ONE split: the lines that party ate and what
+ * they owe. D72 routes it through the shared thermal template so a split
+ * bill and a whole bill are the same document with different lines.
+ */
+export function printSplitBill(input: SplitBillInput): void {
+  printReceipt(renderSplitBill(input));
+}
+
+export interface SplitBillInput {
+  storeName: string;
+  currency?: string;
+  saleNumber: string;
+  splitLabel: string;
+  items: Array<{ name: string; quantity: string; lineTotal: string }>;
+  share: string;
+  paidAmount: string;
+  profile?: DocumentProfile;
+  servedBy?: string | null;
+  placeLabel?: string | null;
+  issuedAt?: Date;
+}
+
+/**
+ * D74 — composing the split bill is separate from printing it, so a caller
+ * that must open its popup inside the click (before the profile has been
+ * fetched) can render into a window it already holds.
+ */
+export function renderSplitBill(input: SplitBillInput): string {
+  const balance = (Number(input.share) - Number(input.paidAmount)).toFixed(2);
+  return renderThermalBill({
+    profile: input.profile ?? getCachedDocumentProfile(),
+    fallbackName: input.storeName,
+    currency: input.currency,
+    documentNumber: input.saleNumber,
+    placeLabel: input.placeLabel ?? null,
+    servedBy: input.servedBy ?? null,
+    // Whose bill this is — the one thing that distinguishes four bills
+    // printed off one table within a minute of each other.
+    copyLabel: input.splitLabel,
+    issuedAt: input.issuedAt ?? new Date(),
+    lines: input.items.map((it) => ({
+      name: it.name,
+      quantity: it.quantity,
+      lineTotal: it.lineTotal,
+    })),
+    // A split's share IS its total: the server has already apportioned the
+    // service charge and every other bill-level amount into it, so listing
+    // those again here would double-count them on the paper.
+    subtotal: input.share,
+    total: input.share,
+    paid: input.paidAmount,
+    balance,
+  });
+}
+
+/**
+ * D54 — the split bill printed bare decimals with no currency at all, the one
+ * customer-facing document in the app without a unit.
+ */
+function money(value: string, currency?: string): string {
+  return formatMoney(Number(value), currency);
+}
+
+/** "2.000" reads badly on a bill; "2" and "0.5" do. */
+function trimQty(q: string): string {
+  return String(Number(q));
 }

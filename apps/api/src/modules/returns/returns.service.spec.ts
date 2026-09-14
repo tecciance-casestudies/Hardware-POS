@@ -1,6 +1,13 @@
 import { BadRequestException, ForbiddenException } from '@nestjs/common';
 
 import { ReturnsService } from './returns.service';
+import { AccountingProviderFactory } from '../providers/accounting/accounting-provider.factory';
+import { NoAccountingProvider } from '../providers/accounting/no-accounting.provider';
+import { QuickBooksAccountingProvider } from '../providers/accounting/quickbooks-accounting.provider';
+import { InventoryProviderFactory } from '../providers/inventory/inventory-provider.factory';
+import { LocalInventoryProvider } from '../providers/inventory/local-inventory.provider';
+import { NoInventoryProvider } from '../providers/inventory/no-inventory.provider';
+import { QuickBooksInventoryProvider } from '../providers/inventory/quickbooks-inventory.provider';
 import type { ReturnsRepository } from './returns.repository';
 import type { SettingsService } from '../settings/settings.service';
 import type { AuthService } from '../auth/auth.service';
@@ -23,6 +30,13 @@ function makeSale(overrides: Partial<Record<string, unknown>> = {}) {
     paidAmount: 400,
     returnedAmount: 0,
     paymentStatus: 'PAID',
+    // Accounting provenance. Every completed sale carries these — the field was
+    // non-nullable before Slice 6A, and 317 of 317 rows in the development
+    // database have a document type. The fixture simply omitted them; Slice 6B
+    // reads them to decide which accounting system a return must reverse.
+    quickbooksDocumentType: 'SALES_RECEIPT',
+    quickbooksDocumentId: null,
+    syncStatus: 'PENDING',
     completedAt: new Date(),
     createdAt: new Date(),
     customer: null,
@@ -36,6 +50,10 @@ function makeSale(overrides: Partial<Record<string, unknown>> = {}) {
         unitPrice: 100,
         quantity: 4,
         discountAmount: 0,
+        // D123 (4.4) — the column is NOT NULL DEFAULT 0, so a real row always
+        // carries it. The double says so too (D30: a fixture must represent the
+        // production structure).
+        promotionDiscountAmount: 0,
         lineTotal: 400,
         returnedQuantity: 0,
         product: { id: 'p1', imageUrl: null },
@@ -62,9 +80,19 @@ const SETTINGS = {
   highDiscountThresholdPercent: 10,
   receiptFooter: 'Thanks',
   returns: RETURN_SETTINGS,
+  // D195 — the refund slip reads the same `documents.logoUrl` the sales bill
+  // and the A4 letterhead read. Null here: these specs assert the return's
+  // money and document decisions, and a tenant with no logo uploaded is the
+  // state they were written against.
+  documents: { logoUrl: null },
 };
 
-const CASHIER: AuthenticatedUser = { id: 'u1', tenantId: 't1', role: 'CASHIER' };
+const CASHIER: AuthenticatedUser = {
+  id: 'u1',
+  tenantId: 't1',
+  role: 'CASHIER',
+  activeBranchId: null,
+};
 
 function makeService(repo: Partial<ReturnsRepository>) {
   const settings = { getSettings: () => SETTINGS } as unknown as SettingsService;
@@ -74,7 +102,38 @@ function makeService(repo: Partial<ReturnsRepository>) {
   } as unknown as AuthService;
   const jwt = { signAsync: jest.fn(), verify: jest.fn() } as never;
   const syncQueue = { requeueReturn: jest.fn() } as never;
-  return new ReturnsService(repo as ReturnsRepository, settings, auth, jwt, syncQueue);
+  // The real factory, wired to the real providers: these tests assert the QuickBooks
+  // document decision, so stubbing the provider would assert the stub. Only
+  // `BusinessProfileService` is absent, and deliberately — `forSale` resolves from
+  // the sale's own provenance and must never reach the tenant profile. If it ever
+  // did, the `null` here would throw and the test would say so.
+  const accounting = new AccountingProviderFactory(
+    null as never,
+    new QuickBooksAccountingProvider(syncQueue, null as never),
+    new NoAccountingProvider(),
+  );
+  // Same reasoning for inventory: the real factory over the real providers, with
+  // `BusinessProfileService` stubbed to the legacy QuickBooks default rather than
+  // absent, because unlike accounting the inventory provider IS resolved from the
+  // tenant profile.
+  const inventory = new InventoryProviderFactory(
+    { getEffectiveProfile: async () => ({ inventoryMode: 'QUICKBOOKS' }) } as never,
+    new QuickBooksInventoryProvider(null as never, null as never),
+    new LocalInventoryProvider(null as never),
+    new NoInventoryProvider(),
+  );
+  return new ReturnsService(
+    repo as ReturnsRepository,
+    settings,
+    auth,
+    jwt,
+    syncQueue,
+    accounting,
+    inventory,
+    // D195 — resolves nothing, matching SETTINGS above. `inline-image.spec`
+    // covers the resolving behaviour itself.
+    { resolve: jest.fn(async () => null) } as never,
+  );
 }
 
 const goodItem = {
@@ -136,6 +195,10 @@ describe('ReturnsService.preview', () => {
           unitPrice: 100,
           quantity: 4,
           discountAmount: 0,
+          // D123 (4.4) — the column is NOT NULL DEFAULT 0, so a real row always
+          // carries it. The double says so too (D30: a fixture must represent the
+          // production structure).
+          promotionDiscountAmount: 0,
           lineTotal: 400,
           returnedQuantity: 3, // only 1 left
           product: { id: 'p1', imageUrl: null },

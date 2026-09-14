@@ -7,6 +7,7 @@ import {
   Product,
 } from '@hardware-pos/database';
 
+import { mirrorExternalRef } from '../quickbooks/external-ref';
 import { PrismaService } from '../../prisma/prisma.service';
 
 export interface ProductSearchFilters {
@@ -21,6 +22,8 @@ export interface ProductListFilters {
   search?: string;
   categoryId?: string;
   subcategoryId?: string;
+  /** D133 (`8.9`) — everything carrying one label. */
+  brandId?: string;
   isActive?: boolean;
   type?: string;
   syncStatus?: Prisma.ProductWhereInput['syncStatus'];
@@ -61,6 +64,46 @@ export class ProductsRepository {
       this.prisma.product.findMany({ where, orderBy: { name: 'asc' }, skip, take }),
       this.prisma.product.count({ where }),
     ]);
+  }
+
+  /**
+   * Active-variant count and price span for a page of products.
+   *
+   * D44 says the parent-level `unitPrice` / `sku` are legacy fallbacks that are
+   * "not read" once `hasVariants` is true — the variant rows own them. The admin
+   * list and the product picker were reading them anyway and rendering Rs 0.00
+   * against every variant product in the catalogue.
+   *
+   * A separate groupBy rather than an `include` on the list query: including the
+   * variant rows would put a 12-row array on every product in the response just
+   * to derive three numbers, and would change the shape the controller returns.
+   *
+   * Inactive variants are excluded — a discontinued colour must not widen the
+   * price range an operator sees.
+   */
+  async variantPriceSummary(
+    tenantId: string,
+    productIds: string[],
+  ): Promise<Map<string, { count: number; min: number | null; max: number | null }>> {
+    const out = new Map<string, { count: number; min: number | null; max: number | null }>();
+    if (productIds.length === 0) return out;
+
+    const rows = await this.prisma.productVariant.groupBy({
+      by: ['productId'],
+      where: { tenantId, productId: { in: productIds }, isActive: true },
+      _count: { _all: true },
+      _min: { unitPrice: true },
+      _max: { unitPrice: true },
+    });
+
+    for (const r of rows) {
+      out.set(r.productId, {
+        count: r._count._all,
+        min: r._min.unitPrice == null ? null : Number(r._min.unitPrice),
+        max: r._max.unitPrice == null ? null : Number(r._max.unitPrice),
+      });
+    }
+    return out;
   }
 
   /** Structured search combining name / sku / category / active status. */
@@ -119,6 +162,10 @@ export class ProductsRepository {
         : {}),
       ...(filters.categoryId ? { categoryId: filters.categoryId } : {}),
       ...(filters.subcategoryId ? { subcategoryId: filters.subcategoryId } : {}),
+      // D133 (`8.9`) — brand as a filter, beside the category filters it sits
+      // with in the UI. Indexed on `Product.brandId`, declared explicitly
+      // because PostgreSQL does not index a foreign key on its own.
+      ...(filters.brandId ? { brandId: filters.brandId } : {}),
       ...(filters.isActive !== undefined ? { isActive: filters.isActive } : {}),
       ...(filters.type ? { type: filters.type } : {}),
       ...(filters.syncStatus ? { syncStatus: filters.syncStatus } : {}),
@@ -191,10 +238,16 @@ export class ProductsRepository {
           lastSyncedAt: now,
         };
 
-        await tx.product.upsert({
+        const upserted = await tx.product.upsert({
           where: { tenantId_quickbooksItemId: { tenantId, quickbooksItemId: p.quickbooksItemId } },
           update: data,
           create: { tenantId, quickbooksItemId: p.quickbooksItemId, ...data },
+        });
+        // D63 dual-write.
+        await mirrorExternalRef(tx, tenantId, 'PRODUCT', upserted.id, {
+          externalId: p.quickbooksItemId,
+          syncStatus: 'SYNCED',
+          lastSyncedAt: now,
         });
 
         if (existing) updated++;
